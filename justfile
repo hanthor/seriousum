@@ -188,3 +188,20 @@ NC := '\033[0m' # No Color
 # Full clean (also deletes kind cluster)
 @clean-all: cluster-delete clean
     echo "{{GREEN}}Full clean complete!{{NC}}"
+
+# Run multiple test suites sequentially on a single cluster (efficient)
+@test-sequential timeout=TEST_TIMEOUT:
+    echo "{{BLUE}}Running test suites sequentially{{NC}}"
+    ./scripts/run-cilium-sequential-suites.sh --test-timeout "{{timeout}}"
+
+# Run all major suites sequentially with default timeout
+@test-all-sequential timeout=TEST_TIMEOUT:
+    echo "{{BLUE}}Running all major suites sequentially{{NC}}"
+    ./scripts/run-cilium-sequential-suites.sh \
+        --suites "K8sAgentFQDNTest,K8sDatapathServicesTest,K8sAgentPolicyTest" \
+        --test-timeout "{{timeout}}"
+
+# Profile Cilium startup sequence to identify bottlenecks
+@profile-startup:
+    echo "{{BLUE}}Profiling Cilium startup sequence...{{NC}}"
+    ./scripts/profile-cilium-startup.sh
