@@ -159,6 +159,53 @@ NC := '\033[0m' # No Color
     bash -n ./scripts/build-cilium-dropin.sh
     echo "{{GREEN}}All scripts valid!{{NC}}"
 
+# Full pipeline: build images, create cluster, load, and run tests for a suite
+# Usage: just run [suite] [timeout]
+# Examples: just run           # Run K8sFQDNTest (fastest, 3 specs)
+#           just run K8sDatapathServicesTest
+#           just run K8sAgentPolicyTest 30m
+@run suite='K8sFQDNTest' timeout=TEST_TIMEOUT:
+    echo "{{GREEN}}Starting full build and test pipeline for {{suite}}{{NC}}"
+    echo "Suite: {{suite}}"
+    echo "Timeout: {{timeout}}"
+    echo ""
+    
+    echo "{{BLUE}}[1/5] Building release binaries...{{NC}}"
+    cargo build --workspace --release
+    echo "{{GREEN}}✓ Binaries built{{NC}}"
+    echo ""
+    
+    echo "{{BLUE}}[2/5] Building container images...{{NC}}"
+    ./images/build-cilium-images.sh
+    echo "{{GREEN}}✓ Images built{{NC}}"
+    echo ""
+    
+    echo "{{BLUE}}[3/5] Resetting kind cluster...{{NC}}"
+    kind delete cluster --name {{KIND_CLUSTER}} >/dev/null 2>&1 || true
+    mkdir -p target/cilium-kind
+    kind create cluster --name {{KIND_CLUSTER}} --kubeconfig ./target/cilium-kind/kind.kubeconfig
+    echo "{{GREEN}}✓ Cluster ready{{NC}}"
+    echo ""
+    
+    echo "{{BLUE}}[4/5] Loading images into cluster...{{NC}}"
+    export KUBECONFIG=./target/cilium-kind/kind.kubeconfig
+    kind load docker-image --name {{KIND_CLUSTER}} localhost:5000/seriousum/cilium-agent:local
+    kind load docker-image --name {{KIND_CLUSTER}} localhost:5000/seriousum/cilium-dbg:local
+    kind load docker-image --name {{KIND_CLUSTER}} localhost:5000/seriousum/operator-generic:local
+    kind load docker-image --name {{KIND_CLUSTER}} localhost:5000/seriousum/hubble:local
+    kind load docker-image --name {{KIND_CLUSTER}} localhost:5000/seriousum/clustermesh-apiserver:local
+    echo "{{GREEN}}✓ Images loaded{{NC}}"
+    echo ""
+    
+    echo "{{BLUE}}[5/5] Running {{suite}} tests...{{NC}}"
+    export KUBECONFIG=./target/cilium-kind/kind.kubeconfig
+    export PATH="$PWD/target/cilium-dropin:$PATH"
+    ./scripts/run-cilium-kind-test.sh \
+        --focus "{{suite}}" \
+        --test-timeout "{{timeout}}" \
+        --skip-build \
+        --no-load
+
 # Full setup: build everything, load images, create cluster
 @setup: build build-images build-dropin cluster-reset load-images
     echo "{{GREEN}}Full setup complete! Run 'just test-services' to test.{{NC}}"
