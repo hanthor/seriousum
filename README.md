@@ -597,35 +597,35 @@ Seriousum builds on the excellent work of the Cilium community. Special thanks t
 <!-- BENCHMARK_START -->
 ## 📊 Benchmarks
 
-> Last run: **2026-05-11 21:12 UTC** · commit `ddaa658`
+> Last run: **2026-05-11 23:45 UTC** · commit `ac32013`
 > Published comparison report: [docs/generated/BENCHMARKS.md](docs/generated/BENCHMARKS.md)
 
-| Metric | Seriousum | Cilium | Delta vs Cilium |
+| Metric | Seriousum | Cilium | Relative |
 |---|---:|---:|---:|
 | Agent binary size | **2725 KB** | 126612 KB | -97.8% |
+| Selector match hot path | **36.58 ns** | 4.27 ns | 8.57x |
+| IP allocator hot path | **140.34 ns** | 405.40 ns | 0.35x |
 
 ### Seriousum micro-benchmarks
 
 | Benchmark | Median |
 |---|---:|
-| LB round-robin (8 backends) | 4.10 ns |
-| LB consistent hash (8 backends) | 7.05 ns |
-| Policy eval (1 policy) | 5.62 µs |
-| Policy eval (100 policies) | 11.57 µs |
-| Selector match (hit) | 35.54 ns |
-| IPAM alloc + release ×1000 | 3.19 ms |
+| LB round-robin (8 backends) | 4.11 ns |
+| LB consistent hash (8 backends) | 7.13 ns |
+| Policy eval (1 policy) | 5.63 µs |
+| Policy eval (100 policies) | 11.69 µs |
+| Selector match (hit) | 36.58 ns |
+| IPAM alloc warm pool | 140.34 ns |
+| IPAM alloc + release ×1000 | 3.16 ms |
 
-> Note: system-level startup / memory / CPU comparisons are queued for a kind-capable CI runner. This host could not boot kind successfully due kubelet/cgroup limits.
+> System startup / memory / CPU status: **pending-kind-capable-runner**
 
 <details>
 <summary>Reproduce locally</summary>
 
-```bash
-cargo build --profile bench --benches
-find target/release/deps -maxdepth 1 -type f -name 'load_balancer-*' ! -name '*.d' | head -1 | xargs -r -I{} {} --bench
-find target/release/deps -maxdepth 1 -type f -name 'policy_eval-*' ! -name '*.d' | head -1 | xargs -r -I{} {} --bench
-find target/release/deps -maxdepth 1 -type f -name 'ipam-*' ! -name '*.d' | head -1 | xargs -r -I{} {} --bench
-```
+~~~bash
+./scripts/benchmark.sh --skip-kind --cilium-source /path/to/cilium
+~~~
 
 </details>
 <!-- BENCHMARK_END -->

@@ -52,6 +52,20 @@ fn bench_ipam_alloc_release_cycle(c: &mut Criterion) {
     });
 }
 
+fn bench_ipam_allocate_warm_pool(c: &mut Criterion) {
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    let ipam = make_manager(8192);
+
+    c.bench_function("ipam_allocate_warm_pool", |b| {
+        b.iter(|| {
+            rt.block_on(async {
+                let ip = ipam.allocate_ip().await.unwrap();
+                ipam.release_ip(black_box(ip)).await.unwrap();
+            })
+        })
+    });
+}
+
 fn bench_ipam_concurrent(c: &mut Criterion) {
     let rt = tokio::runtime::Builder::new_multi_thread()
         .worker_threads(4)
@@ -80,5 +94,11 @@ fn bench_ipam_concurrent(c: &mut Criterion) {
     });
 }
 
-criterion_group!(ipam_benches, bench_ipam_allocate, bench_ipam_alloc_release_cycle, bench_ipam_concurrent);
+criterion_group!(
+    ipam_benches,
+    bench_ipam_allocate,
+    bench_ipam_alloc_release_cycle,
+    bench_ipam_allocate_warm_pool,
+    bench_ipam_concurrent,
+);
 criterion_main!(ipam_benches);

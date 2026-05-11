@@ -1,30 +1,33 @@
 {
-  "timestamp": "2026-05-11 21:12 UTC",
-  "git_sha": "ddaa658",
+  "timestamp": "2026-05-11 23:45 UTC",
+  "git_sha": "ac32013",
   "cilium_image": "quay.io/cilium/cilium-ci:latest",
+  "cilium_source": "/var/home/james/dev/cilium",
+  "system_status": "pending-kind-capable-runner",
   "comparison": {
-    "agent_binary_size_kb": {
-      "seriousum": 2725,
-      "cilium": 126612,
-      "delta_vs_cilium": "-97.8%"
-    }
+    "agent_binary_size_kb": {"seriousum": "2725", "cilium": "126612", "delta": "-97.8%"},
+    "selector_match_hit": {"seriousum": "36.58 ns", "cilium": "4.27 ns", "ratio": "8.57x"},
+    "ip_allocator_hot_path": {"seriousum": "140.34 ns", "cilium": "405.40 ns", "ratio": "0.35x"},
+    "maglev_table_build": {"seriousum": "117.45 µs", "cilium": "3.30 ms", "ratio": "0.04x"}
   },
-  "system_metrics": {
-    "startup_seconds": "pending-kind-capable-runner",
-    "idle_memory_mib": "pending-kind-capable-runner",
-    "idle_cpu_mcores": "pending-kind-capable-runner"
+  "system": {
+    "startup_seconds": {"seriousum": "N/A", "cilium": "N/A", "delta": "N/A"},
+    "idle_memory_mib": {"seriousum": "N/A", "cilium": "N/A", "delta": "N/A"},
+    "idle_cpu_mcores": {"seriousum": "N/A", "cilium": "N/A", "delta": "N/A"}
   },
   "microbench_seriousum": {
-    "lb_round_robin_8_backends": "4.10 ns",
-    "lb_consistent_hash_8_backends": "7.05 ns",
-    "policy_eval_1_policy": "5.62 µs",
-    "policy_eval_100_policies": "11.57 µs",
-    "selector_match_hit": "35.54 ns",
-    "ipam_alloc_release_1000": "3.19 ms"
+    "lb_round_robin_8_backends": "4.11 ns",
+    "lb_consistent_hash_8_backends": "7.13 ns",
+    "policy_eval_1_policy": "5.63 µs",
+    "policy_eval_100_policies": "11.69 µs",
+    "selector_match_hit": "36.58 ns",
+    "ipam_allocate_warm_pool": "140.34 ns",
+    "ipam_alloc_release_1000": "3.16 ms",
+    "maglev_table_build_1000": "117.45 µs"
   },
-  "notes": [
-    "Binary comparison is measured directly against upstream Cilium agent extracted from the official cilium-ci image.",
-    "System-level Helm+kind metrics could not be completed on this host because kind bootstrap failed due kubelet/cgroup limitations.",
-    "Micro-benchmarks were executed locally from Criterion benchmark binaries and parsed from target/criterion estimates."
-  ]
+  "microbench_cilium_go": {
+    "selector_matches_valid_1000": "4.27 ns",
+    "ipalloc_alloc_any": "405.40 ns",
+    "maglev_get_lookup_table_16381": "3.30 ms"
+  }
 }

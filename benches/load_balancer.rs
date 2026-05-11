@@ -45,5 +45,12 @@ fn bench_round_robin_baseline(c: &mut Criterion) {
     group.finish();
 }
 
-criterion_group!(lb_benches, bench_round_robin_baseline, bench_maglev);
+fn bench_maglev_build(c: &mut Criterion) {
+    let backends = make_backends(1000);
+    c.bench_function("lb_maglev_build_1000", |b| {
+        b.iter(|| black_box(MaglevHash::new(black_box(backends.clone())).unwrap()))
+    });
+}
+
+criterion_group!(lb_benches, bench_round_robin_baseline, bench_maglev, bench_maglev_build);
 criterion_main!(lb_benches);

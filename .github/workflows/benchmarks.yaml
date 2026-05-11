@@ -5,13 +5,12 @@ on:
     branches: [main]
     paths-ignore:
       - 'docs/archive/**'
-      - '*.md'
   schedule:
     - cron: '0 3 * * 1'
   workflow_dispatch:
     inputs:
-      skip-kind:
-        description: 'Skip kind cluster benchmarks and only run micro-benchmarks'
+      run-system-benchmarks:
+        description: 'Also run Helm+kind system benchmarks (requires kind-capable runner)'
         type: boolean
         default: false
 
@@ -23,49 +22,49 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
-  benchmark-and-publish:
-    name: Run and publish benchmarks
+  micro-benchmarks:
+    name: Publish benchmark report
     runs-on: ubuntu-24.04
-    timeout-minutes: 90
+    timeout-minutes: 60
 
     steps:
       - uses: actions/checkout@v4
         with:
           persist-credentials: true
+          path: seriousum
+
+      - uses: actions/checkout@v4
+        with:
+          repository: cilium/cilium
+          path: cilium
 
       - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: cilium/go.mod
       - uses: Swatinem/rust-cache@v2
         with:
+          workspaces: seriousum
           key: bench
 
-      - name: Install kind + kubectl + helm
-        run: |
-          curl -Lo ./kind https://kind.sigs.k8s.io/dl/v0.27.0/kind-linux-amd64
-          chmod +x ./kind && sudo mv ./kind /usr/local/bin/
-          curl -Lo ./kubectl https://dl.k8s.io/release/v1.33.1/bin/linux/amd64/kubectl
-          chmod +x ./kubectl && sudo mv ./kubectl /usr/local/bin/
-          curl https://raw.githubusercontent.com/helm/helm/main/scripts/get-helm-3 | bash
-
-      - name: Run benchmark publisher
-        run: |
-          if [[ "${{ inputs.skip-kind || false }}" == "true" ]]; then
-            ./scripts/benchmark.sh --skip-kind
-          else
-            ./scripts/benchmark.sh
-          fi
+      - name: Run micro benchmark publisher
+        working-directory: seriousum
+        run: ./scripts/benchmark.sh --skip-kind --cilium-source "$GITHUB_WORKSPACE/cilium"
 
       - name: Upload benchmark artifacts
         uses: actions/upload-artifact@v4
         with:
           name: benchmark-results
           path: |
-            target/bench/results.json
-            target/criterion/
-            docs/generated/BENCHMARKS.md
-            docs/generated/benchmark-results.json
+            seriousum/target/bench/results.json
+            seriousum/target/bench/cilium-go-bench.txt
+            seriousum/target/criterion/
+            seriousum/docs/generated/BENCHMARKS.md
+            seriousum/docs/generated/benchmark-results.json
           retention-days: 30
 
       - name: Commit published benchmark docs
+        working-directory: seriousum
         run: |
           git config user.name  "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
@@ -76,3 +75,53 @@ jobs:
             git commit -m "chore: publish benchmark comparison [skip ci]"
             git push
           fi
+
+  system-benchmarks:
+    name: Optional system benchmarks
+    if: ${{ github.event_name == 'workflow_dispatch' && inputs.run-system-benchmarks }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    continue-on-error: true
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: true
+          path: seriousum
+
+      - uses: actions/checkout@v4
+        with:
+          repository: cilium/cilium
+          path: cilium
+
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: cilium/go.mod
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: seriousum
+          key: bench-system
+
+      - name: Install kind + kubectl + helm
+        run: |
+          curl -Lo ./kind https://kind.sigs.k8s.io/dl/v0.27.0/kind-linux-amd64
+          chmod +x ./kind && sudo mv ./kind /usr/local/bin/
+          curl -Lo ./kubectl https://dl.k8s.io/release/v1.33.1/bin/linux/amd64/kubectl
+          chmod +x ./kubectl && sudo mv ./kubectl /usr/local/bin/
+          curl https://raw.githubusercontent.com/helm/helm/main/scripts/get-helm-3 | bash
+
+      - name: Run full benchmark publisher
+        working-directory: seriousum
+        run: ./scripts/benchmark.sh --cilium-source "$GITHUB_WORKSPACE/cilium"
+
+      - name: Upload system benchmark artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: benchmark-system-results
+          path: |
+            seriousum/target/bench/results.json
+            seriousum/target/bench/cilium-go-bench.txt
+            seriousum/docs/generated/BENCHMARKS.md
+            seriousum/docs/generated/benchmark-results.json
+          retention-days: 30

@@ -1,71 +1,80 @@
 # Benchmark Comparison: Seriousum vs Cilium
 
-_Last updated: 2026-05-11 21:12 UTC · commit `ddaa658`_
+_Last updated: 2026-05-11 23:45 UTC · commit `ac32013`_
 
 This report publishes the current benchmark comparison between **Seriousum** and **upstream Cilium**.
 
-## Methodology
+## What is directly compared
 
-### Binary comparison
-- Seriousum: `target/release/seriousum-daemon`
-- Cilium: `/usr/bin/cilium-agent` extracted from `quay.io/cilium/cilium-ci:latest`
+The most directly comparable measurements currently published are:
+- **Agent binary size**
+- **Selector matching hot path**
+- **Allocator hot path**
+- **Consistent-hash table build** (approximate, implementation details differ)
 
-### Micro-benchmarks
-- Framework: **criterion**
-- Seriousum benches executed directly from `target/release/deps/* --bench`
-- Results parsed from `target/criterion/**/new/estimates.json`
-- Scope: Seriousum internal hot paths used for regression tracking
+## Direct comparison
 
-### System-level comparison
-- Helm+kind system benchmarks are wired in the repo, but this host could not complete kind cluster boot due local kubelet/cgroup limitations.
-- The publishable comparison below therefore includes the directly measured binary comparison plus reproducible Seriousum micro-benchmarks.
+| Metric | Seriousum | Cilium | Relative |
+|---|---:|---:|---:|
+| Agent binary size | **2725 KB** | 126612 KB | -97.8% |
+| Selector match hot path | **36.58 ns** | 4.27 ns | 8.57x |
+| IP allocator hot path | **140.34 ns** | 405.40 ns | 0.35x |
+| Consistent-hash table build | **117.45 µs** | 3.30 ms | 0.04x |
 
-## Published Results
+### Benchmark mapping
+- Seriousum selector: 'selector_match/match_hit'
+- Cilium selector: 'pkg/policy/types BenchmarkMatchesValid1000'
+- Seriousum allocator: 'ipam_allocate_warm_pool'
+- Cilium allocator: 'pkg/ipalloc BenchmarkHashAlloc_AllocAny'
+- Seriousum hash-table build: 'lb_maglev_build_1000'
+- Cilium hash-table build: 'pkg/maglev BenchmarkGetMaglevTable/16381'
 
-### Direct Seriousum vs Cilium comparison
+## System metrics
 
 | Metric | Seriousum | Cilium | Delta vs Cilium |
 |---|---:|---:|---:|
-| Agent binary size | **2725 KB** | 126612 KB | -97.8% |
+| Startup time | **N/A s** | N/A s | N/A |
+| Idle memory (RSS / pod) | **N/A MiB** | N/A MiB | N/A |
+| Idle CPU | **N/A m** | N/A m | N/A |
 
-### Seriousum micro-benchmarks
+System metric status: **pending-kind-capable-runner**
+
+## Seriousum micro-benchmarks
 
 | Benchmark | Median |
 |---|---:|
-| Load balancer round-robin (8 backends) | 4.10 ns |
-| Load balancer consistent hash (8 backends) | 7.05 ns |
-| Policy evaluation (1 policy) | 5.62 µs |
-| Policy evaluation (100 policies) | 11.57 µs |
-| Selector match (hit) | 35.54 ns |
-| IPAM allocate + release ×1000 | 3.19 ms |
+| Load balancer round-robin (8 backends) | 4.11 ns |
+| Load balancer consistent hash select (8 backends) | 7.13 ns |
+| Policy evaluation (1 policy) | 5.63 µs |
+| Policy evaluation (100 policies) | 11.69 µs |
+| Selector match (hit) | 36.58 ns |
+| IPAM allocate warm pool | 140.34 ns |
+| IPAM allocate + release ×1000 | 3.16 ms |
+| Maglev table build (1000 backends) | 117.45 µs |
 
-### Pending CI-published system metrics
+## Upstream Cilium Go micro-benchmarks
 
-The following comparison slots are intentionally reserved and should be filled by CI or a host with working kind support:
-
-| Metric | Status |
-|---|---|
-| Startup time | Pending kind-capable runner |
-| Idle memory (RSS / pod) | Pending kind-capable runner |
-| Idle CPU | Pending kind-capable runner |
+| Benchmark | Result |
+|---|---:|
+| Selector match valid 1000 | 4.27 ns |
+| Hash allocator alloc any | 405.40 ns |
+| Maglev lookup table build 16381 | 3.30 ms |
 
 ## Reproduce locally
 
-```bash
-# Build the benchmark binaries
-cargo build --profile bench --benches
+~~~bash
+# Publish micro-benchmarks only
+./scripts/benchmark.sh --skip-kind --cilium-source /path/to/cilium
 
-# Run the three Criterion suites directly
-find target/release/deps -maxdepth 1 -type f -name 'load_balancer-*' ! -name '*.d' | head -1 | xargs -r -I{} {} --bench
-find target/release/deps -maxdepth 1 -type f -name 'policy_eval-*' ! -name '*.d' | head -1 | xargs -r -I{} {} --bench
-find target/release/deps -maxdepth 1 -type f -name 'ipam-*' ! -name '*.d' | head -1 | xargs -r -I{} {} --bench
+# Publish full report if your host can run kind
+./scripts/benchmark.sh --cilium-source /path/to/cilium
 
-# Inspect parsed results
+# Inspect machine-readable results
 cat docs/generated/benchmark-results.json
-```
+~~~
 
 ## Notes
 
-- This publication is intentionally conservative: it only includes numbers successfully measured on this host.
-- The repo still contains automation for future Helm+kind system benchmarks.
-- Future expansions can add direct upstream Go micro-benchmarks for policy and allocator internals.
+- System-level Helm+kind metrics remain optional because not every runner can boot kind successfully.
+- The selector comparison is the closest direct hot-path comparison currently in the report.
+- The allocator and Maglev rows are useful directional comparisons, but implementation details differ between projects.
