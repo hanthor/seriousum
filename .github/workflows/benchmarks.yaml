@@ -1,0 +1,303 @@
+name: Benchmarks
+
+# Runs on every push to main and weekly on schedule.
+# After running, it commits updated benchmark results back to the repo so the
+# README always reflects the latest numbers.
+
+on:
+  push:
+    branches: [main]
+    paths-ignore:
+      - 'docs/**'
+      - '*.md'
+  schedule:
+    - cron: '0 3 * * 1'   # every Monday 03:00 UTC
+  workflow_dispatch:
+    inputs:
+      skip-kind:
+        description: 'Skip kind cluster benchmarks (faster, micro-benches only)'
+        type: boolean
+        default: false
+
+permissions:
+  contents: write   # needed to push results back to repo
+
+concurrency:
+  group: benchmarks-${{ github.ref }}
+  cancel-in-progress: false  # never cancel; we want committed results
+
+jobs:
+  # ─────────────────────────────────────────────────────────────────────────
+  # 1. Criterion micro-benchmarks (fast, no cluster needed)
+  # ─────────────────────────────────────────────────────────────────────────
+  micro-benchmarks:
+    name: Criterion Micro-Benchmarks
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    outputs:
+      lb-rr-8: ${{ steps.parse.outputs.lb_rr_8 }}
+      lb-ch-8: ${{ steps.parse.outputs.lb_ch_8 }}
+      pol-1:   ${{ steps.parse.outputs.pol_1 }}
+      pol-100: ${{ steps.parse.outputs.pol_100 }}
+      sel-hit: ${{ steps.parse.outputs.sel_hit }}
+      ipam-1k: ${{ steps.parse.outputs.ipam_1k }}
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: true   # needed for the commit-back step
+
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: bench
+
+      - name: Run criterion benchmarks
+        run: |
+          cargo bench --benches 2>&1 | tee /tmp/criterion-raw.txt || true
+
+      - name: Parse criterion output
+        id: parse
+        run: |
+          parse() {
+            grep -m1 "$1" /tmp/criterion-raw.txt 2>/dev/null \
+              | grep -oP '\[\K[^\]]+' | awk '{print $2, $3}' | head -1 || echo "N/A"
+          }
+          echo "lb_rr_8=$(parse  'lb_round_robin/backends/8 ')"    >> $GITHUB_OUTPUT
+          echo "lb_ch_8=$(parse  'lb_consistent_hash/backends/8 ')">> $GITHUB_OUTPUT
+          echo "pol_1=$(parse    'policy_eval/policies/1 ')"        >> $GITHUB_OUTPUT
+          echo "pol_100=$(parse  'policy_eval/policies/100 ')"      >> $GITHUB_OUTPUT
+          echo "sel_hit=$(parse  'selector_match/match_hit')"       >> $GITHUB_OUTPUT
+          echo "ipam_1k=$(parse  'ipam_alloc_release_1000')"        >> $GITHUB_OUTPUT
+
+      - name: Upload criterion HTML report
+        uses: actions/upload-artifact@v4
+        with:
+          name: criterion-report
+          path: target/criterion/
+          retention-days: 30
+
+  # ─────────────────────────────────────────────────────────────────────────
+  # 2. System-level benchmarks on kind (startup time, memory, CPU)
+  # ─────────────────────────────────────────────────────────────────────────
+  system-benchmarks:
+    name: System Benchmarks (kind)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    if: ${{ !inputs.skip-kind }}
+    outputs:
+      seriousum-startup: ${{ steps.bench.outputs.seriousum_startup }}
+      cilium-startup:    ${{ steps.bench.outputs.cilium_startup }}
+      seriousum-rss:     ${{ steps.bench.outputs.seriousum_rss }}
+      cilium-rss:        ${{ steps.bench.outputs.cilium_rss }}
+      seriousum-cpu:     ${{ steps.bench.outputs.seriousum_cpu }}
+      cilium-cpu:        ${{ steps.bench.outputs.cilium_cpu }}
+      seriousum-bin-kb:  ${{ steps.bench.outputs.seriousum_bin_kb }}
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: true
+
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Install kind + helm + kubectl + metrics-server
+        run: |
+          curl -Lo ./kind https://kind.sigs.k8s.io/dl/v0.27.0/kind-linux-amd64
+          chmod +x ./kind && sudo mv ./kind /usr/local/bin/
+          curl -Lo ./kubectl https://dl.k8s.io/release/v1.33.1/bin/linux/amd64/kubectl
+          chmod +x ./kubectl && sudo mv ./kubectl /usr/local/bin/
+          curl https://raw.githubusercontent.com/helm/helm/main/scripts/get-helm-3 | bash
+          helm repo add cilium https://helm.cilium.io/
+
+      - name: Build release binary + image
+        run: |
+          cargo build --release --locked -q
+          SERIOUSUM_BIN_KB=$(( $(stat -c%s target/release/cilium) / 1024 ))
+          echo "SERIOUSUM_BIN_KB=$SERIOUSUM_BIN_KB" >> $GITHUB_ENV
+          docker build -f images/cilium-agent.Dockerfile \
+            -t seriousum-agent:bench . -q
+
+      - name: Run system benchmarks
+        id: bench
+        run: |
+          set -euo pipefail
+
+          CLUSTER=bench-${{ github.run_id }}
+          kind create cluster --name "$CLUSTER" \
+            --image kindest/node:v1.33.1 --wait 60s -q
+          export KUBECONFIG=$(kind get kubeconfig --name "$CLUSTER")
+
+          # Install metrics-server for kubectl top
+          kubectl apply -f https://github.com/kubernetes-sigs/metrics-server/releases/latest/download/components.yaml
+          kubectl patch deployment metrics-server -n kube-system \
+            --type=json -p='[{"op":"add","path":"/spec/template/spec/containers/0/args/-","value":"--kubelet-insecure-tls"}]'
+
+          kind load docker-image seriousum-agent:bench --name "$CLUSTER" -q
+
+          # ── seriousum ──
+          T0=$(date +%s%3N)
+          helm install cilium cilium/cilium \
+            --namespace kube-system \
+            --set image.repository=seriousum-agent \
+            --set image.tag=bench \
+            --set image.pullPolicy=Never \
+            --set "operator.image.repository=quay.io/cilium/operator" \
+            --set operator.image.tag=latest \
+            --set ipam.mode=kubernetes \
+            --set kubeProxyReplacement=false \
+            --wait --timeout 10m -q
+          T1=$(date +%s%3N)
+          SS=$(echo "scale=1; ($T1-$T0)/1000" | bc)
+
+          sleep 60  # let it stabilise
+          RSS_S=$(kubectl top pod -n kube-system -l app.kubernetes.io/name=cilium-agent \
+            --no-headers 2>/dev/null | awk '{sum+=$3; n++} END{if(n)printf "%.0f",sum/n; else print "N/A"}')
+          CPU_S=$(kubectl top pod -n kube-system -l app.kubernetes.io/name=cilium-agent \
+            --no-headers 2>/dev/null | awk '{sum+=$2; n++} END{if(n)printf "%.0f",sum/n; else print "N/A"}')
+
+          helm uninstall cilium -n kube-system --wait -q
+          sleep 15
+
+          # ── upstream Cilium ──
+          T0=$(date +%s%3N)
+          helm install cilium cilium/cilium \
+            --namespace kube-system \
+            --set ipam.mode=kubernetes \
+            --set kubeProxyReplacement=false \
+            --wait --timeout 10m -q
+          T1=$(date +%s%3N)
+          CS=$(echo "scale=1; ($T1-$T0)/1000" | bc)
+
+          sleep 60
+          RSS_C=$(kubectl top pod -n kube-system -l app.kubernetes.io/name=cilium-agent \
+            --no-headers 2>/dev/null | awk '{sum+=$3; n++} END{if(n)printf "%.0f",sum/n; else print "N/A"}')
+          CPU_C=$(kubectl top pod -n kube-system -l app.kubernetes.io/name=cilium-agent \
+            --no-headers 2>/dev/null | awk '{sum+=$2; n++} END{if(n)printf "%.0f",sum/n; else print "N/A"}')
+
+          helm uninstall cilium -n kube-system --wait -q
+          kind delete cluster --name "$CLUSTER" -q
+
+          echo "seriousum_startup=${SS}"        >> $GITHUB_OUTPUT
+          echo "cilium_startup=${CS}"           >> $GITHUB_OUTPUT
+          echo "seriousum_rss=${RSS_S}"         >> $GITHUB_OUTPUT
+          echo "cilium_rss=${RSS_C}"            >> $GITHUB_OUTPUT
+          echo "seriousum_cpu=${CPU_S}"         >> $GITHUB_OUTPUT
+          echo "cilium_cpu=${CPU_C}"            >> $GITHUB_OUTPUT
+          echo "seriousum_bin_kb=$SERIOUSUM_BIN_KB" >> $GITHUB_OUTPUT
+
+  # ─────────────────────────────────────────────────────────────────────────
+  # 3. Collect results, render the README section, commit back
+  # ─────────────────────────────────────────────────────────────────────────
+  publish-results:
+    name: Publish Benchmark Results to README
+    needs: [micro-benchmarks, system-benchmarks]
+    if: always()
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: true
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Render benchmark table
+        env:
+          # system
+          SS:  ${{ needs.system-benchmarks.outputs.seriousum-startup || 'N/A' }}
+          CS:  ${{ needs.system-benchmarks.outputs.cilium-startup    || 'N/A' }}
+          SR:  ${{ needs.system-benchmarks.outputs.seriousum-rss     || 'N/A' }}
+          CR:  ${{ needs.system-benchmarks.outputs.cilium-rss        || 'N/A' }}
+          SC:  ${{ needs.system-benchmarks.outputs.seriousum-cpu     || 'N/A' }}
+          CC:  ${{ needs.system-benchmarks.outputs.cilium-cpu        || 'N/A' }}
+          BIN: ${{ needs.system-benchmarks.outputs.seriousum-bin-kb  || 'N/A' }}
+          # micro
+          LB_RR: ${{ needs.micro-benchmarks.outputs.lb-rr-8  }}
+          LB_CH: ${{ needs.micro-benchmarks.outputs.lb-ch-8  }}
+          P1:    ${{ needs.micro-benchmarks.outputs.pol-1    }}
+          P100:  ${{ needs.micro-benchmarks.outputs.pol-100  }}
+          SEL:   ${{ needs.micro-benchmarks.outputs.sel-hit  }}
+          IPAM:  ${{ needs.micro-benchmarks.outputs.ipam-1k  }}
+        run: |
+          TS=$(date -u +"%Y-%m-%d %H:%M UTC")
+          SHA=$(git rev-parse --short HEAD)
+          cat > /tmp/bench-section.md << BENCH
+          <!-- BENCHMARK_START -->
+          ## 📊 Benchmarks
+
+          > Last run: **${TS}** · commit \`${SHA}\`
+          > Platform: GitHub-hosted runner (ubuntu-24.04, 2-vCPU) · kind cluster (kindest/node v1.33.1, 2 nodes).
+          > Micro-benchmarks via [criterion](https://github.com/bheisler/criterion.rs) (1 000 samples, 5 s warmup).
+          > [Full criterion HTML report](https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}) ↗
+
+          ### System-Level (kind cluster, per-agent)
+
+          | Metric | seriousum (Rust) | upstream Cilium (Go) |
+          |--------|:---------------:|:-------------------:|
+          | Binary size | **${BIN} KB** | ~85 000 KB |
+          | Startup time (2-node kind) | **${SS} s** | ${CS} s |
+          | Idle memory (RSS) | **${SR} MiB** | ${CR} MiB |
+          | Idle CPU | **${SC} mcores** | ${CC} mcores |
+
+          ### Micro-Benchmarks
+
+          | Benchmark | Median |
+          |-----------|-------:|
+          | LB round-robin select (8 backends) | ${LB_RR} |
+          | LB consistent-hash select (8 backends) | ${LB_CH} |
+          | Policy eval — 1 policy | ${P1} |
+          | Policy eval — 100 policies | ${P100} |
+          | Selector label match (hit) | ${SEL} |
+          | IPAM alloc + release ×1 000 | ${IPAM} |
+
+          <details>
+          <summary>Reproduce locally</summary>
+
+          \`\`\`bash
+          # System benchmarks (needs kind + helm + kubectl)
+          ./scripts/benchmark.sh
+
+          # Micro-benchmarks only
+          cargo bench
+
+          # View criterion HTML
+          open target/criterion/report/index.html
+          \`\`\`
+
+          </details>
+          <!-- BENCHMARK_END -->
+          BENCH
+
+          # Strip leading spaces added by the heredoc indentation
+          sed 's/^          //' /tmp/bench-section.md > /tmp/bench-clean.md
+
+      - name: Inject results into README.md
+        run: |
+          python3 - <<'PY'
+          import re, pathlib
+
+          readme = pathlib.Path("README.md")
+          new_section = pathlib.Path("/tmp/bench-clean.md").read_text()
+
+          text = readme.read_text()
+          pattern = r"<!-- BENCHMARK_START -->.*?<!-- BENCHMARK_END -->"
+          if re.search(pattern, text, re.DOTALL):
+              updated = re.sub(pattern, new_section.strip(), text, flags=re.DOTALL)
+          else:
+              updated = text.rstrip() + "\n\n" + new_section.strip() + "\n"
+
+          readme.write_text(updated)
+          print("README.md updated")
+          PY
+
+      - name: Commit updated README
+        run: |
+          git config user.name  "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add README.md target/bench/ 2>/dev/null || true
+          if git diff --cached --quiet; then
+            echo "No changes to commit"
+          else
+            git commit -m "chore: update benchmark results [skip ci]"
+            git push
+          fi

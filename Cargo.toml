@@ -79,7 +79,7 @@ aya-log = { version = "0.1", package = "aya-log" }
 
 # Kubernetes
 kube = { version = "0.98", features = ["client", "rustls-tls", "runtime"] }
-k8s-openapi = { version = "0.24", features = ["latest"] }
+k8s-openapi = { version = "0.24", features = ["v1_32"] }
 
 # Serialization / config
 serde = { version = "1", features = ["derive"] }
@@ -124,7 +124,27 @@ metrics-exporter-prometheus = "0.16"
 # Key-value store
 tikv-jemallocator = "0.6"
 
+# Benchmarking
+criterion = { version = "0.5", features = ["html_reports", "async_tokio"] }
+
 # --- Workspace lints ---
+# --- Benchmark harness ---
+[[bench]]
+name = "policy_eval"
+harness = false
+
+[[bench]]
+name = "load_balancer"
+harness = false
+
+[[bench]]
+name = "ipam"
+harness = false
+
+[dev-dependencies]
+criterion = { version = "0.5", features = ["html_reports", "async_tokio"] }
+tokio = { version = "1", features = ["full"] }
+
 [workspace.lints.clippy]
 all = { level = "warn", priority = -1 }
 pedantic = { level = "warn", priority = -1 }
