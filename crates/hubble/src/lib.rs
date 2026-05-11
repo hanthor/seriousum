@@ -223,7 +223,7 @@ impl FlowSummary {
         self.total = self.total.saturating_add(observation.count);
         match observation.verdict {
             FlowVerdict::Forwarded => {
-                self.forwarded = self.forwarded.saturating_add(observation.count)
+                self.forwarded = self.forwarded.saturating_add(observation.count);
             }
             FlowVerdict::Dropped => self.dropped = self.dropped.saturating_add(observation.count),
             FlowVerdict::Denied => self.denied = self.denied.saturating_add(observation.count),

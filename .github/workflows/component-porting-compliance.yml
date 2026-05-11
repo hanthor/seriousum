@@ -1,0 +1,27 @@
+name: component-porting-compliance
+
+on:
+  pull_request:
+    paths:
+      - 'docs/component-porting-compliance.md'
+      - 'scripts/check-component-porting-compliance.sh'
+      - 'docs/parity-matrix.md'
+      - '.github/workflows/component-porting-compliance.yml'
+  push:
+    branches:
+      - main
+    paths:
+      - 'docs/component-porting-compliance.md'
+      - 'scripts/check-component-porting-compliance.sh'
+      - 'docs/parity-matrix.md'
+      - '.github/workflows/component-porting-compliance.yml'
+
+jobs:
+  compliance-report:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repo
+        uses: actions/checkout@v4
+
+      - name: Validate compliance report
+        run: bash scripts/check-component-porting-compliance.sh

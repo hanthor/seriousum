@@ -54,8 +54,7 @@ impl ControllerScaffold {
         self.controller
             .status
             .try_read()
-            .map(|status| *status)
-            .unwrap_or(Status::Stopped)
+            .map_or(Status::Stopped, |status| *status)
     }
 
     /// Delegate worker registration to the shared core controller.

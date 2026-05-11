@@ -1,6 +1,12 @@
-fn main() {
-    if let Err(error) = seriousum_clustermesh::run().map(|output| println!("{output}")) {
-        eprintln!("{error}");
-        std::process::exit(1);
+fn main() -> std::process::ExitCode {
+    match seriousum_clustermesh::run() {
+        Ok(output) => {
+            println!("{output}");
+            std::process::ExitCode::SUCCESS
+        }
+        Err(error) => {
+            eprintln!("{error}");
+            std::process::ExitCode::FAILURE
+        }
     }
 }

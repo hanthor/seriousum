@@ -192,11 +192,7 @@ pub fn metrics_payload(operator: &Operator) -> MetricsPayload {
     let mut metrics = BTreeMap::new();
     metrics.insert(
         String::from("operator_scaffold_ready"),
-        if operator.status() == HealthStatus::Healthy {
-            1
-        } else {
-            0
-        },
+        u64::from(operator.status() == HealthStatus::Healthy),
     );
 
     MetricsPayload {
@@ -217,6 +213,19 @@ pub fn cluster_payload(operator: &Operator) -> ClusterPayload {
         status: operator.status(),
         summary: operator.summary().to_owned(),
     }
+}
+
+/// Returns operator payloads as pretty JSON.
+pub fn run_with_summary(
+    summary: impl Into<String>,
+) -> std::result::Result<String, serde_json::Error> {
+    let operator = Operator::new(summary);
+    serde_json::to_string_pretty(&operator.scaffold_payloads())
+}
+
+/// Returns the scaffold payloads as pretty JSON.
+pub fn run() -> std::result::Result<String, serde_json::Error> {
+    run_with_summary("operator scaffold ready")
 }
 
 #[cfg(test)]
@@ -322,5 +331,15 @@ mod tests {
                 "summary": "cluster ready"
             })
         );
+    }
+
+    #[test]
+    fn run_functions_render_expected_payloads() {
+        let default_output = run().expect("default run serializes");
+        assert!(default_output.contains("operator scaffold ready"));
+        assert!(default_output.contains(r#""operator_scaffold_ready": 1"#));
+
+        let custom_output = run_with_summary("custom summary").expect("custom run serializes");
+        assert!(custom_output.contains("custom summary"));
     }
 }

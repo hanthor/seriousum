@@ -1,9 +1,12 @@
-fn main() {
+fn main() -> std::process::ExitCode {
     match seriousum_hubble::run() {
-        Ok(output) => println!("{output}"),
+        Ok(output) => {
+            println!("{output}");
+            std::process::ExitCode::SUCCESS
+        }
         Err(error) => {
             eprintln!("{error}");
-            std::process::exit(1);
+            std::process::ExitCode::FAILURE
         }
     }
 }

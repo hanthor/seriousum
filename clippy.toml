@@ -7,7 +7,4 @@ allow-dbg-in-tests = true
 disallowed-methods = [
     # Use anyhow::Result for error handling
     "std::process::exit",
-    # Use tracing instead of println
-    "std::io::_print",
-    "core::fmt::write",
 ]

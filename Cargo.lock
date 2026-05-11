@@ -687,7 +687,13 @@ name = "seriousum"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "clap",
  "seriousum-cli",
+ "seriousum-clustermesh",
+ "seriousum-daemon",
+ "seriousum-hubble",
+ "seriousum-operator",
+ "tokio",
 ]
 
 [[package]]
@@ -722,6 +728,7 @@ name = "seriousum-cli"
 version = "0.1.0"
 dependencies = [
  "clap",
+ "serde",
  "serde_json",
  "seriousum-api",
  "seriousum-config",

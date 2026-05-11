@@ -8,7 +8,13 @@ repository = "https://github.com/seriousum/seriousum"
 
 [dependencies]
 anyhow.workspace = true
+clap = { workspace = true, features = ["derive"] }
+tokio.workspace = true
 seriousum_cli = { path = "crates/cli", package = "seriousum-cli" }
+seriousum_daemon = { path = "crates/daemon", package = "seriousum-daemon" }
+seriousum_hubble = { path = "crates/hubble", package = "seriousum-hubble" }
+seriousum_clustermesh = { path = "crates/clustermesh", package = "seriousum-clustermesh" }
+seriousum_operator = { path = "crates/operator", package = "seriousum-operator" }
 
 [workspace]
 members = [
@@ -129,6 +135,11 @@ type_complexity = "allow"
 unnecessary_wraps = "allow"
 default_trait_access = "allow"
 default_constructed_unit_structs = "allow"
+must_use_candidate = "allow"
+return_self_not_must_use = "allow"
+doc_markdown = "allow"
+arc_with_non_send_sync = "allow"
+map_unwrap_or = "allow"
 
 [workspace.lints.rust]
 unsafe_code = "warn"

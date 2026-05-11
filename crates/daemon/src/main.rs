@@ -1,8 +1,21 @@
 use clap::Parser;
 
-fn main() -> anyhow::Result<()> {
+fn main() -> std::process::ExitCode {
     seriousum_daemon::init_tracing();
     let cli = seriousum_daemon::Cli::parse();
-    let rt = tokio::runtime::Runtime::new()?;
-    rt.block_on(seriousum_daemon::execute(cli))
+    let rt = match tokio::runtime::Runtime::new() {
+        Ok(rt) => rt,
+        Err(error) => {
+            eprintln!("{error}");
+            return std::process::ExitCode::FAILURE;
+        }
+    };
+
+    match rt.block_on(seriousum_daemon::execute(cli)) {
+        Ok(()) => std::process::ExitCode::SUCCESS,
+        Err(error) => {
+            eprintln!("{error}");
+            std::process::ExitCode::FAILURE
+        }
+    }
 }

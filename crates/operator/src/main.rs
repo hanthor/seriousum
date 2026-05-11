@@ -1,5 +1,4 @@
 use clap::Parser;
-use seriousum_operator::Operator;
 
 /// Minimal CLI for the seriousum operator scaffold.
 #[derive(Debug, Parser)]
@@ -10,16 +9,16 @@ struct Cli {
     summary: String,
 }
 
-fn main() {
+fn main() -> std::process::ExitCode {
     let cli = Cli::parse();
-    let operator = Operator::new(cli.summary);
-    let scaffold = operator.scaffold_payloads();
-
-    match serde_json::to_string_pretty(&scaffold) {
-        Ok(payload) => println!("{payload}"),
+    match seriousum_operator::run_with_summary(cli.summary) {
+        Ok(payload) => {
+            println!("{payload}");
+            std::process::ExitCode::SUCCESS
+        }
         Err(error) => {
             eprintln!("{error}");
-            std::process::exit(1);
+            std::process::ExitCode::FAILURE
         }
     }
 }

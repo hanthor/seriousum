@@ -5,6 +5,7 @@ edition.workspace = true
 
 [dependencies]
 clap = { workspace = true, features = ["derive"] }
+serde = { workspace = true, features = ["derive"] }
 serde_json.workspace = true
 seriousum-api = { path = "../api" }
 seriousum-config = { path = "../config" }
