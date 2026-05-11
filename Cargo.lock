@@ -1962,7 +1962,11 @@ dependencies = [
 name = "seriousum-datapath"
 version = "0.1.0"
 dependencies = [
+ "dashmap",
  "seriousum-core",
+ "thiserror 2.0.18",
+ "tokio",
+ "tracing",
 ]
 
 [[package]]
@@ -2146,10 +2150,13 @@ dependencies = [
 name = "seriousum-policy"
 version = "0.1.0"
 dependencies = [
+ "async-trait",
+ "dashmap",
  "serde",
  "serde_json",
  "seriousum-api",
  "seriousum-core",
+ "thiserror 2.0.18",
  "tokio",
  "tracing",
 ]

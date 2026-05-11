@@ -1,12 +1,11 @@
-use seriousum_policy::{PolicyCache, PolicyEnforcer};
-use std::sync::Arc;
+use seriousum_policy::PolicyRepository;
 
 #[tokio::main]
 async fn main() {
-    println!("Policy subsystem initialized");
+    let repository = PolicyRepository::new();
     
-    let cache = Arc::new(PolicyCache::new());
-    let _enforcer = PolicyEnforcer::new(cache);
-    
+    println!("✓ Policy engine initialized");
+    println!("  Ingress rules: {}", repository.ingress_rule_count());
+    println!("  Egress rules: {}", repository.egress_rule_count());
     println!("Ready to enforce network policies");
 }

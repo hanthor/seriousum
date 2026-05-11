@@ -5,6 +5,14 @@ edition.workspace = true
 
 [dependencies]
 seriousum-core = { workspace = true }
+thiserror = "2"
+dashmap = "6"
+tracing = { workspace = true }
+tokio = { workspace = true, features = ["sync"] }
+
+[[bin]]
+name = "datapath"
+path = "src/main.rs"
 
 [lints]
 workspace = true
