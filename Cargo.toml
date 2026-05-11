@@ -47,7 +47,7 @@ members = [
     "crates/config",
     "crates/crypto",
     "crates/kvstore",
-    "crates/controller",
+    "crates/controller", "crates/service-observer", "crates/backend-mapping",
 ]
 
 [workspace.package]
