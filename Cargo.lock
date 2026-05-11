@@ -1487,6 +1487,8 @@ dependencies = [
  "serde_json",
  "seriousum-api",
  "seriousum-core",
+ "tokio",
+ "tracing",
 ]
 
 [[package]]
