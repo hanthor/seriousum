@@ -275,3 +275,37 @@ NC := '\033[0m' # No Color
     echo "{{BLUE}}Setting up images (GHCR with local fallback)...{{NC}}"
     ./scripts/setup-ghcr-images.sh
     echo "{{GREEN}}✓ Images ready{{NC}}"
+
+# ============================================================================
+# PARALLEL TESTING & IMPLEMENTATION WORKFLOWS
+# ============================================================================
+# These recipes enable running multiple test suites and implementation tasks
+# in parallel for faster iteration and earlier feedback
+
+# Run 3 test suites in parallel on separate kind clusters
+@test-parallel timeout=TEST_TIMEOUT:
+    echo "{{GREEN}}Starting 3 test suites in parallel...{{NC}}"
+    bash scripts/run-parallel-test-suites.sh
+    echo ""
+    echo "{{GREEN}}Parallel tests completed! Collecting results...{{NC}}"
+    bash scripts/collect-parallel-results.sh
+
+# Collect and aggregate results from parallel tests
+@test-parallel-results:
+    echo "{{BLUE}}Aggregating parallel test results...{{NC}}"
+    bash scripts/collect-parallel-results.sh
+    echo "{{GREEN}}✓ Results aggregated{{NC}}"
+
+# Clean up all parallel test clusters and temp files
+@test-parallel-cleanup:
+    echo "{{BLUE}}Cleaning up parallel test resources...{{NC}}"
+    bash scripts/cleanup-parallel.sh
+
+# Show parallel test results
+@test-parallel-report:
+    echo "{{BLUE}}Parallel Test Results{{NC}}"
+    if [ -f target/parallel-test-results/AGGREGATED_RESULTS.md ]; then
+        cat target/parallel-test-results/AGGREGATED_RESULTS.md
+    else
+        echo "No parallel test results found. Run 'just test-parallel' first."
+    fi
