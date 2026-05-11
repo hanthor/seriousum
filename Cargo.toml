@@ -154,6 +154,9 @@ harness = false
 [dev-dependencies]
 criterion = { version = "0.5", features = ["html_reports", "async_tokio"] }
 tokio = { version = "1", features = ["full"] }
+seriousum-loadbalancer = { path = "crates/loadbalancer" }
+seriousum-policy = { path = "crates/policy" }
+seriousum-endpoints = { path = "crates/endpoints" }
 
 [workspace.lints.clippy]
 all = { level = "warn", priority = -1 }

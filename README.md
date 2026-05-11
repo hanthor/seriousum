@@ -594,3 +594,38 @@ Seriousum builds on the excellent work of the Cilium community. Special thanks t
 
 🚀 **Ready for production alpha testing. All systems operational.**
 
+<!-- BENCHMARK_START -->
+## 📊 Benchmarks
+
+> Last run: **2026-05-11 21:12 UTC** · commit `ddaa658`
+> Published comparison report: [docs/generated/BENCHMARKS.md](docs/generated/BENCHMARKS.md)
+
+| Metric | Seriousum | Cilium | Delta vs Cilium |
+|---|---:|---:|---:|
+| Agent binary size | **2725 KB** | 126612 KB | -97.8% |
+
+### Seriousum micro-benchmarks
+
+| Benchmark | Median |
+|---|---:|
+| LB round-robin (8 backends) | 4.10 ns |
+| LB consistent hash (8 backends) | 7.05 ns |
+| Policy eval (1 policy) | 5.62 µs |
+| Policy eval (100 policies) | 11.57 µs |
+| Selector match (hit) | 35.54 ns |
+| IPAM alloc + release ×1000 | 3.19 ms |
+
+> Note: system-level startup / memory / CPU comparisons are queued for a kind-capable CI runner. This host could not boot kind successfully due kubelet/cgroup limits.
+
+<details>
+<summary>Reproduce locally</summary>
+
+```bash
+cargo build --profile bench --benches
+find target/release/deps -maxdepth 1 -type f -name 'load_balancer-*' ! -name '*.d' | head -1 | xargs -r -I{} {} --bench
+find target/release/deps -maxdepth 1 -type f -name 'policy_eval-*' ! -name '*.d' | head -1 | xargs -r -I{} {} --bench
+find target/release/deps -maxdepth 1 -type f -name 'ipam-*' ! -name '*.d' | head -1 | xargs -r -I{} {} --bench
+```
+
+</details>
+<!-- BENCHMARK_END -->

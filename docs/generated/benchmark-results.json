@@ -1,0 +1,30 @@
+{
+  "timestamp": "2026-05-11 21:12 UTC",
+  "git_sha": "ddaa658",
+  "cilium_image": "quay.io/cilium/cilium-ci:latest",
+  "comparison": {
+    "agent_binary_size_kb": {
+      "seriousum": 2725,
+      "cilium": 126612,
+      "delta_vs_cilium": "-97.8%"
+    }
+  },
+  "system_metrics": {
+    "startup_seconds": "pending-kind-capable-runner",
+    "idle_memory_mib": "pending-kind-capable-runner",
+    "idle_cpu_mcores": "pending-kind-capable-runner"
+  },
+  "microbench_seriousum": {
+    "lb_round_robin_8_backends": "4.10 ns",
+    "lb_consistent_hash_8_backends": "7.05 ns",
+    "policy_eval_1_policy": "5.62 µs",
+    "policy_eval_100_policies": "11.57 µs",
+    "selector_match_hit": "35.54 ns",
+    "ipam_alloc_release_1000": "3.19 ms"
+  },
+  "notes": [
+    "Binary comparison is measured directly against upstream Cilium agent extracted from the official cilium-ci image.",
+    "System-level Helm+kind metrics could not be completed on this host because kind bootstrap failed due kubelet/cgroup limitations.",
+    "Micro-benchmarks were executed locally from Criterion benchmark binaries and parsed from target/criterion estimates."
+  ]
+}

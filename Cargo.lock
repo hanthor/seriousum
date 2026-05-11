@@ -2019,8 +2019,11 @@ dependencies = [
  "seriousum-cli",
  "seriousum-clustermesh",
  "seriousum-daemon",
+ "seriousum-endpoints",
  "seriousum-hubble",
+ "seriousum-loadbalancer",
  "seriousum-operator",
+ "seriousum-policy",
  "tokio",
 ]
 
