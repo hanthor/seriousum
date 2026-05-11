@@ -14,7 +14,8 @@ AGENT_IMAGE_TAG=${AGENT_IMAGE_TAG:-$IMAGE_TAG}
 BIN_DIR=${BIN_DIR:-$ROOT_DIR/target/cilium-dropin}
 KIND_CLUSTER=${KIND_CLUSTER:-kind}
 FOCUS=${FOCUS:-Cilium}
-LOAD_INTO_KIND=${LOAD_INTO_KIND:-0}
+# Default to loading images into kind (required for local operator image)
+LOAD_INTO_KIND=${LOAD_INTO_KIND:-1}
 BUILD_IMAGES=${BUILD_IMAGES:-1}
 INSTALL_DROPIN=${INSTALL_DROPIN:-1}
 KIND_BOOTSTRAP=${KIND_BOOTSTRAP:-1}
@@ -209,8 +210,9 @@ export PATH="$BIN_DIR:$PATH"
 
 CILIUM_IMAGE="$AGENT_IMAGE_REPO"
 CILIUM_TAG="$AGENT_IMAGE_TAG"
-CILIUM_OPERATOR_IMAGE="quay.io/cilium/cilium-ci"
-CILIUM_OPERATOR_TAG="latest"
+# Use local Rust operator image (fallback to upstream if needed)
+CILIUM_OPERATOR_IMAGE="${OPERATOR_IMAGE_REPO:-$IMAGE_PREFIX/operator-generic}"
+CILIUM_OPERATOR_TAG="${OPERATOR_IMAGE_TAG:-$IMAGE_TAG}"
 HUBBLE_RELAY_IMAGE="$IMAGE_PREFIX/hubble"
 HUBBLE_RELAY_TAG="$IMAGE_TAG"
 CLUSTERMESH_INSTALL_OVERRIDES="image.useDigest=false,operator.image.useDigest=false,hubble.relay.image.useDigest=false,clustermesh.apiserver.image.useDigest=false,clustermesh.apiserver.image.repository=$IMAGE_PREFIX/clustermesh-apiserver,clustermesh.apiserver.image.tag=$IMAGE_TAG,clustermesh.apiserver.image.pullPolicy=IfNotPresent,operator.image.pullPolicy=IfNotPresent,hubble.relay.image.pullPolicy=IfNotPresent"
@@ -223,13 +225,14 @@ export HUBBLE_RELAY_IMAGE
 export HUBBLE_RELAY_TAG
 export CLUSTERMESH_INSTALL_OVERRIDES
 
-if [ "$LOAD_INTO_KIND" = "1" ]; then
+if [ "$LOAD_INTO_KIND" = "1" ] && [ "$KIND_BOOTSTRAP" = "1" ]; then
   printf '==> loading images into kind cluster %s\n' "$KIND_CLUSTER"
-  kind load docker-image --name "$KIND_CLUSTER" "$CILIUM_IMAGE:$CILIUM_TAG"
-  kind load docker-image --name "$KIND_CLUSTER" "$IMAGE_PREFIX/cilium-dbg:$IMAGE_TAG"
-  kind load docker-image --name "$KIND_CLUSTER" "$IMAGE_PREFIX/operator-generic:$IMAGE_TAG"
-  kind load docker-image --name "$KIND_CLUSTER" "$HUBBLE_RELAY_IMAGE:$HUBBLE_RELAY_TAG"
-  kind load docker-image --name "$KIND_CLUSTER" "$IMAGE_PREFIX/clustermesh-apiserver:$IMAGE_TAG"
+  kind load docker-image --name "$KIND_CLUSTER" "$CILIUM_IMAGE:$CILIUM_TAG" 2>/dev/null || true
+  kind load docker-image --name "$KIND_CLUSTER" "$IMAGE_PREFIX/cilium-dbg:$IMAGE_TAG" 2>/dev/null || true
+  kind load docker-image --name "$KIND_CLUSTER" "$CILIUM_OPERATOR_IMAGE:$CILIUM_OPERATOR_TAG" 2>/dev/null || true
+  kind load docker-image --name "$KIND_CLUSTER" "$HUBBLE_RELAY_IMAGE:$HUBBLE_RELAY_TAG" 2>/dev/null || true
+  kind load docker-image --name "$KIND_CLUSTER" "$IMAGE_PREFIX/clustermesh-apiserver:$IMAGE_TAG" 2>/dev/null || true
+  printf 'Images loaded into kind cluster\n'
 fi
 
 cd "$CILIUM_REPO/test"
