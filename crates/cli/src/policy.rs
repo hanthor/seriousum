@@ -4,7 +4,7 @@
 
 use serde::{Deserialize, Serialize};
 use std::path::Path;
-use crate::{Error, Result};
+use crate::Result;
 
 /// Result of policy validation.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

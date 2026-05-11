@@ -1,7 +1,7 @@
 //! HTTP request handlers for REST API endpoints.
 
 use crate::errors::{ApiError, ApiResult};
-use crate::types::*;
+use crate::types::{DaemonConfiguration, Endpoint, ClusterNodeStatus, StatusResponse, ComponentStatus, ConfigurationSpec, ClusterNodes, EndpointChangeRequest, EndpointConfigurationStatus, EndpointConfiguration, EndpointConfigurationSpec, LabelConfiguration};
 use axum::{
     extract::{Path, Query, State},
     http::StatusCode,
@@ -123,7 +123,7 @@ pub async fn patch_config(
 
     config
         .validate()
-        .map_err(|e| ApiError::BadRequest(e))?;
+        .map_err(ApiError::BadRequest)?;
 
     debug!("daemon configuration updated");
     info!("configuration patch applied: cluster={}, node={}", config.cluster_name, config.node_name);
@@ -180,7 +180,7 @@ pub async fn get_endpoint(
         .get(&id)
         .cloned()
         .map(Json)
-        .ok_or_else(|| ApiError::NotFound(format!("endpoint {} not found", id)))
+        .ok_or_else(|| ApiError::NotFound(format!("endpoint {id} not found")))
 }
 
 /// Handler for PUT /endpoint/{id}
@@ -193,24 +193,22 @@ pub async fn create_endpoint(
 
     if endpoints.contains_key(&id) {
         return Err(ApiError::Conflict(format!(
-            "endpoint {} already exists",
-            id
+            "endpoint {id} already exists"
         )));
     }
 
     let mut endpoint = Endpoint::new(
         id,
-        request.name.unwrap_or_else(|| format!("endpoint-{}", id)),
+        request.name.unwrap_or_else(|| format!("endpoint-{id}")),
     );
 
     if let Some(container_id) = request.container_id {
         endpoint = endpoint.with_container_id(container_id);
     }
-    if let Some(pod_name) = request.pod_name {
-        if let Some(pod_namespace) = request.pod_namespace {
+    if let Some(pod_name) = request.pod_name
+        && let Some(pod_namespace) = request.pod_namespace {
             endpoint = endpoint.with_pod(pod_name, pod_namespace);
         }
-    }
     if let Some(ipv4) = request.ipv4 {
         endpoint = endpoint.with_ipv4(ipv4);
     }
@@ -237,7 +235,7 @@ pub async fn delete_endpoint(
     let mut endpoints = state.endpoints.write().await;
 
     if endpoints.remove(&id).is_none() {
-        return Err(ApiError::NotFound(format!("endpoint {} not found", id)));
+        return Err(ApiError::NotFound(format!("endpoint {id} not found")));
     }
 
     info!("endpoint {} deleted", id);
@@ -253,7 +251,7 @@ pub async fn get_endpoint_config(
     let endpoints = state.endpoints.read().await;
 
     if !endpoints.contains_key(&id) {
-        return Err(ApiError::NotFound(format!("endpoint {} not found", id)));
+        return Err(ApiError::NotFound(format!("endpoint {id} not found")));
     }
 
     let config = EndpointConfiguration::default();
@@ -273,7 +271,7 @@ pub async fn patch_endpoint_config(
     let endpoints = state.endpoints.read().await;
 
     if !endpoints.contains_key(&id) {
-        return Err(ApiError::NotFound(format!("endpoint {} not found", id)));
+        return Err(ApiError::NotFound(format!("endpoint {id} not found")));
     }
 
     let mut config = EndpointConfiguration::default();
@@ -300,7 +298,7 @@ pub async fn get_endpoint_labels(
 
     let endpoint = endpoints
         .get(&id)
-        .ok_or_else(|| ApiError::NotFound(format!("endpoint {} not found", id)))?;
+        .ok_or_else(|| ApiError::NotFound(format!("endpoint {id} not found")))?;
 
     debug!("returning labels for endpoint {}", id);
 
@@ -319,7 +317,7 @@ pub async fn patch_endpoint_labels(
 
     let endpoint = endpoints
         .get_mut(&id)
-        .ok_or_else(|| ApiError::NotFound(format!("endpoint {} not found", id)))?;
+        .ok_or_else(|| ApiError::NotFound(format!("endpoint {id} not found")))?;
 
     endpoint.labels = labels.labels.clone();
 

@@ -73,7 +73,7 @@ impl Server {
 
         axum::serve(listener, self.router())
             .await
-            .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))
+            .map_err(|e| std::io::Error::other(e))
     }
 
     /// Get the server address.

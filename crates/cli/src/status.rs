@@ -3,7 +3,7 @@
 //! Provides status collection for clusters, nodes, endpoints, and services.
 
 use serde::{Deserialize, Serialize};
-use crate::{Error, Result};
+use crate::Result;
 
 /// Overall cluster status.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

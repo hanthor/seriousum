@@ -1,18 +1,11 @@
-use std::collections::HashMap;
 use std::fmt::Write as FmtWrite;
 use std::path::PathBuf;
-use std::sync::Arc;
-use std::time::{Duration, SystemTime};
 
-use chrono::{DateTime, Utc};
 use clap::{Parser, Subcommand, ValueEnum, ValueHint};
-use dashmap::DashMap;
-use serde::{Deserialize, Serialize};
+use serde::Serialize;
 use seriousum_config::Config;
 use seriousum_core::VERSION as CORE_VERSION;
 use thiserror::Error;
-use tracing::{debug, error, info, warn};
-use uuid::Uuid;
 
 pub mod connectivity;
 pub mod endpoint;
@@ -511,8 +504,8 @@ fn execute_connectivity(command: ConnectivityCommand) -> Result<String> {
 fn execute_status(command: StatusCommand) -> Result<String> {
     match command {
         StatusCommand::Cluster {
-            wait,
-            wait_duration,
+            wait: _,
+            wait_duration: _,
             output,
         } => {
             let collector = status::StatusCollector::new();

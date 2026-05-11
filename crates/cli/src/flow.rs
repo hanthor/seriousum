@@ -3,7 +3,7 @@
 //! Provides flow analysis, filtering, and statistics collection.
 
 use serde::{Deserialize, Serialize};
-use crate::{Error, Result};
+use crate::Result;
 
 /// Information about a network flow.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

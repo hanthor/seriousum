@@ -121,13 +121,13 @@ impl From<seriousum_core::Error> for ApiError {
 
 impl From<serde_json::Error> for ApiError {
     fn from(err: serde_json::Error) -> Self {
-        Self::BadRequest(format!("JSON parse error: {}", err))
+        Self::BadRequest(format!("JSON parse error: {err}"))
     }
 }
 
 impl From<std::io::Error> for ApiError {
     fn from(err: std::io::Error) -> Self {
-        Self::InternalError(format!("IO error: {}", err))
+        Self::InternalError(format!("IO error: {err}"))
     }
 }
 

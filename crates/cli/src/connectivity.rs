@@ -5,7 +5,7 @@
 
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
-use crate::{Error, Result};
+use crate::Result;
 
 /// Result of a single connectivity test.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -210,7 +210,7 @@ impl ConnectivityTester {
         &self,
         source: &str,
         destination: &str,
-        protocol: &str,
+        _protocol: &str,
         port: u16,
     ) -> Result<ConnectivityCheckResult> {
         // Simulate connectivity check

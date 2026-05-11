@@ -1,5 +1,9 @@
+// Operator is built as a library with its own binary in crates/operator/src/main.rs
+// This file is kept for compatibility but the actual binary runs via:
+// cargo run --bin seriousum-operator (from workspace) or
+// cargo run (from crates/operator/)
+
 fn main() -> anyhow::Result<()> {
-    let output = seriousum_operator::run()?;
-    println!("{output}");
+    eprintln!("Please run: cargo run --bin seriousum-operator from workspace root");
     Ok(())
 }
