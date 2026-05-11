@@ -1569,6 +1569,7 @@ name = "service-observer"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "async-trait",
  "k8s-openapi 0.20.0",
  "kube",
  "serde",
