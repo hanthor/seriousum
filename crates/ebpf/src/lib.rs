@@ -9,6 +9,10 @@ use seriousum_core::{
     POLICY_MAP_NAME,
 };
 
+// Export core map types
+pub mod core_maps;
+pub use core_maps::{BpfMap, BpfMapError, BpfMapType, HashMap};
+
 // Export service maps module
 pub mod maps;
 
