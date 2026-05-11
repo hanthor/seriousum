@@ -1,0 +1,6 @@
+warning: unused import: `std::str::FromStr`
+   --> crates/fqdn/src/cache.rs:284:9
+    |
+284 |     use std::str::FromStr;
+    |         ^^^^^^^^^^^^^^^^^
+    
