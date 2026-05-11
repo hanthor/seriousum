@@ -298,14 +298,11 @@ NC := '\033[0m' # No Color
 
 # Clean up all parallel test clusters and temp files
 @test-parallel-cleanup:
-    echo "{{BLUE}}Cleaning up parallel test resources...{{NC}}"
+    #!/bin/bash
+    echo -e "\033[0;34mCleaning up parallel test resources...\033[0m"
     bash scripts/cleanup-parallel.sh
 
 # Show parallel test results
 @test-parallel-report:
     echo "{{BLUE}}Parallel Test Results{{NC}}"
-    if [ -f target/parallel-test-results/AGGREGATED_RESULTS.md ]; then
-        cat target/parallel-test-results/AGGREGATED_RESULTS.md
-    else
-        echo "No parallel test results found. Run 'just test-parallel' first."
-    fi
+    bash -c 'if [ -f target/parallel-test-results/AGGREGATED_RESULTS.md ]; then cat target/parallel-test-results/AGGREGATED_RESULTS.md; else echo "No parallel test results found. Run just test-parallel first."; fi'

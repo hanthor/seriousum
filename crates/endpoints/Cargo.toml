@@ -1,5 +1,5 @@
 [package]
-name = "seriousum-policy"
+name = "seriousum-endpoints"
 version.workspace = true
 edition.workspace = true
 

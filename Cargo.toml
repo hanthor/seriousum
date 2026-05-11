@@ -47,7 +47,12 @@ members = [
     "crates/config",
     "crates/crypto",
     "crates/kvstore",
-    "crates/controller", "crates/service-observer", "crates/backend-mapping",
+    "crates/controller",
+    "crates/service-observer",
+    "crates/backend-mapping",
+    "crates/policy",
+    "crates/endpoints",
+    "crates/loadbalancer",
 ]
 
 [workspace.package]

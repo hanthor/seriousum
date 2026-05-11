@@ -1412,6 +1412,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "seriousum-endpoints"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+ "seriousum-api",
+ "seriousum-core",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
 name = "seriousum-envoy"
 version = "0.1.0"
 dependencies = [
@@ -1550,6 +1562,8 @@ dependencies = [
  "serde_json",
  "seriousum-api",
  "seriousum-core",
+ "tokio",
+ "tracing",
 ]
 
 [[package]]
