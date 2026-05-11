@@ -1986,6 +1986,8 @@ dependencies = [
  "serde_json",
  "seriousum-api",
  "seriousum-core",
+ "tokio",
+ "tracing",
 ]
 
 [[package]]
@@ -2079,10 +2081,12 @@ dependencies = [
 name = "seriousum-loadbalancer"
 version = "0.1.0"
 dependencies = [
+ "dashmap",
  "serde",
  "serde_json",
  "seriousum-api",
  "seriousum-core",
+ "thiserror 2.0.18",
  "tokio",
  "tracing",
 ]
