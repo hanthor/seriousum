@@ -7,10 +7,15 @@ edition.workspace = true
 clap = { workspace = true, features = ["derive"] }
 serde = { workspace = true, features = ["derive"] }
 serde_json.workspace = true
-seriousum-api = { path = "../api" }
 seriousum-config = { path = "../config" }
 seriousum-core = { workspace = true }
-seriousum-operator = { path = "../operator" }
+tokio = { workspace = true }
+anyhow.workspace = true
+thiserror = "2"
+tracing.workspace = true
+chrono = { workspace = true }
+uuid = { workspace = true }
+dashmap = "6"
 
 [lints]
 workspace = true

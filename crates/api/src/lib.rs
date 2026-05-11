@@ -1,15 +1,46 @@
-//! Shared control-plane contract types for seriousum.
+//! REST API server and control-plane contract types for seriousum.
 //!
-//! This crate intentionally stays small: reusable request/response envelopes,
-//! light-weight health/version metadata, and aliases back to `seriousum_core`
-//! for error handling.
+//! This crate provides:
+//! - Control-plane request/response envelopes with metadata
+//! - Health status tracking and reporting
+//! - REST API server implementation with axum
+//! - Agent control endpoints (healthz, config, cluster/nodes)
+//! - Endpoint management endpoints (list, get, create, update, delete)
+//! - Authentication middleware and error handling
+//! - OpenAPI/Swagger spec generation
 
 use serde::{Deserialize, Serialize};
 
-pub use seriousum_core::{Error, Result, VERSION as CORE_VERSION};
+pub use seriousum_core::{Error as CoreError, Result as CoreResult, VERSION as CORE_VERSION};
+
+// ============================================================================
+// Module definitions
+// ============================================================================
+
+pub mod errors;
+pub mod handlers;
+pub mod middleware;
+pub mod server;
+pub mod types;
+
+// ============================================================================
+// Re-exports
+// ============================================================================
+
+pub use errors::{ApiError, ApiResult};
+pub use server::Server;
+pub use types::*;
+
+// ============================================================================
+// Contract version
+// ============================================================================
 
 /// The current control-plane contract version.
 pub const CONTRACT_VERSION: &str = env!("CARGO_PKG_VERSION");
+
+// ============================================================================
+// Core types (previously in this file)
+// ============================================================================
 
 /// A compact version descriptor shared across control-plane messages.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -142,12 +173,12 @@ impl<T> Response<T> {
         }
     }
 
-    /// Converts an `ApiResult` into a response envelope.
+    /// Converts a `CoreResult` into a response envelope.
     #[must_use]
     pub fn from_result(
         id: impl Into<String>,
         component: impl Into<String>,
-        result: Result<T>,
+        result: CoreResult<T>,
     ) -> Self {
         match result {
             Ok(payload) => Self::ok(id, component, payload),
@@ -247,7 +278,7 @@ mod tests {
         let response = Response::<Ping>::from_result(
             "req-2",
             "cli",
-            Err(Error::Api("missing route".to_owned())),
+            Err(CoreError::Api("missing route".to_owned())),
         );
 
         assert_eq!(response.id, "req-2");

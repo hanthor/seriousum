@@ -6,8 +6,14 @@ edition.workspace = true
 [dependencies]
 serde = { workspace = true, features = ["derive"] }
 serde_json = { workspace = true }
-seriousum-api = { path = "../api" }
 seriousum-core = { workspace = true }
+tokio = { workspace = true, features = ["full"] }
+thiserror = "2"
+anyhow = { workspace = true }
+tracing = { workspace = true }
+dashmap = "6"
+std-semaphore = "0.1"
+parking_lot = "0.12"
 
 [lints]
 workspace = true

@@ -25,6 +25,7 @@ members = [
     "crates/policy",
     "crates/loadbalancer",
     "crates/endpoint",
+    "crates/egressgateway",
     "crates/identity",
     "crates/k8s",
     "crates/ipam",
@@ -50,9 +51,8 @@ members = [
     "crates/controller",
     "crates/service-observer",
     "crates/backend-mapping",
-    "crates/policy",
     "crates/endpoints",
-    "crates/loadbalancer",
+    "crates/dbg",
 ]
 
 [workspace.package]
@@ -116,6 +116,15 @@ ring = "0.17"
 rustls = "0.23"
 tokio-rustls = "0.26"
 
+# Web framework and HTTP
+axum = "0.7"
+tower = "0.4"
+tower-http = { version = "0.5", features = ["trace", "cors"] }
+utoipa = { version = "4.2", features = ["axum_extras"] }
+utoipa-swagger-ui = { version = "7", features = ["axum"] }
+http = "1"
+http-body-util = "0.1"
+
 # Metrics / observability
 prometheus = "0.14"
 metrics = "0.24"
@@ -123,6 +132,7 @@ metrics-exporter-prometheus = "0.16"
 
 # Key-value store
 tikv-jemallocator = "0.6"
+dashmap = "6"
 
 # Benchmarking
 criterion = { version = "0.5", features = ["html_reports", "async_tokio"] }

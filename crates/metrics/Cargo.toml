@@ -4,10 +4,14 @@ version.workspace = true
 edition.workspace = true
 
 [dependencies]
-serde = { workspace = true }
+tokio = { workspace = true, features = ["sync"] }
+serde = { workspace = true, features = ["derive"] }
 serde_json = { workspace = true }
 seriousum-core = { workspace = true }
-seriousum-api = { workspace = true }
+thiserror = "2"
+anyhow = { workspace = true }
+tracing = { workspace = true }
+dashmap = "6"
 
 [lints]
 workspace = true

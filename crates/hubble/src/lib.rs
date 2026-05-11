@@ -1,11 +1,14 @@
-//! Lightweight Hubble observability scaffold.
+//! Hubble observability and relay infrastructure.
 //!
-//! This crate intentionally stays small for now: serde-friendly flow metadata,
-//! summary counts, and a report wrapper that can be serialized for future event
-//! streaming and API integration.
+//! This crate provides:
+//! - Lightweight flow metadata types (serde-friendly)
+//! - Summary counts for flow aggregation
+//! - Hubble Relay server for distributed multi-cluster flow observation
+//! - Flow collection and filtering with peer coordination
+
+pub mod relay;
 
 use serde::{Deserialize, Serialize};
-use seriousum_api::MessageMetadata;
 use seriousum_core::{Error, Port, Protocol, Result, SecurityIdentity, SecurityLabel};
 
 /// Default component name used by the Hubble scaffold.
@@ -241,6 +244,34 @@ impl FlowSummary {
     }
 }
 
+/// Simple metadata for reports
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MessageMetadata {
+    /// Component that generated the message
+    pub component: String,
+    /// Optional trace ID
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub trace_id: Option<String>,
+}
+
+impl MessageMetadata {
+    /// Creates new metadata
+    #[must_use]
+    pub fn new(component: impl Into<String>) -> Self {
+        Self {
+            component: component.into(),
+            trace_id: None,
+        }
+    }
+
+    /// Sets trace ID
+    #[must_use]
+    pub fn with_trace_id(mut self, trace_id: impl Into<String>) -> Self {
+        self.trace_id = Some(trace_id.into());
+        self
+    }
+}
+
 /// Report wrapper for serialized Hubble observations.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct HubbleReport {
@@ -372,7 +403,6 @@ mod tests {
         let report = HubbleReport::scaffold();
 
         assert_eq!(report.metadata.component, HUBBLE_COMPONENT);
-        assert_eq!(report.metadata.version.contract, env!("CARGO_PKG_VERSION"));
         assert_eq!(report.summary, FlowSummary::default());
         assert!(report.observations.is_empty());
     }

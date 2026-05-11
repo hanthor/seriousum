@@ -1,3 +1,4 @@
 fn main() {
-    let _ = seriousum_metrics::scaffold();
+    let opts = seriousum_metrics::MetricOpts::new("test_metric");
+    println!("Metrics module ready: {}", opts.fq_name());
 }

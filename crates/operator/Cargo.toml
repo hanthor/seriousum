@@ -4,11 +4,44 @@ version.workspace = true
 edition.workspace = true
 
 [dependencies]
-clap = { workspace = true, features = ["derive"] }
+# Async runtime
+tokio = { workspace = true, features = ["full"] }
+async-trait = "0.1"
+futures = { workspace = true }
+
+# Kubernetes
+kube = { workspace = true, features = ["client", "rustls-tls", "runtime"] }
+k8s-openapi = { workspace = true, features = ["v1_32"] }
+kube-runtime = "0.98"
+
+# Serialization
 serde = { workspace = true, features = ["derive"] }
 serde_json = { workspace = true }
-seriousum-api = { path = "../api" }
-seriousum-core = { workspace = true, optional = true }
+tokio-util = { version = "0.7", features = ["codec"] }
+
+# Networking & addressing
+ipnet = { workspace = true }
+
+# Error handling & logging
+thiserror = "2"
+anyhow = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+
+# State management
+dashmap = "6"
+
+# CLI & config
+clap = { workspace = true, features = ["derive"] }
+
+# Project dependencies
+seriousum-core = { workspace = true }
+
+# Misc
+once_cell = { workspace = true }
+uuid = { workspace = true }
+chrono = { workspace = true }
+bytes = { workspace = true }
 
 [lints]
 workspace = true
