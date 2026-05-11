@@ -1,0 +1,18 @@
+[package]
+name = "seriousum-daemon"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+seriousum-core = { workspace = true }
+seriousum-config = { path = "../config" }
+seriousum-kvstore = { path = "../kvstore" }
+seriousum-crypto = { path = "../crypto" }
+anyhow.workspace = true
+clap = { workspace = true, features = ["derive"] }
+tokio.workspace = true
+tracing.workspace = true
+tracing-subscriber = { workspace = true, features = ["env-filter", "fmt"] }
+
+[lints]
+workspace = true

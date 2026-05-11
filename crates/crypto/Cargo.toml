@@ -1,0 +1,13 @@
+[package]
+name = "seriousum-crypto"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+seriousum-core = { workspace = true }
+anyhow.workspace = true
+ring.workspace = true
+serde = { workspace = true, features = ["derive"] }
+
+[lints]
+workspace = true

@@ -1,0 +1,23 @@
+{
+    "rust-analyzer.cargo.allTargets": true,
+    "rust-analyzer.check.command": "clippy",
+    "rust-analyzer.check.extraArgs": ["--workspace"],
+    "rust-analyzer.cargo.features": "all",
+    "rust-analyzer.cargo.buildScripts.enable": true,
+    "rust-analyzer.procMacro.enable": true,
+    "rust-analyzer.procMacro.attributes.enable": true,
+    "rust-analyzer.lens.enable": true,
+    "rust-analyzer.inlayHints.chainingTypes.enable": true,
+    "rust-analyzer.inlayHints.parameterNames.enable": "all",
+    "rust-analyzer.inlayHints.typeHints.enable": true,
+    "rust-analyzer.highlightRelatedAttributes.enable": true,
+    "rust-analyzer.highlightRelatedTypes.enable": true,
+    "editor.rulers": [100],
+    "rust-analyzer.diagnostics.disabled": [
+        "inactive-code"
+    ],
+    "files.exclude": {
+        "**/target/**": true,
+        "**/*.rs.bk": true
+    }
+}

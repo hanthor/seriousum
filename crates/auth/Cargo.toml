@@ -1,0 +1,12 @@
+[package]
+name = "seriousum-auth"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+serde = { workspace = true }
+serde_json = { workspace = true }
+seriousum-core = { workspace = true }
+
+[lints]
+workspace = true

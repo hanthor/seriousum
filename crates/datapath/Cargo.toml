@@ -1,0 +1,10 @@
+[package]
+name = "seriousum-datapath"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+seriousum-core = { workspace = true }
+
+[lints]
+workspace = true

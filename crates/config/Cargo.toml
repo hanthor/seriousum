@@ -1,0 +1,12 @@
+[package]
+name = "seriousum-config"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+seriousum-core = { workspace = true }
+serde = { workspace = true, features = ["derive"] }
+serde_json.workspace = true
+
+[lints]
+workspace = true
