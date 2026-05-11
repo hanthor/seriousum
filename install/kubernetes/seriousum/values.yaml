@@ -1,0 +1,131 @@
+# Seriousum Helm Chart Values
+# https://github.com/hanthor/seriousum
+
+replicaCount: 1
+
+image:
+  repository: ghcr.io/hanthor/seriousum/agent
+  pullPolicy: IfNotPresent
+  tag: "0.1.0-alpha"
+
+imagePullSecrets: []
+nameOverride: ""
+fullnameOverride: ""
+
+# Agent configuration
+agent:
+  enabled: true
+  replicas: 1
+  updateStrategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxUnavailable: 1
+
+  resources:
+    requests:
+      cpu: 100m
+      memory: 512Mi
+    limits:
+      cpu: 500m
+      memory: 1Gi
+
+  # eBPF configuration
+  ebpf:
+    enabled: true
+    logLevel: info
+
+  # Network policy
+  policy:
+    enabled: true
+    enforcement: "default"
+
+# Operator configuration
+operator:
+  enabled: true
+  
+  image:
+    repository: ghcr.io/hanthor/seriousum/operator
+    pullPolicy: IfNotPresent
+    tag: "0.1.0-alpha"
+  
+  replicas: 1
+  
+  resources:
+    requests:
+      cpu: 50m
+      memory: 256Mi
+    limits:
+      cpu: 200m
+      memory: 512Mi
+
+# Hubble observability
+hubble:
+  enabled: false
+  
+  relay:
+    enabled: false
+    image:
+      repository: ghcr.io/hanthor/seriousum/hubble-relay
+      tag: "0.1.0-alpha"
+    
+    resources:
+      requests:
+        cpu: 50m
+        memory: 256Mi
+      limits:
+        cpu: 200m
+        memory: 512Mi
+
+# RBAC
+serviceAccount:
+  create: true
+  annotations: {}
+  name: ""
+
+rbac:
+  create: true
+
+# Pod security policy
+podSecurityPolicy:
+  enabled: false
+
+# Node affinity
+nodeSelector: {}
+
+tolerations:
+  - key: node-role.kubernetes.io/master
+    effect: NoSchedule
+  - key: node-role.kubernetes.io/control-plane
+    effect: NoSchedule
+
+affinity: {}
+
+# Global settings
+global:
+  registry: ghcr.io
+  username: hanthor
+  logLevel: info
+  debug: false
+
+# Feature flags
+features:
+  ebpf: true
+  policy: true
+  serviceProxy: true
+  hubble: false
+  clustermesh: false
+  encryption: false
+
+# Monitoring
+monitoring:
+  enabled: false
+  prometheus:
+    enabled: false
+
+# Security context
+securityContext:
+  runAsNonRoot: false
+  runAsUser: 0
+  privileged: true
+
+podSecurityContext: {}

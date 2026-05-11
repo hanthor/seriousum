@@ -1,0 +1,18 @@
+apiVersion: v2
+name: seriousum
+description: Seriousum - Cilium networking engine ported to Rust
+type: application
+version: 0.1.0-alpha
+appVersion: 0.1.0-alpha
+home: https://github.com/hanthor/seriousum
+sources:
+  - https://github.com/hanthor/seriousum
+maintainers:
+  - name: Seriousum Contributors
+    email: maintainers@github.com
+keywords:
+  - networking
+  - kubernetes
+  - cilium
+  - rust
+dependencies: []
