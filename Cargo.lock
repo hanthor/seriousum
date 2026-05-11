@@ -104,6 +104,7 @@ name = "backend-mapping"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "async-trait",
  "serde",
  "tokio",
  "tokio-test",
