@@ -252,3 +252,26 @@ NC := '\033[0m' # No Color
 @profile-startup:
     echo "{{BLUE}}Profiling Cilium startup sequence...{{NC}}"
     ./scripts/profile-cilium-startup.sh
+
+# Push images to GitHub Container Registry (GHCR)
+@push-ghcr:
+    echo "{{BLUE}}Pushing images to GHCR...{{NC}}"
+    ./scripts/push-images-to-ghcr.sh
+    echo "{{GREEN}}Images pushed to GHCR!{{NC}}"
+
+# Build, test, and push images to GHCR (full workflow)
+@publish:
+    echo "{{GREEN}}Complete publish workflow: build → test → push{{NC}}"
+    just build
+    just build-images
+    echo "{{BLUE}}Running tests...{{NC}}"
+    cargo test --workspace --release 2>&1 | grep -E "test result:|passed|failed" | tail -5
+    echo "{{BLUE}}Pushing to GHCR...{{NC}}"
+    just push-ghcr
+    echo "{{GREEN}}✓ Publish complete!{{NC}}"
+
+# Set up images from GHCR (with local fallback)
+@setup-images:
+    echo "{{BLUE}}Setting up images (GHCR with local fallback)...{{NC}}"
+    ./scripts/setup-ghcr-images.sh
+    echo "{{GREEN}}✓ Images ready{{NC}}"
