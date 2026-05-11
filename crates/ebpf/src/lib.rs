@@ -9,6 +9,9 @@ use seriousum_core::{
     POLICY_MAP_NAME,
 };
 
+// Export service maps module
+pub mod maps;
+
 /// Convenience result type for the eBPF scaffold.
 pub type Result<T> = seriousum_core::Result<T>;
 

@@ -1394,7 +1394,10 @@ dependencies = [
 name = "seriousum-ebpf"
 version = "0.1.0"
 dependencies = [
+ "anyhow",
+ "serde",
  "seriousum-core",
+ "tracing",
 ]
 
 [[package]]
