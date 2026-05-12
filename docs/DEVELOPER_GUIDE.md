@@ -978,7 +978,7 @@ Fixes #123
 
 - Repository: https://github.com/hanthor/seriousum
 - Issues: https://github.com/hanthor/seriousum/issues
-- Roadmap: See MASTER_ROADMAP_V1_0.md
+- Parity status: See PARITY_PROOF_DASHBOARD.md
 
 ### Getting Help
 

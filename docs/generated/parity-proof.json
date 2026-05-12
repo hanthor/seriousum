@@ -25,7 +25,6 @@
       "status": "yellow",
       "summary": "Workspace and component evidence exist, but the full unmodified upstream integration matrix is not yet proven green.",
       "evidence": [
-        "docs/CILIUM_TEST_COMPATIBILITY_STRATEGY.md",
         "docs/FULL_TEST_SUITE_CATALOG.md",
         "docs/component-porting-compliance.md"
       ]
@@ -36,7 +35,7 @@
       "evidence": [
         "docs/INSTALLATION.md",
         "docs/TROUBLESHOOTING.md",
-        "docs/DISTRIBUTION_STRATEGY.md"
+        "README.md"
       ]
     },
     "performance_parity": {

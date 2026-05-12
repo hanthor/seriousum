@@ -98,8 +98,7 @@ The proof standard for “fully reimplemented” requires a stricter statement t
 ### Current evidence
 - Workspace unit tests pass.
 - Component parity anchors are documented.
-- Integration strategy exists:
-  - [docs/CILIUM_TEST_COMPATIBILITY_STRATEGY.md](CILIUM_TEST_COMPATIBILITY_STRATEGY.md)
+- Integration inventory exists:
   - [docs/FULL_TEST_SUITE_CATALOG.md](FULL_TEST_SUITE_CATALOG.md)
 
 ### Gap
@@ -119,7 +118,7 @@ The full upstream production-oriented integration matrix is not yet proven green
 - Installation methods are documented:
   - [docs/INSTALLATION.md](INSTALLATION.md)
   - [docs/TROUBLESHOOTING.md](TROUBLESHOOTING.md)
-- Distribution artifacts exist.
+- Distribution artifacts exist and are referenced from the main README.
 
 ### Gap
 Operational workflows are documented, but not yet fully proved by automated parity-grade cluster tests.
