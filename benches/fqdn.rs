@@ -81,6 +81,24 @@ fn bench_fqdn_json_unmarshal_100(c: &mut Criterion) {
     });
 }
 
+fn bench_fqdn_json_marshal_1000(c: &mut Criterion) {
+    let snapshot = build_json_fixture(1000);
+    c.bench_function("fqdn_json_marshal_1000", |b| {
+        b.iter(|| black_box(serde_json::to_vec(black_box(&snapshot)).unwrap()))
+    });
+}
+
+fn bench_fqdn_json_unmarshal_1000(c: &mut Criterion) {
+    let snapshot = build_json_fixture(1000);
+    let bytes = serde_json::to_vec(&snapshot).unwrap();
+    c.bench_function("fqdn_json_unmarshal_1000", |b| {
+        b.iter(|| {
+            let decoded: HashMap<String, Vec<IpAddr>> = serde_json::from_slice(black_box(&bytes)).unwrap();
+            black_box(decoded)
+        })
+    });
+}
+
 criterion_group!(
     fqdn_benches,
     bench_fqdn_lookup,
@@ -88,5 +106,7 @@ criterion_group!(
     bench_fqdn_selector_string,
     bench_fqdn_json_marshal_100,
     bench_fqdn_json_unmarshal_100,
+    bench_fqdn_json_marshal_1000,
+    bench_fqdn_json_unmarshal_1000,
 );
 criterion_main!(fqdn_benches);

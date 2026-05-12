@@ -69,5 +69,25 @@ fn bench_policy_eval(c: &mut Criterion) {
     group.finish();
 }
 
-criterion_group!(policy_benches, bench_selector_match, bench_policy_eval);
+fn bench_policy_eval_no_match(c: &mut Criterion) {
+    let repo = PolicyRepository::new();
+    for i in 0..1000usize {
+        repo.add_ingress_rule(format!("rule-{i}"), make_rule(i)).unwrap();
+    }
+    let endpoint_labels = labels("other", "worker", "dev");
+
+    c.bench_function("policy_eval_no_match_1000", |b| {
+        b.iter(|| {
+            black_box(
+                repo.distill_policy(
+                    black_box(EndpointIdentity::new(5678)),
+                    black_box(&endpoint_labels),
+                )
+                .unwrap(),
+            )
+        })
+    });
+}
+
+criterion_group!(policy_benches, bench_selector_match, bench_policy_eval, bench_policy_eval_no_match);
 criterion_main!(policy_benches);

@@ -1,6 +1,6 @@
 # Benchmark Comparison: Seriousum vs Cilium
 
-_Last updated: 2026-05-12 02:55 UTC · commit `0bd948b`_
+_Last updated: 2026-05-12 05:47 UTC · commit `ecd9499`_
 
 This report publishes the current benchmark comparison between **Seriousum** and **upstream Cilium**.
 
@@ -15,24 +15,28 @@ This report publishes the current benchmark comparison between **Seriousum** and
 | Metric | Seriousum | Cilium | Relative |
 |---|---:|---:|---:|
 | Agent binary size | **2725 KB** | 126612 KB | -97.8% |
-| Selector match hit | **36.27 ns** | 4.50 ns | 8.06x |
-| Selector match miss | **11.34 ns** | 4.33 ns | 2.62x |
-| IP allocator hot path | **140.99 ns** | 403.10 ns | 0.35x |
-| ServiceName construction | **21.16 ns** | 34.14 ns | 0.62x |
-| L3n4Addr IPv4 string+protocol | **93.00 ns** | 63.73 ns | 1.46x |
-| FQDN lookup | **46.66 ns** | 3.73 µs | 0.01x |
-| FQDN update | **184.10 ns** | 2.22 ms | 0.00x |
+| Selector match hit | **36.87 ns** | 4.14 ns | 8.91x |
+| Selector match miss | **12.77 ns** | 4.11 ns | 3.11x |
+| Policy resolve no-match | **25.07 µs** | 1.32 ms | 0.02x |
+| IP allocator hot path | **139.66 ns** | 381.80 ns | 0.37x |
+| ServiceName construction | **21.07 ns** | 33.44 ns | 0.63x |
+| L3n4Addr IPv4 string+protocol | **91.10 ns** | 60.00 ns | 1.52x |
+| FQDN lookup | **46.34 ns** | 3.29 µs | 0.01x |
+| FQDN update | **184.01 ns** | 2.23 ms | 0.00x |
 
 ## Approximate comparisons
 
 | Metric | Seriousum | Cilium | Relative |
 |---|---:|---:|---:|
-| Consistent-hash table build | **117.16 µs** | 3.30 ms | 0.04x |
-| ServiceName string/key | **35.63 ns** | 34.57 ns | 1.03x |
-| Load balancer upsert 100 | **29.97 µs** | 317.43 µs | 0.09x |
-| FQDN selector string | **66.19 ns** | 94.93 ns | 0.70x |
-| FQDN JSON marshal 100 | **3.03 µs** | 138.63 µs | 0.02x |
-| FQDN JSON unmarshal 100 | **14.79 µs** | 411.03 µs | 0.04x |
+| Consistent-hash table build | **125.19 µs** | 3.16 ms | 0.04x |
+| ServiceName string/key | **35.03 ns** | 33.34 ns | 1.05x |
+| Load balancer upsert 1 | **1.58 µs** | 6.12 µs | 0.26x |
+| Load balancer upsert 100 | **29.21 µs** | 297.22 µs | 0.10x |
+| FQDN selector string | **64.63 ns** | 82.24 ns | 0.79x |
+| FQDN JSON marshal 100 | **2.90 µs** | 136.36 µs | 0.02x |
+| FQDN JSON unmarshal 100 | **14.63 µs** | 392.91 µs | 0.04x |
+| FQDN JSON marshal 1000 | **31.27 µs** | 1.50 ms | 0.02x |
+| FQDN JSON unmarshal 1000 | **156.00 µs** | 4.33 ms | 0.04x |
 
 ### Benchmark mapping
 - Seriousum selector hit/miss: 'selector_match/match_hit' + 'selector_match/match_miss'
@@ -45,10 +49,10 @@ This report publishes the current benchmark comparison between **Seriousum** and
 - Cilium ServiceName ops: 'BenchmarkNewServiceName' + 'BenchmarkServiceNameKey'
 - Seriousum FQDN ops: 'fqdn_lookup' + 'fqdn_update'
 - Cilium FQDN ops: 'BenchmarkGetIPs' + 'BenchmarkUpdateIPs'
-- Seriousum FQDN JSON ops: 'fqdn_json_marshal_100' + 'fqdn_json_unmarshal_100'
-- Cilium FQDN JSON ops: 'BenchmarkMarshalJSON100' + 'BenchmarkUnmarshalJSON100'
-- Seriousum LB batch op: 'lb_upsert_service_100'
-- Cilium LB batch op: 'Benchmark_UpsertServiceAndFrontends_100'
+- Seriousum FQDN JSON ops: 'fqdn_json_marshal_100' + 'fqdn_json_unmarshal_100' + 'fqdn_json_marshal_1000' + 'fqdn_json_unmarshal_1000'
+- Cilium FQDN JSON ops: 'BenchmarkMarshalJSON100' + 'BenchmarkUnmarshalJSON100' + 'BenchmarkMarshalJSON1000' + 'BenchmarkUnmarshalJSON1000'
+- Seriousum LB batch ops: 'lb_upsert_service_1' + 'lb_upsert_service_100'
+- Cilium LB batch ops: 'Benchmark_UpsertServiceAndFrontends_1' + 'Benchmark_UpsertServiceAndFrontends_100'
 
 ## System metrics
 
@@ -64,43 +68,51 @@ System metric status: **pending-kind-capable-runner**
 
 | Benchmark | Median |
 |---|---:|
-| Load balancer round-robin (8 backends) | 4.14 ns |
-| Load balancer consistent hash select (8 backends) | 7.18 ns |
-| Policy evaluation (1 policy) | 5.65 µs |
-| Policy evaluation (100 policies) | 11.62 µs |
-| Selector match (hit) | 36.27 ns |
-| Selector match (miss) | 11.34 ns |
-| IPAM allocate warm pool | 140.99 ns |
+| Load balancer round-robin (8 backends) | 4.10 ns |
+| Load balancer consistent hash select (8 backends) | 7.02 ns |
+| Policy evaluation (1 policy) | 5.59 µs |
+| Policy evaluation (100 policies) | 11.54 µs |
+| Policy evaluation no match 1000 | 25.07 µs |
+| Selector match (hit) | 36.87 ns |
+| Selector match (miss) | 12.77 ns |
+| IPAM allocate warm pool | 139.66 ns |
 | IPAM allocate + release ×1000 | 3.17 ms |
-| Maglev table build (1000 backends) | 117.16 µs |
-| ServiceName construction | 21.16 ns |
-| ServiceName display | 35.63 ns |
-| L3n4Addr IPv4 display | 93.00 ns |
-| Load balancer upsert 100 | 29.97 µs |
-| Load balancer update backends 100 | 13.31 µs |
-| FQDN lookup | 46.66 ns |
-| FQDN update | 184.10 ns |
-| FQDN selector string | 66.19 ns |
-| FQDN JSON marshal 100 | 3.03 µs |
-| FQDN JSON unmarshal 100 | 14.79 µs |
+| Maglev table build (1000 backends) | 125.19 µs |
+| ServiceName construction | 21.07 ns |
+| ServiceName display | 35.03 ns |
+| L3n4Addr IPv4 display | 91.10 ns |
+| Load balancer upsert 1 | 1.58 µs |
+| Load balancer upsert 100 | 29.21 µs |
+| Load balancer update backends 100 | 13.09 µs |
+| FQDN lookup | 46.34 ns |
+| FQDN update | 184.01 ns |
+| FQDN selector string | 64.63 ns |
+| FQDN JSON marshal 100 | 2.90 µs |
+| FQDN JSON unmarshal 100 | 14.63 µs |
+| FQDN JSON marshal 1000 | 31.27 µs |
+| FQDN JSON unmarshal 1000 | 156.00 µs |
 
 ## Upstream Cilium Go micro-benchmarks
 
 | Benchmark | Result |
 |---|---:|
-| Selector match valid 1000 | 4.50 ns |
-| Selector match invalid 1000 | 4.33 ns |
-| Hash allocator alloc any | 403.10 ns |
-| Maglev lookup table build 16381 | 3.30 ms |
-| ServiceName construction | 34.14 ns |
-| ServiceName key | 34.57 ns |
-| L3n4Addr IPv4 string+protocol | 63.73 ns |
-| Load balancer upsert service+frontends 100 | 317.43 µs |
-| FQDN get IPs | 3.73 µs |
-| FQDN update IPs | 2.22 ms |
-| FQDN selector string | 94.93 ns |
-| FQDN JSON marshal 100 | 138.63 µs |
-| FQDN JSON unmarshal 100 | 411.03 µs |
+| Selector match valid 1000 | 4.14 ns |
+| Selector match invalid 1000 | 4.11 ns |
+| Policy resolve no matching rules | 1.32 ms |
+| Hash allocator alloc any | 381.80 ns |
+| Maglev lookup table build 16381 | 3.16 ms |
+| ServiceName construction | 33.44 ns |
+| ServiceName key | 33.34 ns |
+| L3n4Addr IPv4 string+protocol | 60.00 ns |
+| Load balancer upsert service+frontends 1 | 6.12 µs |
+| Load balancer upsert service+frontends 100 | 297.22 µs |
+| FQDN get IPs | 3.29 µs |
+| FQDN update IPs | 2.23 ms |
+| FQDN selector string | 82.24 ns |
+| FQDN JSON marshal 100 | 136.36 µs |
+| FQDN JSON unmarshal 100 | 392.91 µs |
+| FQDN JSON marshal 1000 | 1.50 ms |
+| FQDN JSON unmarshal 1000 | 4.33 ms |
 
 ## Reproduce locally
 

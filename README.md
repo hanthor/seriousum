@@ -597,35 +597,37 @@ Seriousum builds on the excellent work of the Cilium community. Special thanks t
 <!-- BENCHMARK_START -->
 ## 📊 Benchmarks
 
-> Last run: **2026-05-12 02:55 UTC** · commit `0bd948b`
+> Last run: **2026-05-12 05:47 UTC** · commit `ecd9499`
 > Published comparison report: [docs/generated/BENCHMARKS.md](docs/generated/BENCHMARKS.md)
 
 | Metric | Seriousum | Cilium | Relative |
 |---|---:|---:|---:|
 | Agent binary size | **2725 KB** | 126612 KB | -97.8% |
-| Selector match hit | **36.27 ns** | 4.50 ns | 8.06x |
-| Selector match miss | **11.34 ns** | 4.33 ns | 2.62x |
-| IP allocator hot path | **140.99 ns** | 403.10 ns | 0.35x |
-| ServiceName construction | **21.16 ns** | 34.14 ns | 0.62x |
-| FQDN lookup | **46.66 ns** | 3.73 µs | 0.01x |
-| FQDN JSON marshal 100 | **3.03 µs** | 138.63 µs | 0.02x |
+| Selector match hit | **36.87 ns** | 4.14 ns | 8.91x |
+| Selector match miss | **12.77 ns** | 4.11 ns | 3.11x |
+| Policy resolve no-match | **25.07 µs** | 1.32 ms | 0.02x |
+| IP allocator hot path | **139.66 ns** | 381.80 ns | 0.37x |
+| ServiceName construction | **21.07 ns** | 33.44 ns | 0.63x |
+| FQDN lookup | **46.34 ns** | 3.29 µs | 0.01x |
+| FQDN JSON marshal 100 | **2.90 µs** | 136.36 µs | 0.02x |
 
 ### Seriousum micro-benchmarks
 
 | Benchmark | Median |
 |---|---:|
-| LB round-robin (8 backends) | 4.14 ns |
-| LB consistent hash (8 backends) | 7.18 ns |
-| Policy eval (1 policy) | 5.65 µs |
-| Policy eval (100 policies) | 11.62 µs |
-| Selector match (hit) | 36.27 ns |
-| Selector match (miss) | 11.34 ns |
-| IPAM alloc warm pool | 140.99 ns |
+| LB round-robin (8 backends) | 4.10 ns |
+| LB consistent hash (8 backends) | 7.02 ns |
+| Policy eval (1 policy) | 5.59 µs |
+| Policy eval (100 policies) | 11.54 µs |
+| Selector match (hit) | 36.87 ns |
+| Selector match (miss) | 12.77 ns |
+| IPAM alloc warm pool | 139.66 ns |
 | IPAM alloc + release ×1000 | 3.17 ms |
-| ServiceName display | 35.63 ns |
-| Load balancer upsert 100 | 29.97 µs |
-| FQDN update | 184.10 ns |
-| FQDN selector string | 66.19 ns |
+| ServiceName display | 35.03 ns |
+| Load balancer upsert 1 | 1.58 µs |
+| Load balancer upsert 100 | 29.21 µs |
+| FQDN update | 184.01 ns |
+| FQDN selector string | 64.63 ns |
 
 > System startup / memory / CPU status: **pending-kind-capable-runner**
 

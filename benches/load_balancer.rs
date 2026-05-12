@@ -73,6 +73,22 @@ fn bench_l3n4addr_display_ipv4(c: &mut Criterion) {
     });
 }
 
+fn bench_upsert_service_1(c: &mut Criterion) {
+    c.bench_function("lb_upsert_service_1", |b| {
+        b.iter(|| {
+            let lb = LoadBalancer::new();
+            let name = ServiceName::new("test", "svc-1");
+            let frontend = Frontend::new(
+                L3n4Addr::new(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)), 8080, L4Protocol::TCP),
+                SvcType::ClusterIp,
+                name.clone(),
+            );
+            let service = Service::new(name).with_frontends(vec![frontend]);
+            black_box(lb.upsert_service(service).unwrap());
+        })
+    });
+}
+
 fn bench_upsert_service_100(c: &mut Criterion) {
     c.bench_function("lb_upsert_service_100", |b| {
         b.iter(|| {
@@ -124,6 +140,7 @@ criterion_group!(
     bench_service_name_new,
     bench_service_name_display,
     bench_l3n4addr_display_ipv4,
+    bench_upsert_service_1,
     bench_upsert_service_100,
     bench_update_backends_100,
 );
