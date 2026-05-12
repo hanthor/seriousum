@@ -2020,6 +2020,7 @@ dependencies = [
  "seriousum-clustermesh",
  "seriousum-daemon",
  "seriousum-endpoints",
+ "seriousum-fqdn",
  "seriousum-hubble",
  "seriousum-loadbalancer",
  "seriousum-operator",

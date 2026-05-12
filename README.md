@@ -597,26 +597,32 @@ Seriousum builds on the excellent work of the Cilium community. Special thanks t
 <!-- BENCHMARK_START -->
 ## 📊 Benchmarks
 
-> Last run: **2026-05-11 23:45 UTC** · commit `ac32013`
+> Last run: **2026-05-12 02:32 UTC** · commit `103bdfd`
 > Published comparison report: [docs/generated/BENCHMARKS.md](docs/generated/BENCHMARKS.md)
 
 | Metric | Seriousum | Cilium | Relative |
 |---|---:|---:|---:|
 | Agent binary size | **2725 KB** | 126612 KB | -97.8% |
-| Selector match hot path | **36.58 ns** | 4.27 ns | 8.57x |
-| IP allocator hot path | **140.34 ns** | 405.40 ns | 0.35x |
+| Selector match hit | **36.57 ns** | 4.48 ns | 8.16x |
+| Selector match miss | **11.29 ns** | 4.37 ns | 2.58x |
+| IP allocator hot path | **143.39 ns** | 388.00 ns | 0.37x |
+| ServiceName construction | **23.88 ns** | 34.98 ns | 0.68x |
+| FQDN lookup | **46.78 ns** | 3.70 µs | 0.01x |
 
 ### Seriousum micro-benchmarks
 
 | Benchmark | Median |
 |---|---:|
-| LB round-robin (8 backends) | 4.11 ns |
-| LB consistent hash (8 backends) | 7.13 ns |
-| Policy eval (1 policy) | 5.63 µs |
-| Policy eval (100 policies) | 11.69 µs |
-| Selector match (hit) | 36.58 ns |
-| IPAM alloc warm pool | 140.34 ns |
-| IPAM alloc + release ×1000 | 3.16 ms |
+| LB round-robin (8 backends) | 4.14 ns |
+| LB consistent hash (8 backends) | 7.10 ns |
+| Policy eval (1 policy) | 5.68 µs |
+| Policy eval (100 policies) | 11.78 µs |
+| Selector match (hit) | 36.57 ns |
+| Selector match (miss) | 11.29 ns |
+| IPAM alloc warm pool | 143.39 ns |
+| IPAM alloc + release ×1000 | 3.23 ms |
+| ServiceName display | 35.39 ns |
+| FQDN update | 184.57 ns |
 
 > System startup / memory / CPU status: **pending-kind-capable-runner**
 

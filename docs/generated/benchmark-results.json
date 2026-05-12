@@ -1,14 +1,20 @@
 {
-  "timestamp": "2026-05-11 23:45 UTC",
-  "git_sha": "ac32013",
+  "timestamp": "2026-05-12 02:32 UTC",
+  "git_sha": "103bdfd",
   "cilium_image": "quay.io/cilium/cilium-ci:latest",
   "cilium_source": "/var/home/james/dev/cilium",
   "system_status": "pending-kind-capable-runner",
   "comparison": {
     "agent_binary_size_kb": {"seriousum": "2725", "cilium": "126612", "delta": "-97.8%"},
-    "selector_match_hit": {"seriousum": "36.58 ns", "cilium": "4.27 ns", "ratio": "8.57x"},
-    "ip_allocator_hot_path": {"seriousum": "140.34 ns", "cilium": "405.40 ns", "ratio": "0.35x"},
-    "maglev_table_build": {"seriousum": "117.45 µs", "cilium": "3.30 ms", "ratio": "0.04x"}
+    "selector_match_hit": {"seriousum": "36.57 ns", "cilium": "4.48 ns", "ratio": "8.16x"},
+    "selector_match_miss": {"seriousum": "11.29 ns", "cilium": "4.37 ns", "ratio": "2.58x"},
+    "ip_allocator_hot_path": {"seriousum": "143.39 ns", "cilium": "388.00 ns", "ratio": "0.37x"},
+    "maglev_table_build": {"seriousum": "110.60 µs", "cilium": "3.55 ms", "ratio": "0.03x"},
+    "service_name_new": {"seriousum": "23.88 ns", "cilium": "34.98 ns", "ratio": "0.68x"},
+    "service_name_string": {"seriousum": "35.39 ns", "cilium": "34.54 ns", "ratio": "1.02x"},
+    "l3n4addr_string_ipv4": {"seriousum": "92.54 ns", "cilium": "68.09 ns", "ratio": "1.36x"},
+    "fqdn_lookup": {"seriousum": "46.78 ns", "cilium": "3.70 µs", "ratio": "0.01x"},
+    "fqdn_update": {"seriousum": "184.57 ns", "cilium": "2.27 ms", "ratio": "0.00x"}
   },
   "system": {
     "startup_seconds": {"seriousum": "N/A", "cilium": "N/A", "delta": "N/A"},
@@ -16,18 +22,30 @@
     "idle_cpu_mcores": {"seriousum": "N/A", "cilium": "N/A", "delta": "N/A"}
   },
   "microbench_seriousum": {
-    "lb_round_robin_8_backends": "4.11 ns",
-    "lb_consistent_hash_8_backends": "7.13 ns",
-    "policy_eval_1_policy": "5.63 µs",
-    "policy_eval_100_policies": "11.69 µs",
-    "selector_match_hit": "36.58 ns",
-    "ipam_allocate_warm_pool": "140.34 ns",
-    "ipam_alloc_release_1000": "3.16 ms",
-    "maglev_table_build_1000": "117.45 µs"
+    "lb_round_robin_8_backends": "4.14 ns",
+    "lb_consistent_hash_8_backends": "7.10 ns",
+    "policy_eval_1_policy": "5.68 µs",
+    "policy_eval_100_policies": "11.78 µs",
+    "selector_match_hit": "36.57 ns",
+    "selector_match_miss": "11.29 ns",
+    "ipam_allocate_warm_pool": "143.39 ns",
+    "ipam_alloc_release_1000": "3.23 ms",
+    "maglev_table_build_1000": "110.60 µs",
+    "service_name_new": "23.88 ns",
+    "service_name_display": "35.39 ns",
+    "l3n4addr_display_ipv4": "92.54 ns",
+    "fqdn_lookup": "46.78 ns",
+    "fqdn_update": "184.57 ns"
   },
   "microbench_cilium_go": {
-    "selector_matches_valid_1000": "4.27 ns",
-    "ipalloc_alloc_any": "405.40 ns",
-    "maglev_get_lookup_table_16381": "3.30 ms"
+    "selector_matches_valid_1000": "4.48 ns",
+    "selector_matches_invalid_1000": "4.37 ns",
+    "ipalloc_alloc_any": "388.00 ns",
+    "maglev_get_lookup_table_16381": "3.55 ms",
+    "service_name_new": "34.98 ns",
+    "service_name_key": "34.54 ns",
+    "l3n4addr_string_ipv4": "68.09 ns",
+    "fqdn_get_ips": "3.70 µs",
+    "fqdn_update_ips": "2.27 ms"
   }
 }

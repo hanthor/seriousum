@@ -200,9 +200,9 @@ run_seriousum_benches() {
   rm -rf "$REPO_ROOT/target/criterion"
   : > "$OUT_DIR/criterion-raw.txt"
   cargo build --profile bench --benches >/dev/null
-  for bench_name in load_balancer policy_eval ipam; do
+  for bench_name in load_balancer policy_eval ipam fqdn; do
     local bench_bin
-    bench_bin="$(find "$REPO_ROOT/target/release/deps" -maxdepth 1 -type f -name "${bench_name}-*" ! -name '*.d' | head -1)"
+    bench_bin="$(find "$REPO_ROOT/target/release/deps" -maxdepth 1 -type f -name "${bench_name}-*" ! -name '*.d' -printf '%T@ %p\n' | sort -nr | head -1 | cut -d' ' -f2-)"
     if [[ -n "$bench_bin" ]]; then
       "$bench_bin" --bench >> "$OUT_DIR/criterion-raw.txt" 2>&1
     fi
@@ -313,9 +313,15 @@ SER_LB_CH_8="$(parse_estimate "$REPO_ROOT/target/criterion/lb_consistent_hash/ba
 SER_POLICY_1="$(parse_estimate "$REPO_ROOT/target/criterion/policy_eval/policies/1/new/estimates.json")"
 SER_POLICY_100="$(parse_estimate "$REPO_ROOT/target/criterion/policy_eval/policies/100/new/estimates.json")"
 SER_SELECTOR_HIT="$(parse_estimate "$REPO_ROOT/target/criterion/selector_match/match_hit/new/estimates.json")"
+SER_SELECTOR_MISS="$(parse_estimate "$REPO_ROOT/target/criterion/selector_match/match_miss/new/estimates.json")"
 SER_IPAM_1000="$(parse_estimate "$REPO_ROOT/target/criterion/ipam_alloc_release_1000/new/estimates.json")"
 SER_IPAM_WARM="$(parse_estimate "$REPO_ROOT/target/criterion/ipam_allocate_warm_pool/new/estimates.json")"
 SER_MAGLEV_BUILD="$(parse_estimate "$REPO_ROOT/target/criterion/lb_maglev_build_1000/new/estimates.json")"
+SER_SERVICE_NAME_NEW="$(parse_estimate "$REPO_ROOT/target/criterion/lb_service_name_new/new/estimates.json")"
+SER_SERVICE_NAME_DISPLAY="$(parse_estimate "$REPO_ROOT/target/criterion/lb_service_name_display/new/estimates.json")"
+SER_L3N4ADDR_DISPLAY_IPV4="$(parse_estimate "$REPO_ROOT/target/criterion/lb_l3n4addr_display_ipv4/new/estimates.json")"
+SER_FQDN_LOOKUP="$(parse_estimate "$REPO_ROOT/target/criterion/fqdn_lookup/new/estimates.json")"
+SER_FQDN_UPDATE="$(parse_estimate "$REPO_ROOT/target/criterion/fqdn_update/new/estimates.json")"
 
 # 4. Upstream Cilium Go micro-benchmarks
 : > "$OUT_DIR/cilium-go-bench.txt"
@@ -325,8 +331,14 @@ else
   warn "No local Cilium source checkout found; upstream Go micro-benchmarks will be N/A"
 fi
 CIL_SELECTOR_VALID_1000="$(run_go_benchmark ./pkg/policy/types '^BenchmarkMatchesValid1000$')"
+CIL_SELECTOR_INVALID_1000="$(run_go_benchmark ./pkg/policy/types '^BenchmarkMatchesInvalid1000$')"
 CIL_IPALLOC_ANY="$(run_go_benchmark ./pkg/ipalloc '^BenchmarkHashAlloc_AllocAny$')"
 CIL_MAGLEV_TABLE="$(run_go_benchmark ./pkg/maglev '^BenchmarkGetMaglevTable/16381$')"
+CIL_SERVICE_NAME_NEW="$(run_go_benchmark ./pkg/loadbalancer '^BenchmarkNewServiceName$')"
+CIL_SERVICE_NAME_KEY="$(run_go_benchmark ./pkg/loadbalancer '^BenchmarkServiceNameKey$')"
+CIL_L3N4ADDR_STRING_IPV4="$(run_go_benchmark ./pkg/loadbalancer '^BenchmarkL3n4Addr_String_IPv4$')"
+CIL_FQDN_GET_IPS="$(run_go_benchmark ./pkg/fqdn '^BenchmarkGetIPs$')"
+CIL_FQDN_UPDATE_IPS="$(run_go_benchmark ./pkg/fqdn '^BenchmarkUpdateIPs$')"
 
 TIMESTAMP="$(date -u +"%Y-%m-%d %H:%M UTC")"
 GIT_SHA="$(git -C "$REPO_ROOT" rev-parse --short HEAD 2>/dev/null || echo unknown)"
@@ -335,9 +347,15 @@ BIN_DELTA="$(percent_delta "$SERIOUSUM_BIN_KB" "$CILIUM_BIN_KB")"
 STARTUP_DELTA="$(percent_delta "$SERIOUSUM_STARTUP_S" "$CILIUM_STARTUP_S")"
 RSS_DELTA="$(percent_delta "$SERIOUSUM_RSS_MB" "$CILIUM_RSS_MB")"
 CPU_DELTA="$(percent_delta "$SERIOUSUM_CPU_MCORES" "$CILIUM_CPU_MCORES")"
-SELECTOR_RATIO="$(ratio_delta "$SER_SELECTOR_HIT" "$CIL_SELECTOR_VALID_1000")"
+SELECTOR_HIT_RATIO="$(ratio_delta "$SER_SELECTOR_HIT" "$CIL_SELECTOR_VALID_1000")"
+SELECTOR_MISS_RATIO="$(ratio_delta "$SER_SELECTOR_MISS" "$CIL_SELECTOR_INVALID_1000")"
 IPAM_RATIO="$(ratio_delta "$SER_IPAM_WARM" "$CIL_IPALLOC_ANY")"
 MAGLEV_RATIO="$(ratio_delta "$SER_MAGLEV_BUILD" "$CIL_MAGLEV_TABLE")"
+SERVICE_NAME_NEW_RATIO="$(ratio_delta "$SER_SERVICE_NAME_NEW" "$CIL_SERVICE_NAME_NEW")"
+SERVICE_NAME_DISPLAY_RATIO="$(ratio_delta "$SER_SERVICE_NAME_DISPLAY" "$CIL_SERVICE_NAME_KEY")"
+L3N4ADDR_DISPLAY_RATIO="$(ratio_delta "$SER_L3N4ADDR_DISPLAY_IPV4" "$CIL_L3N4ADDR_STRING_IPV4")"
+FQDN_LOOKUP_RATIO="$(ratio_delta "$SER_FQDN_LOOKUP" "$CIL_FQDN_GET_IPS")"
+FQDN_UPDATE_RATIO="$(ratio_delta "$SER_FQDN_UPDATE" "$CIL_FQDN_UPDATE_IPS")"
 
 cat > "$OUT_DIR/results.json" <<EOF
 {
@@ -348,9 +366,15 @@ cat > "$OUT_DIR/results.json" <<EOF
   "system_status": "$SYSTEM_STATUS",
   "comparison": {
     "agent_binary_size_kb": {"seriousum": "$SERIOUSUM_BIN_KB", "cilium": "$CILIUM_BIN_KB", "delta": "$BIN_DELTA"},
-    "selector_match_hit": {"seriousum": "$SER_SELECTOR_HIT", "cilium": "$CIL_SELECTOR_VALID_1000", "ratio": "$SELECTOR_RATIO"},
+    "selector_match_hit": {"seriousum": "$SER_SELECTOR_HIT", "cilium": "$CIL_SELECTOR_VALID_1000", "ratio": "$SELECTOR_HIT_RATIO"},
+    "selector_match_miss": {"seriousum": "$SER_SELECTOR_MISS", "cilium": "$CIL_SELECTOR_INVALID_1000", "ratio": "$SELECTOR_MISS_RATIO"},
     "ip_allocator_hot_path": {"seriousum": "$SER_IPAM_WARM", "cilium": "$CIL_IPALLOC_ANY", "ratio": "$IPAM_RATIO"},
-    "maglev_table_build": {"seriousum": "$SER_MAGLEV_BUILD", "cilium": "$CIL_MAGLEV_TABLE", "ratio": "$MAGLEV_RATIO"}
+    "maglev_table_build": {"seriousum": "$SER_MAGLEV_BUILD", "cilium": "$CIL_MAGLEV_TABLE", "ratio": "$MAGLEV_RATIO"},
+    "service_name_new": {"seriousum": "$SER_SERVICE_NAME_NEW", "cilium": "$CIL_SERVICE_NAME_NEW", "ratio": "$SERVICE_NAME_NEW_RATIO"},
+    "service_name_string": {"seriousum": "$SER_SERVICE_NAME_DISPLAY", "cilium": "$CIL_SERVICE_NAME_KEY", "ratio": "$SERVICE_NAME_DISPLAY_RATIO"},
+    "l3n4addr_string_ipv4": {"seriousum": "$SER_L3N4ADDR_DISPLAY_IPV4", "cilium": "$CIL_L3N4ADDR_STRING_IPV4", "ratio": "$L3N4ADDR_DISPLAY_RATIO"},
+    "fqdn_lookup": {"seriousum": "$SER_FQDN_LOOKUP", "cilium": "$CIL_FQDN_GET_IPS", "ratio": "$FQDN_LOOKUP_RATIO"},
+    "fqdn_update": {"seriousum": "$SER_FQDN_UPDATE", "cilium": "$CIL_FQDN_UPDATE_IPS", "ratio": "$FQDN_UPDATE_RATIO"}
   },
   "system": {
     "startup_seconds": {"seriousum": "$SERIOUSUM_STARTUP_S", "cilium": "$CILIUM_STARTUP_S", "delta": "$STARTUP_DELTA"},
@@ -363,14 +387,26 @@ cat > "$OUT_DIR/results.json" <<EOF
     "policy_eval_1_policy": "$SER_POLICY_1",
     "policy_eval_100_policies": "$SER_POLICY_100",
     "selector_match_hit": "$SER_SELECTOR_HIT",
+    "selector_match_miss": "$SER_SELECTOR_MISS",
     "ipam_allocate_warm_pool": "$SER_IPAM_WARM",
     "ipam_alloc_release_1000": "$SER_IPAM_1000",
-    "maglev_table_build_1000": "$SER_MAGLEV_BUILD"
+    "maglev_table_build_1000": "$SER_MAGLEV_BUILD",
+    "service_name_new": "$SER_SERVICE_NAME_NEW",
+    "service_name_display": "$SER_SERVICE_NAME_DISPLAY",
+    "l3n4addr_display_ipv4": "$SER_L3N4ADDR_DISPLAY_IPV4",
+    "fqdn_lookup": "$SER_FQDN_LOOKUP",
+    "fqdn_update": "$SER_FQDN_UPDATE"
   },
   "microbench_cilium_go": {
     "selector_matches_valid_1000": "$CIL_SELECTOR_VALID_1000",
+    "selector_matches_invalid_1000": "$CIL_SELECTOR_INVALID_1000",
     "ipalloc_alloc_any": "$CIL_IPALLOC_ANY",
-    "maglev_get_lookup_table_16381": "$CIL_MAGLEV_TABLE"
+    "maglev_get_lookup_table_16381": "$CIL_MAGLEV_TABLE",
+    "service_name_new": "$CIL_SERVICE_NAME_NEW",
+    "service_name_key": "$CIL_SERVICE_NAME_KEY",
+    "l3n4addr_string_ipv4": "$CIL_L3N4ADDR_STRING_IPV4",
+    "fqdn_get_ips": "$CIL_FQDN_GET_IPS",
+    "fqdn_update_ips": "$CIL_FQDN_UPDATE_IPS"
   }
 }
 EOF
@@ -389,6 +425,8 @@ The most directly comparable measurements currently published are:
 - **Agent binary size**
 - **Selector matching hot path**
 - **Allocator hot path**
+- **ServiceName / address formatting hot paths**
+- **FQDN cache operations**
 - **Consistent-hash table build** (approximate, implementation details differ)
 
 ## Direct comparison
@@ -396,17 +434,27 @@ The most directly comparable measurements currently published are:
 | Metric | Seriousum | Cilium | Relative |
 |---|---:|---:|---:|
 | Agent binary size | **${SERIOUSUM_BIN_KB} KB** | ${CILIUM_BIN_KB} KB | ${BIN_DELTA} |
-| Selector match hot path | **${SER_SELECTOR_HIT}** | ${CIL_SELECTOR_VALID_1000} | ${SELECTOR_RATIO} |
+| Selector match hit | **${SER_SELECTOR_HIT}** | ${CIL_SELECTOR_VALID_1000} | ${SELECTOR_HIT_RATIO} |
+| Selector match miss | **${SER_SELECTOR_MISS}** | ${CIL_SELECTOR_INVALID_1000} | ${SELECTOR_MISS_RATIO} |
 | IP allocator hot path | **${SER_IPAM_WARM}** | ${CIL_IPALLOC_ANY} | ${IPAM_RATIO} |
 | Consistent-hash table build | **${SER_MAGLEV_BUILD}** | ${CIL_MAGLEV_TABLE} | ${MAGLEV_RATIO} |
+| ServiceName construction | **${SER_SERVICE_NAME_NEW}** | ${CIL_SERVICE_NAME_NEW} | ${SERVICE_NAME_NEW_RATIO} |
+| ServiceName string/key | **${SER_SERVICE_NAME_DISPLAY}** | ${CIL_SERVICE_NAME_KEY} | ${SERVICE_NAME_DISPLAY_RATIO} |
+| L3n4Addr IPv4 string | **${SER_L3N4ADDR_DISPLAY_IPV4}** | ${CIL_L3N4ADDR_STRING_IPV4} | ${L3N4ADDR_DISPLAY_RATIO} |
+| FQDN lookup | **${SER_FQDN_LOOKUP}** | ${CIL_FQDN_GET_IPS} | ${FQDN_LOOKUP_RATIO} |
+| FQDN update | **${SER_FQDN_UPDATE}** | ${CIL_FQDN_UPDATE_IPS} | ${FQDN_UPDATE_RATIO} |
 
 ### Benchmark mapping
-- Seriousum selector: 'selector_match/match_hit'
-- Cilium selector: 'pkg/policy/types BenchmarkMatchesValid1000'
+- Seriousum selector hit/miss: 'selector_match/match_hit' + 'selector_match/match_miss'
+- Cilium selector hit/miss: 'pkg/policy/types BenchmarkMatchesValid1000' + 'BenchmarkMatchesInvalid1000'
 - Seriousum allocator: 'ipam_allocate_warm_pool'
 - Cilium allocator: 'pkg/ipalloc BenchmarkHashAlloc_AllocAny'
 - Seriousum hash-table build: 'lb_maglev_build_1000'
 - Cilium hash-table build: 'pkg/maglev BenchmarkGetMaglevTable/16381'
+- Seriousum ServiceName ops: 'lb_service_name_new' + 'lb_service_name_display'
+- Cilium ServiceName ops: 'BenchmarkNewServiceName' + 'BenchmarkServiceNameKey'
+- Seriousum FQDN ops: 'fqdn_lookup' + 'fqdn_update'
+- Cilium FQDN ops: 'BenchmarkGetIPs' + 'BenchmarkUpdateIPs'
 
 ## System metrics
 
@@ -427,17 +475,29 @@ System metric status: **${SYSTEM_STATUS}**
 | Policy evaluation (1 policy) | ${SER_POLICY_1} |
 | Policy evaluation (100 policies) | ${SER_POLICY_100} |
 | Selector match (hit) | ${SER_SELECTOR_HIT} |
+| Selector match (miss) | ${SER_SELECTOR_MISS} |
 | IPAM allocate warm pool | ${SER_IPAM_WARM} |
 | IPAM allocate + release ×1000 | ${SER_IPAM_1000} |
 | Maglev table build (1000 backends) | ${SER_MAGLEV_BUILD} |
+| ServiceName construction | ${SER_SERVICE_NAME_NEW} |
+| ServiceName display | ${SER_SERVICE_NAME_DISPLAY} |
+| L3n4Addr IPv4 display | ${SER_L3N4ADDR_DISPLAY_IPV4} |
+| FQDN lookup | ${SER_FQDN_LOOKUP} |
+| FQDN update | ${SER_FQDN_UPDATE} |
 
 ## Upstream Cilium Go micro-benchmarks
 
 | Benchmark | Result |
 |---|---:|
 | Selector match valid 1000 | ${CIL_SELECTOR_VALID_1000} |
+| Selector match invalid 1000 | ${CIL_SELECTOR_INVALID_1000} |
 | Hash allocator alloc any | ${CIL_IPALLOC_ANY} |
 | Maglev lookup table build 16381 | ${CIL_MAGLEV_TABLE} |
+| ServiceName construction | ${CIL_SERVICE_NAME_NEW} |
+| ServiceName key | ${CIL_SERVICE_NAME_KEY} |
+| L3n4Addr IPv4 string | ${CIL_L3N4ADDR_STRING_IPV4} |
+| FQDN get IPs | ${CIL_FQDN_GET_IPS} |
+| FQDN update IPs | ${CIL_FQDN_UPDATE_IPS} |
 
 ## Reproduce locally
 
@@ -469,8 +529,11 @@ cat > "$OUT_DIR/readme-bench.md" <<EOF
 | Metric | Seriousum | Cilium | Relative |
 |---|---:|---:|---:|
 | Agent binary size | **${SERIOUSUM_BIN_KB} KB** | ${CILIUM_BIN_KB} KB | ${BIN_DELTA} |
-| Selector match hot path | **${SER_SELECTOR_HIT}** | ${CIL_SELECTOR_VALID_1000} | ${SELECTOR_RATIO} |
+| Selector match hit | **${SER_SELECTOR_HIT}** | ${CIL_SELECTOR_VALID_1000} | ${SELECTOR_HIT_RATIO} |
+| Selector match miss | **${SER_SELECTOR_MISS}** | ${CIL_SELECTOR_INVALID_1000} | ${SELECTOR_MISS_RATIO} |
 | IP allocator hot path | **${SER_IPAM_WARM}** | ${CIL_IPALLOC_ANY} | ${IPAM_RATIO} |
+| ServiceName construction | **${SER_SERVICE_NAME_NEW}** | ${CIL_SERVICE_NAME_NEW} | ${SERVICE_NAME_NEW_RATIO} |
+| FQDN lookup | **${SER_FQDN_LOOKUP}** | ${CIL_FQDN_GET_IPS} | ${FQDN_LOOKUP_RATIO} |
 
 ### Seriousum micro-benchmarks
 
@@ -481,8 +544,11 @@ cat > "$OUT_DIR/readme-bench.md" <<EOF
 | Policy eval (1 policy) | ${SER_POLICY_1} |
 | Policy eval (100 policies) | ${SER_POLICY_100} |
 | Selector match (hit) | ${SER_SELECTOR_HIT} |
+| Selector match (miss) | ${SER_SELECTOR_MISS} |
 | IPAM alloc warm pool | ${SER_IPAM_WARM} |
 | IPAM alloc + release ×1000 | ${SER_IPAM_1000} |
+| ServiceName display | ${SER_SERVICE_NAME_DISPLAY} |
+| FQDN update | ${SER_FQDN_UPDATE} |
 
 > System startup / memory / CPU status: **${SYSTEM_STATUS}**
 
