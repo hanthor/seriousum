@@ -77,6 +77,12 @@ pub struct FqdnSelector {
     pub match_subdomains: bool,
 }
 
+impl std::fmt::Display for FqdnSelector {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.pattern)
+    }
+}
+
 impl FqdnSelector {
     /// Creates a new FQDN selector
     pub fn new(pattern: impl Into<String>) -> Self {
@@ -168,5 +174,11 @@ mod tests {
         assert_eq!(FqdnSelector::normalize_fqdn("example.com"), "example.com.");
         assert_eq!(FqdnSelector::normalize_fqdn("EXAMPLE.COM"), "example.com.");
         assert_eq!(FqdnSelector::normalize_fqdn("example.com."), "example.com.");
+    }
+
+    #[test]
+    fn fqdn_selector_display() {
+        let selector = FqdnSelector::new("*.example.com");
+        assert_eq!(selector.to_string(), "*.example.com");
     }
 }

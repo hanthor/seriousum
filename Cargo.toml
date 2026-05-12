@@ -162,6 +162,7 @@ seriousum-loadbalancer = { path = "crates/loadbalancer" }
 seriousum-policy = { path = "crates/policy" }
 seriousum-endpoints = { path = "crates/endpoints" }
 seriousum-fqdn = { path = "crates/fqdn" }
+serde_json = { workspace = true }
 
 [workspace.lints.clippy]
 all = { level = "warn", priority = -1 }

@@ -320,8 +320,13 @@ SER_MAGLEV_BUILD="$(parse_estimate "$REPO_ROOT/target/criterion/lb_maglev_build_
 SER_SERVICE_NAME_NEW="$(parse_estimate "$REPO_ROOT/target/criterion/lb_service_name_new/new/estimates.json")"
 SER_SERVICE_NAME_DISPLAY="$(parse_estimate "$REPO_ROOT/target/criterion/lb_service_name_display/new/estimates.json")"
 SER_L3N4ADDR_DISPLAY_IPV4="$(parse_estimate "$REPO_ROOT/target/criterion/lb_l3n4addr_display_ipv4/new/estimates.json")"
+SER_LB_UPSERT_100="$(parse_estimate "$REPO_ROOT/target/criterion/lb_upsert_service_100/new/estimates.json")"
+SER_LB_UPDATE_BACKENDS_100="$(parse_estimate "$REPO_ROOT/target/criterion/lb_update_backends_100/new/estimates.json")"
 SER_FQDN_LOOKUP="$(parse_estimate "$REPO_ROOT/target/criterion/fqdn_lookup/new/estimates.json")"
 SER_FQDN_UPDATE="$(parse_estimate "$REPO_ROOT/target/criterion/fqdn_update/new/estimates.json")"
+SER_FQDN_SELECTOR_STRING="$(parse_estimate "$REPO_ROOT/target/criterion/fqdn_selector_string/new/estimates.json")"
+SER_FQDN_JSON_MARSHAL_100="$(parse_estimate "$REPO_ROOT/target/criterion/fqdn_json_marshal_100/new/estimates.json")"
+SER_FQDN_JSON_UNMARSHAL_100="$(parse_estimate "$REPO_ROOT/target/criterion/fqdn_json_unmarshal_100/new/estimates.json")"
 
 # 4. Upstream Cilium Go micro-benchmarks
 : > "$OUT_DIR/cilium-go-bench.txt"
@@ -336,9 +341,13 @@ CIL_IPALLOC_ANY="$(run_go_benchmark ./pkg/ipalloc '^BenchmarkHashAlloc_AllocAny$
 CIL_MAGLEV_TABLE="$(run_go_benchmark ./pkg/maglev '^BenchmarkGetMaglevTable/16381$')"
 CIL_SERVICE_NAME_NEW="$(run_go_benchmark ./pkg/loadbalancer '^BenchmarkNewServiceName$')"
 CIL_SERVICE_NAME_KEY="$(run_go_benchmark ./pkg/loadbalancer '^BenchmarkServiceNameKey$')"
-CIL_L3N4ADDR_STRING_IPV4="$(run_go_benchmark ./pkg/loadbalancer '^BenchmarkL3n4Addr_String_IPv4$')"
+CIL_L3N4ADDR_STRING_IPV4="$(run_go_benchmark ./pkg/loadbalancer '^BenchmarkL3n4Addr_StringWithProtocol_IPv4$')"
+CIL_LB_UPSERT_100="$(run_go_benchmark ./pkg/loadbalancer/writer '^Benchmark_UpsertServiceAndFrontends_100$')"
 CIL_FQDN_GET_IPS="$(run_go_benchmark ./pkg/fqdn '^BenchmarkGetIPs$')"
 CIL_FQDN_UPDATE_IPS="$(run_go_benchmark ./pkg/fqdn '^BenchmarkUpdateIPs$')"
+CIL_FQDN_SELECTOR_STRING="$(run_go_benchmark ./pkg/policy/api '^BenchmarkFQDNSelectorString$')"
+CIL_FQDN_JSON_MARSHAL_100="$(run_go_benchmark ./pkg/fqdn '^BenchmarkMarshalJSON100$')"
+CIL_FQDN_JSON_UNMARSHAL_100="$(run_go_benchmark ./pkg/fqdn '^BenchmarkUnmarshalJSON100$')"
 
 TIMESTAMP="$(date -u +"%Y-%m-%d %H:%M UTC")"
 GIT_SHA="$(git -C "$REPO_ROOT" rev-parse --short HEAD 2>/dev/null || echo unknown)"
@@ -354,8 +363,12 @@ MAGLEV_RATIO="$(ratio_delta "$SER_MAGLEV_BUILD" "$CIL_MAGLEV_TABLE")"
 SERVICE_NAME_NEW_RATIO="$(ratio_delta "$SER_SERVICE_NAME_NEW" "$CIL_SERVICE_NAME_NEW")"
 SERVICE_NAME_DISPLAY_RATIO="$(ratio_delta "$SER_SERVICE_NAME_DISPLAY" "$CIL_SERVICE_NAME_KEY")"
 L3N4ADDR_DISPLAY_RATIO="$(ratio_delta "$SER_L3N4ADDR_DISPLAY_IPV4" "$CIL_L3N4ADDR_STRING_IPV4")"
+LB_UPSERT_100_RATIO="$(ratio_delta "$SER_LB_UPSERT_100" "$CIL_LB_UPSERT_100")"
 FQDN_LOOKUP_RATIO="$(ratio_delta "$SER_FQDN_LOOKUP" "$CIL_FQDN_GET_IPS")"
 FQDN_UPDATE_RATIO="$(ratio_delta "$SER_FQDN_UPDATE" "$CIL_FQDN_UPDATE_IPS")"
+FQDN_SELECTOR_STRING_RATIO="$(ratio_delta "$SER_FQDN_SELECTOR_STRING" "$CIL_FQDN_SELECTOR_STRING")"
+FQDN_JSON_MARSHAL_100_RATIO="$(ratio_delta "$SER_FQDN_JSON_MARSHAL_100" "$CIL_FQDN_JSON_MARSHAL_100")"
+FQDN_JSON_UNMARSHAL_100_RATIO="$(ratio_delta "$SER_FQDN_JSON_UNMARSHAL_100" "$CIL_FQDN_JSON_UNMARSHAL_100")"
 
 cat > "$OUT_DIR/results.json" <<EOF
 {
@@ -373,8 +386,12 @@ cat > "$OUT_DIR/results.json" <<EOF
     "service_name_new": {"seriousum": "$SER_SERVICE_NAME_NEW", "cilium": "$CIL_SERVICE_NAME_NEW", "ratio": "$SERVICE_NAME_NEW_RATIO"},
     "service_name_string": {"seriousum": "$SER_SERVICE_NAME_DISPLAY", "cilium": "$CIL_SERVICE_NAME_KEY", "ratio": "$SERVICE_NAME_DISPLAY_RATIO"},
     "l3n4addr_string_ipv4": {"seriousum": "$SER_L3N4ADDR_DISPLAY_IPV4", "cilium": "$CIL_L3N4ADDR_STRING_IPV4", "ratio": "$L3N4ADDR_DISPLAY_RATIO"},
+    "loadbalancer_upsert_100": {"seriousum": "$SER_LB_UPSERT_100", "cilium": "$CIL_LB_UPSERT_100", "ratio": "$LB_UPSERT_100_RATIO"},
     "fqdn_lookup": {"seriousum": "$SER_FQDN_LOOKUP", "cilium": "$CIL_FQDN_GET_IPS", "ratio": "$FQDN_LOOKUP_RATIO"},
-    "fqdn_update": {"seriousum": "$SER_FQDN_UPDATE", "cilium": "$CIL_FQDN_UPDATE_IPS", "ratio": "$FQDN_UPDATE_RATIO"}
+    "fqdn_update": {"seriousum": "$SER_FQDN_UPDATE", "cilium": "$CIL_FQDN_UPDATE_IPS", "ratio": "$FQDN_UPDATE_RATIO"},
+    "fqdn_selector_string": {"seriousum": "$SER_FQDN_SELECTOR_STRING", "cilium": "$CIL_FQDN_SELECTOR_STRING", "ratio": "$FQDN_SELECTOR_STRING_RATIO"},
+    "fqdn_json_marshal_100": {"seriousum": "$SER_FQDN_JSON_MARSHAL_100", "cilium": "$CIL_FQDN_JSON_MARSHAL_100", "ratio": "$FQDN_JSON_MARSHAL_100_RATIO"},
+    "fqdn_json_unmarshal_100": {"seriousum": "$SER_FQDN_JSON_UNMARSHAL_100", "cilium": "$CIL_FQDN_JSON_UNMARSHAL_100", "ratio": "$FQDN_JSON_UNMARSHAL_100_RATIO"}
   },
   "system": {
     "startup_seconds": {"seriousum": "$SERIOUSUM_STARTUP_S", "cilium": "$CILIUM_STARTUP_S", "delta": "$STARTUP_DELTA"},
@@ -394,8 +411,13 @@ cat > "$OUT_DIR/results.json" <<EOF
     "service_name_new": "$SER_SERVICE_NAME_NEW",
     "service_name_display": "$SER_SERVICE_NAME_DISPLAY",
     "l3n4addr_display_ipv4": "$SER_L3N4ADDR_DISPLAY_IPV4",
+    "loadbalancer_upsert_100": "$SER_LB_UPSERT_100",
+    "loadbalancer_update_backends_100": "$SER_LB_UPDATE_BACKENDS_100",
     "fqdn_lookup": "$SER_FQDN_LOOKUP",
-    "fqdn_update": "$SER_FQDN_UPDATE"
+    "fqdn_update": "$SER_FQDN_UPDATE",
+    "fqdn_selector_string": "$SER_FQDN_SELECTOR_STRING",
+    "fqdn_json_marshal_100": "$SER_FQDN_JSON_MARSHAL_100",
+    "fqdn_json_unmarshal_100": "$SER_FQDN_JSON_UNMARSHAL_100"
   },
   "microbench_cilium_go": {
     "selector_matches_valid_1000": "$CIL_SELECTOR_VALID_1000",
@@ -405,8 +427,12 @@ cat > "$OUT_DIR/results.json" <<EOF
     "service_name_new": "$CIL_SERVICE_NAME_NEW",
     "service_name_key": "$CIL_SERVICE_NAME_KEY",
     "l3n4addr_string_ipv4": "$CIL_L3N4ADDR_STRING_IPV4",
+    "loadbalancer_upsert_service_and_frontends_100": "$CIL_LB_UPSERT_100",
     "fqdn_get_ips": "$CIL_FQDN_GET_IPS",
-    "fqdn_update_ips": "$CIL_FQDN_UPDATE_IPS"
+    "fqdn_update_ips": "$CIL_FQDN_UPDATE_IPS",
+    "fqdn_selector_string": "$CIL_FQDN_SELECTOR_STRING",
+    "fqdn_json_marshal_100": "$CIL_FQDN_JSON_MARSHAL_100",
+    "fqdn_json_unmarshal_100": "$CIL_FQDN_JSON_UNMARSHAL_100"
   }
 }
 EOF
@@ -419,17 +445,13 @@ _Last updated: $TIMESTAMP · commit \`$GIT_SHA\`_
 
 This report publishes the current benchmark comparison between **Seriousum** and **upstream Cilium**.
 
-## What is directly compared
+## Comparison categories
 
-The most directly comparable measurements currently published are:
-- **Agent binary size**
-- **Selector matching hot path**
-- **Allocator hot path**
-- **ServiceName / address formatting hot paths**
-- **FQDN cache operations**
-- **Consistent-hash table build** (approximate, implementation details differ)
+- **Direct-ish**: same or very similar operation shape between Seriousum and upstream Cilium.
+- **Approximate**: useful directional comparison, but underlying implementation or data model differs.
+- **Pending**: reserved for system-level kind/Helm comparison on capable runners.
 
-## Direct comparison
+## Direct-ish comparisons
 
 | Metric | Seriousum | Cilium | Relative |
 |---|---:|---:|---:|
@@ -437,12 +459,21 @@ The most directly comparable measurements currently published are:
 | Selector match hit | **${SER_SELECTOR_HIT}** | ${CIL_SELECTOR_VALID_1000} | ${SELECTOR_HIT_RATIO} |
 | Selector match miss | **${SER_SELECTOR_MISS}** | ${CIL_SELECTOR_INVALID_1000} | ${SELECTOR_MISS_RATIO} |
 | IP allocator hot path | **${SER_IPAM_WARM}** | ${CIL_IPALLOC_ANY} | ${IPAM_RATIO} |
-| Consistent-hash table build | **${SER_MAGLEV_BUILD}** | ${CIL_MAGLEV_TABLE} | ${MAGLEV_RATIO} |
 | ServiceName construction | **${SER_SERVICE_NAME_NEW}** | ${CIL_SERVICE_NAME_NEW} | ${SERVICE_NAME_NEW_RATIO} |
-| ServiceName string/key | **${SER_SERVICE_NAME_DISPLAY}** | ${CIL_SERVICE_NAME_KEY} | ${SERVICE_NAME_DISPLAY_RATIO} |
-| L3n4Addr IPv4 string | **${SER_L3N4ADDR_DISPLAY_IPV4}** | ${CIL_L3N4ADDR_STRING_IPV4} | ${L3N4ADDR_DISPLAY_RATIO} |
+| L3n4Addr IPv4 string+protocol | **${SER_L3N4ADDR_DISPLAY_IPV4}** | ${CIL_L3N4ADDR_STRING_IPV4} | ${L3N4ADDR_DISPLAY_RATIO} |
 | FQDN lookup | **${SER_FQDN_LOOKUP}** | ${CIL_FQDN_GET_IPS} | ${FQDN_LOOKUP_RATIO} |
 | FQDN update | **${SER_FQDN_UPDATE}** | ${CIL_FQDN_UPDATE_IPS} | ${FQDN_UPDATE_RATIO} |
+
+## Approximate comparisons
+
+| Metric | Seriousum | Cilium | Relative |
+|---|---:|---:|---:|
+| Consistent-hash table build | **${SER_MAGLEV_BUILD}** | ${CIL_MAGLEV_TABLE} | ${MAGLEV_RATIO} |
+| ServiceName string/key | **${SER_SERVICE_NAME_DISPLAY}** | ${CIL_SERVICE_NAME_KEY} | ${SERVICE_NAME_DISPLAY_RATIO} |
+| Load balancer upsert 100 | **${SER_LB_UPSERT_100}** | ${CIL_LB_UPSERT_100} | ${LB_UPSERT_100_RATIO} |
+| FQDN selector string | **${SER_FQDN_SELECTOR_STRING}** | ${CIL_FQDN_SELECTOR_STRING} | ${FQDN_SELECTOR_STRING_RATIO} |
+| FQDN JSON marshal 100 | **${SER_FQDN_JSON_MARSHAL_100}** | ${CIL_FQDN_JSON_MARSHAL_100} | ${FQDN_JSON_MARSHAL_100_RATIO} |
+| FQDN JSON unmarshal 100 | **${SER_FQDN_JSON_UNMARSHAL_100}** | ${CIL_FQDN_JSON_UNMARSHAL_100} | ${FQDN_JSON_UNMARSHAL_100_RATIO} |
 
 ### Benchmark mapping
 - Seriousum selector hit/miss: 'selector_match/match_hit' + 'selector_match/match_miss'
@@ -455,6 +486,10 @@ The most directly comparable measurements currently published are:
 - Cilium ServiceName ops: 'BenchmarkNewServiceName' + 'BenchmarkServiceNameKey'
 - Seriousum FQDN ops: 'fqdn_lookup' + 'fqdn_update'
 - Cilium FQDN ops: 'BenchmarkGetIPs' + 'BenchmarkUpdateIPs'
+- Seriousum FQDN JSON ops: 'fqdn_json_marshal_100' + 'fqdn_json_unmarshal_100'
+- Cilium FQDN JSON ops: 'BenchmarkMarshalJSON100' + 'BenchmarkUnmarshalJSON100'
+- Seriousum LB batch op: 'lb_upsert_service_100'
+- Cilium LB batch op: 'Benchmark_UpsertServiceAndFrontends_100'
 
 ## System metrics
 
@@ -482,8 +517,13 @@ System metric status: **${SYSTEM_STATUS}**
 | ServiceName construction | ${SER_SERVICE_NAME_NEW} |
 | ServiceName display | ${SER_SERVICE_NAME_DISPLAY} |
 | L3n4Addr IPv4 display | ${SER_L3N4ADDR_DISPLAY_IPV4} |
+| Load balancer upsert 100 | ${SER_LB_UPSERT_100} |
+| Load balancer update backends 100 | ${SER_LB_UPDATE_BACKENDS_100} |
 | FQDN lookup | ${SER_FQDN_LOOKUP} |
 | FQDN update | ${SER_FQDN_UPDATE} |
+| FQDN selector string | ${SER_FQDN_SELECTOR_STRING} |
+| FQDN JSON marshal 100 | ${SER_FQDN_JSON_MARSHAL_100} |
+| FQDN JSON unmarshal 100 | ${SER_FQDN_JSON_UNMARSHAL_100} |
 
 ## Upstream Cilium Go micro-benchmarks
 
@@ -495,9 +535,13 @@ System metric status: **${SYSTEM_STATUS}**
 | Maglev lookup table build 16381 | ${CIL_MAGLEV_TABLE} |
 | ServiceName construction | ${CIL_SERVICE_NAME_NEW} |
 | ServiceName key | ${CIL_SERVICE_NAME_KEY} |
-| L3n4Addr IPv4 string | ${CIL_L3N4ADDR_STRING_IPV4} |
+| L3n4Addr IPv4 string+protocol | ${CIL_L3N4ADDR_STRING_IPV4} |
+| Load balancer upsert service+frontends 100 | ${CIL_LB_UPSERT_100} |
 | FQDN get IPs | ${CIL_FQDN_GET_IPS} |
 | FQDN update IPs | ${CIL_FQDN_UPDATE_IPS} |
+| FQDN selector string | ${CIL_FQDN_SELECTOR_STRING} |
+| FQDN JSON marshal 100 | ${CIL_FQDN_JSON_MARSHAL_100} |
+| FQDN JSON unmarshal 100 | ${CIL_FQDN_JSON_UNMARSHAL_100} |
 
 ## Reproduce locally
 
@@ -534,6 +578,7 @@ cat > "$OUT_DIR/readme-bench.md" <<EOF
 | IP allocator hot path | **${SER_IPAM_WARM}** | ${CIL_IPALLOC_ANY} | ${IPAM_RATIO} |
 | ServiceName construction | **${SER_SERVICE_NAME_NEW}** | ${CIL_SERVICE_NAME_NEW} | ${SERVICE_NAME_NEW_RATIO} |
 | FQDN lookup | **${SER_FQDN_LOOKUP}** | ${CIL_FQDN_GET_IPS} | ${FQDN_LOOKUP_RATIO} |
+| FQDN JSON marshal 100 | **${SER_FQDN_JSON_MARSHAL_100}** | ${CIL_FQDN_JSON_MARSHAL_100} | ${FQDN_JSON_MARSHAL_100_RATIO} |
 
 ### Seriousum micro-benchmarks
 
@@ -548,7 +593,9 @@ cat > "$OUT_DIR/readme-bench.md" <<EOF
 | IPAM alloc warm pool | ${SER_IPAM_WARM} |
 | IPAM alloc + release ×1000 | ${SER_IPAM_1000} |
 | ServiceName display | ${SER_SERVICE_NAME_DISPLAY} |
+| Load balancer upsert 100 | ${SER_LB_UPSERT_100} |
 | FQDN update | ${SER_FQDN_UPDATE} |
+| FQDN selector string | ${SER_FQDN_SELECTOR_STRING} |
 
 > System startup / memory / CPU status: **${SYSTEM_STATUS}**
 

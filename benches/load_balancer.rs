@@ -1,7 +1,7 @@
 //! Benchmark: load-balancer backend selection.
 
 use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
-use seriousum_loadbalancer::{L3n4Addr, L4Protocol, MaglevHash, ServiceName};
+use seriousum_loadbalancer::{Backend, Frontend, L3n4Addr, L4Protocol, LoadBalancer, MaglevHash, Service, ServiceName, SvcType};
 use std::hint::black_box;
 use std::net::{IpAddr, Ipv4Addr};
 
@@ -73,6 +73,49 @@ fn bench_l3n4addr_display_ipv4(c: &mut Criterion) {
     });
 }
 
+fn bench_upsert_service_100(c: &mut Criterion) {
+    c.bench_function("lb_upsert_service_100", |b| {
+        b.iter(|| {
+            let lb = LoadBalancer::new();
+            for i in 0..100 {
+                let name = ServiceName::new("test", format!("svc-{i}"));
+                let frontend = Frontend::new(
+                    L3n4Addr::new(IpAddr::V4(Ipv4Addr::new(10, 0, 0, (i % 250 + 1) as u8)), 8080, L4Protocol::TCP),
+                    SvcType::ClusterIp,
+                    name.clone(),
+                );
+                let service = Service::new(name).with_frontends(vec![frontend]);
+                black_box(lb.upsert_service(service).unwrap());
+            }
+        })
+    });
+}
+
+fn bench_update_backends_100(c: &mut Criterion) {
+    let lb = LoadBalancer::new();
+    let service_name = ServiceName::new("test", "svc");
+    let frontend = Frontend::new(
+        L3n4Addr::new(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)), 8080, L4Protocol::TCP),
+        SvcType::ClusterIp,
+        service_name.clone(),
+    );
+    lb.upsert_service(Service::new(service_name.clone()).with_frontends(vec![frontend]))
+        .unwrap();
+
+    let backends: Vec<_> = (0..100)
+        .map(|i| {
+            Backend::new(
+                service_name.clone(),
+                L3n4Addr::new(IpAddr::V4(Ipv4Addr::new(10, 1, 0, (i % 250 + 1) as u8)), 8080, L4Protocol::TCP),
+            )
+        })
+        .collect();
+
+    c.bench_function("lb_update_backends_100", |b| {
+        b.iter(|| black_box(lb.update_backends(&service_name, black_box(backends.clone())).unwrap()))
+    });
+}
+
 criterion_group!(
     lb_benches,
     bench_round_robin_baseline,
@@ -81,5 +124,7 @@ criterion_group!(
     bench_service_name_new,
     bench_service_name_display,
     bench_l3n4addr_display_ipv4,
+    bench_upsert_service_100,
+    bench_update_backends_100,
 );
 criterion_main!(lb_benches);

@@ -2016,6 +2016,7 @@ dependencies = [
  "anyhow",
  "clap",
  "criterion",
+ "serde_json",
  "seriousum-cli",
  "seriousum-clustermesh",
  "seriousum-daemon",
