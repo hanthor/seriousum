@@ -348,6 +348,7 @@ Cargo clippy:          ~8 seconds
 - **[docs/PORTING.md](PORTING.md)** - Go→Rust translation patterns
 
 ### Technical Reference
+- **[docs/PARITY_PROOF_DASHBOARD.md](docs/PARITY_PROOF_DASHBOARD.md)** - What full Cilium parity proof requires and what is still missing
 - **[docs/MASTER_ROADMAP_V1_0.md](docs/MASTER_ROADMAP_V1_0.md)** - Complete roadmap to v1.0
 - **[docs/FULL_TEST_SUITE_CATALOG.md](docs/FULL_TEST_SUITE_CATALOG.md)** - All tests documented
 - **[docs/parity-matrix.md](docs/parity-matrix.md)** - Cilium Go→Rust component mapping

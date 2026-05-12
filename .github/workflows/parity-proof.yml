@@ -1,0 +1,37 @@
+name: parity-proof
+
+on:
+  pull_request:
+    paths:
+      - 'docs/PARITY_PROOF_DASHBOARD.md'
+      - 'docs/generated/parity-proof.json'
+      - 'scripts/check-parity-proof.sh'
+      - '.github/workflows/parity-proof.yml'
+      - 'docs/component-porting-compliance.md'
+      - 'docs/parity-matrix.md'
+      - 'docs/generated/BENCHMARKS.md'
+      - 'docs/generated/benchmark-results.json'
+      - 'PROJECT_COMPLETION_SUMMARY.md'
+  push:
+    branches:
+      - main
+    paths:
+      - 'docs/PARITY_PROOF_DASHBOARD.md'
+      - 'docs/generated/parity-proof.json'
+      - 'scripts/check-parity-proof.sh'
+      - '.github/workflows/parity-proof.yml'
+      - 'docs/component-porting-compliance.md'
+      - 'docs/parity-matrix.md'
+      - 'docs/generated/BENCHMARKS.md'
+      - 'docs/generated/benchmark-results.json'
+      - 'PROJECT_COMPLETION_SUMMARY.md'
+
+jobs:
+  parity-proof:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repo
+        uses: actions/checkout@v4
+
+      - name: Validate parity proof artifacts
+        run: bash scripts/check-parity-proof.sh

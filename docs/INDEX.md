@@ -102,7 +102,12 @@
     - Criterion micro-benchmarks
     - Reproduction commands
 
-13. **[Compliance Certification](../COMPLIANCE_CERTIFICATION.md)** ⭐ **OFFICIAL CERT**
+13. **[Parity Proof Dashboard](PARITY_PROOF_DASHBOARD.md)**
+    - Defines what counts as full Cilium parity proof
+    - Shows current evidence gaps
+    - Tracks proof pillars and exit criteria
+
+14. **[Compliance Certification](../COMPLIANCE_CERTIFICATION.md)** ⭐ **OFFICIAL CERT**
     - Official compliance certification
     - Highest level compliance achieved
     - Verification checklist
@@ -114,20 +119,20 @@
 
 ### For Contributors
 
-14. **[Developer Guide](DEVELOPER_GUIDE.md)**
+15. **[Developer Guide](DEVELOPER_GUIDE.md)**
     - Development environment setup
     - Building from source
     - Code structure and organization
     - Testing guidelines
     - Contribution workflow
 
-15. **[Porting Guide](../PORTING.md)**
+16. **[Porting Guide](../PORTING.md)**
     - Go to Rust translation patterns
     - Common idiom translations
     - Library mappings
     - Best practices
 
-16. **[AI Agent Integration Guide](../AGENTS.md)**
+17. **[AI Agent Integration Guide](../AGENTS.md)**
     - Parallel agent workflow
     - Agent skills and capabilities
     - Multi-track development
@@ -139,7 +144,7 @@
 
 ### Future Development
 
-17. **[Master Roadmap to v1.0](MASTER_ROADMAP_V1_0.md)**
+18. **[Master Roadmap to v1.0](MASTER_ROADMAP_V1_0.md)**
     - v0.1.0-beta plans (1-2 weeks)
     - v0.1.0 final (2-3 weeks)
     - v0.2.0 milestone (4 weeks)
@@ -147,7 +152,7 @@
     - Feature priorities
     - Performance targets
 
-18. **[Integration Testing Expansion](INTEGRATION_TESTING_EXPANSION.md)**
+19. **[Integration Testing Expansion](INTEGRATION_TESTING_EXPANSION.md)**
     - Extended test suite plans
     - Ginkgo focus groups
     - Parallel test execution
@@ -159,13 +164,13 @@
 
 ### Technical Reference
 
-19. **[Project Completion Summary](../PROJECT_COMPLETION_SUMMARY.md)**
+20. **[Project Completion Summary](../PROJECT_COMPLETION_SUMMARY.md)**
     - All 114 todos status
     - All 24 tracks completion
     - Code metrics and statistics
     - Quality assurance results
 
-20. **[Rust Operator Implementation](RUST_OPERATOR_IMPLEMENTATION.md)**
+21. **[Rust Operator Implementation](RUST_OPERATOR_IMPLEMENTATION.md)**
     - Operator architecture
     - CRD management
     - Reconciliation loops
@@ -184,6 +189,7 @@ docs/
 ├── DEVELOPER_GUIDE.md                   ← For contributors
 ├── CILIUM_TEST_COMPATIBILITY_STRATEGY.md ← Test integration
 ├── FULL_TEST_SUITE_CATALOG.md           ← Test inventory
+├── PARITY_PROOF_DASHBOARD.md            ← Proof status dashboard
 │
 ├── DISTRIBUTION_STRATEGY.md             ← Multi-channel deploy
 ├── MASTER_ROADMAP_V1_0.md               ← Future plans
