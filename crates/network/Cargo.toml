@@ -1,13 +1,16 @@
 [package]
-name = "seriousum-network"
+name = "cilium-network"
 version.workspace = true
 edition.workspace = true
 
 [dependencies]
-serde = { workspace = true }
+ipnet = { workspace = true }
+serde = { workspace = true, features = ["derive"] }
 serde_json = { workspace = true }
 seriousum-core = { workspace = true }
 seriousum-api = { workspace = true }
+thiserror = "2"
+tracing = { workspace = true }
 
 [lints]
 workspace = true

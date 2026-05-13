@@ -104,7 +104,7 @@ impl FqdnSelector {
         if lower.ends_with('.') {
             lower
         } else {
-            format!("{}.", lower)
+            format!("{lower}.")
         }
     }
 

@@ -13,10 +13,10 @@ use std::collections::HashMap;
 pub const MAX_SERVICES: usize = 65536;
 
 /// Maximum number of backends
-pub const MAX_BACKENDS: usize = 262144;
+pub const MAX_BACKENDS: usize = 262_144;
 
 /// Maximum affinity entries
-pub const MAX_AFFINITY: usize = 1048576;
+pub const MAX_AFFINITY: usize = 1_048_576;
 
 /// Map name for services
 pub const SVC_MAP_NAME: &str = "cilium_svc_map";
@@ -36,7 +36,7 @@ pub const COUNTERS_MAP_NAME: &str = "cilium_counters_map";
 
 /// Service map entry (stored in SVC_MAP)
 #[repr(C)]
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
 pub struct ServiceMapEntry {
     /// Virtual IP (cluster IP) as u32
     pub vip: u32,
@@ -52,20 +52,6 @@ pub struct ServiceMapEntry {
     pub backend_base: u32,
     /// Session affinity type: 0=None, 1=ClientIP
     pub session_affinity: u32,
-}
-
-impl Default for ServiceMapEntry {
-    fn default() -> Self {
-        Self {
-            vip: 0,
-            port: 0,
-            protocol: 0,
-            flags: 0,
-            backend_count: 0,
-            backend_base: 0,
-            session_affinity: 0,
-        }
-    }
 }
 
 impl ServiceMapEntry {
@@ -135,6 +121,7 @@ impl BackendEntry {
 /// Client affinity key (used to look up session affinity)
 #[repr(C)]
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Hash)]
+#[allow(clippy::pub_underscore_fields)]
 pub struct ClientKey {
     /// Client source IP as u32
     pub client_ip: u32,
@@ -163,6 +150,7 @@ impl ClientKey {
 /// Counter key for statistics tracking
 #[repr(C)]
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Hash)]
+#[allow(clippy::pub_underscore_fields)]
 pub struct CounterKey {
     /// Service identifier
     pub service_id: u32,
@@ -207,7 +195,7 @@ impl ServiceMap {
     /// Add a service entry
     pub fn add_service(&mut self, key: u32, entry: ServiceMapEntry) -> anyhow::Result<()> {
         if self.entries.contains_key(&key) {
-            return Err(anyhow::anyhow!("Service already exists: {}", key));
+            return Err(anyhow::anyhow!("Service already exists: {key}"));
         }
         self.entries.insert(key, entry);
         Ok(())
@@ -216,7 +204,7 @@ impl ServiceMap {
     /// Update a service entry
     pub fn update_service(&mut self, key: u32, entry: ServiceMapEntry) -> anyhow::Result<()> {
         if !self.entries.contains_key(&key) {
-            return Err(anyhow::anyhow!("Service not found: {}", key));
+            return Err(anyhow::anyhow!("Service not found: {key}"));
         }
         self.entries.insert(key, entry);
         Ok(())
@@ -231,7 +219,7 @@ impl ServiceMap {
     pub fn delete_service(&mut self, key: u32) -> anyhow::Result<()> {
         self.entries
             .remove(&key)
-            .ok_or_else(|| anyhow::anyhow!("Service not found: {}", key))?;
+            .ok_or_else(|| anyhow::anyhow!("Service not found: {key}"))?;
         Ok(())
     }
 
@@ -273,7 +261,7 @@ impl BackendMap {
     /// Add a backend entry
     pub fn add_backend(&mut self, index: u32, entry: BackendEntry) -> anyhow::Result<()> {
         if index >= MAX_BACKENDS as u32 {
-            return Err(anyhow::anyhow!("Backend index out of range: {}", index));
+            return Err(anyhow::anyhow!("Backend index out of range: {index}"));
         }
         self.entries.insert(index, entry);
         Ok(())
@@ -282,7 +270,7 @@ impl BackendMap {
     /// Update a backend entry
     pub fn update_backend(&mut self, index: u32, entry: BackendEntry) -> anyhow::Result<()> {
         if !self.entries.contains_key(&index) {
-            return Err(anyhow::anyhow!("Backend not found: {}", index));
+            return Err(anyhow::anyhow!("Backend not found: {index}"));
         }
         self.entries.insert(index, entry);
         Ok(())
@@ -297,7 +285,7 @@ impl BackendMap {
     pub fn delete_backend(&mut self, index: u32) -> anyhow::Result<()> {
         self.entries
             .remove(&index)
-            .ok_or_else(|| anyhow::anyhow!("Backend not found: {}", index))?;
+            .ok_or_else(|| anyhow::anyhow!("Backend not found: {index}"))?;
         Ok(())
     }
 

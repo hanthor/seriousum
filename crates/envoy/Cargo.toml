@@ -4,8 +4,10 @@ version.workspace = true
 edition.workspace = true
 
 [dependencies]
+thiserror = "2"
+tracing = { workspace = true }
 serde = { workspace = true, features = ["derive"] }
-seriousum-core = { workspace = true }
+tokio = { workspace = true, features = ["sync"] }
 
 [dev-dependencies]
 serde_json.workspace = true

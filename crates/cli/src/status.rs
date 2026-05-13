@@ -1,9 +1,9 @@
 //! Status collection and reporting for Track U.
-//! 
+//!
 //! Provides status collection for clusters, nodes, endpoints, and services.
 
-use serde::{Deserialize, Serialize};
 use crate::Result;
+use serde::{Deserialize, Serialize};
 
 /// Overall cluster status.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -168,7 +168,9 @@ mod tests {
     #[test]
     fn test_collect_cluster_status() {
         let collector = StatusCollector::new();
-        let status = collector.collect_cluster_status().expect("collect cluster status");
+        let status = collector
+            .collect_cluster_status()
+            .expect("collect cluster status");
 
         assert_eq!(status.node_count, 3);
         assert_eq!(status.endpoint_count, 12);
@@ -290,7 +292,7 @@ mod tests {
 
     #[test]
     fn test_service_status_types() {
-        let services = vec![
+        let services = [
             ServiceStatus {
                 name: "cluster-ip-svc".to_string(),
                 namespace: "default".to_string(),

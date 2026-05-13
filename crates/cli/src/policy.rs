@@ -1,10 +1,10 @@
 //! Policy validation and checking framework for Track U.
-//! 
+//!
 //! Provides policy validation, traffic checking, and policy listing.
 
+use crate::Result;
 use serde::{Deserialize, Serialize};
 use std::path::Path;
-use crate::Result;
 
 /// Result of policy validation.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -273,7 +273,7 @@ mod tests {
 
     #[test]
     fn test_policy_types() {
-        let policies = vec![
+        let policies = [
             PolicyInfo {
                 name: "np1".to_string(),
                 namespace: "default".to_string(),

@@ -171,7 +171,12 @@ pub struct HashMap {
 }
 
 impl HashMap {
-    pub fn new(name: impl Into<String>, key_size: usize, value_size: usize, max_entries: usize) -> Self {
+    pub fn new(
+        name: impl Into<String>,
+        key_size: usize,
+        value_size: usize,
+        max_entries: usize,
+    ) -> Self {
         Self {
             info: MapInfo::new(name, BpfMapType::Hash, key_size, value_size, max_entries),
             data: Arc::new(DashMap::new()),
@@ -187,7 +192,10 @@ impl BpfMap for HashMap {
                 actual: key.len(),
             });
         }
-        Ok(self.data.get(key).map(|ref_multi| ref_multi.value().clone()))
+        Ok(self
+            .data
+            .get(key)
+            .map(|ref_multi| ref_multi.value().clone()))
     }
 
     fn update(&self, key: &[u8], value: &[u8], _flags: u64) -> Result<()> {
@@ -245,7 +253,12 @@ pub struct LruHashMap {
 }
 
 impl LruHashMap {
-    pub fn new(name: impl Into<String>, key_size: usize, value_size: usize, max_entries: usize) -> Self {
+    pub fn new(
+        name: impl Into<String>,
+        key_size: usize,
+        value_size: usize,
+        max_entries: usize,
+    ) -> Self {
         Self {
             info: MapInfo::new(name, BpfMapType::LRUHash, key_size, value_size, max_entries),
             data: Arc::new(DashMap::new()),
@@ -261,7 +274,10 @@ impl BpfMap for LruHashMap {
                 actual: key.len(),
             });
         }
-        Ok(self.data.get(key).map(|ref_multi| ref_multi.value().clone()))
+        Ok(self
+            .data
+            .get(key)
+            .map(|ref_multi| ref_multi.value().clone()))
     }
 
     fn update(&self, key: &[u8], value: &[u8], _flags: u64) -> Result<()> {
@@ -328,10 +344,21 @@ pub struct PerCpuHashMap {
 }
 
 impl PerCpuHashMap {
-    pub fn new(name: impl Into<String>, key_size: usize, value_size: usize, max_entries: usize) -> Self {
+    pub fn new(
+        name: impl Into<String>,
+        key_size: usize,
+        value_size: usize,
+        max_entries: usize,
+    ) -> Self {
         let num_cpus = num_cpus::get();
         Self {
-            info: MapInfo::new(name, BpfMapType::PerCPUHash, key_size, value_size, max_entries),
+            info: MapInfo::new(
+                name,
+                BpfMapType::PerCPUHash,
+                key_size,
+                value_size,
+                max_entries,
+            ),
             num_cpus,
             data: Arc::new(DashMap::new()),
         }
@@ -346,7 +373,10 @@ impl BpfMap for PerCpuHashMap {
                 actual: key.len(),
             });
         }
-        Ok(self.data.get(key).map(|ref_multi| ref_multi.value()[0].clone()))
+        Ok(self
+            .data
+            .get(key)
+            .map(|ref_multi| ref_multi.value()[0].clone()))
     }
 
     fn update(&self, key: &[u8], value: &[u8], _flags: u64) -> Result<()> {
@@ -425,11 +455,14 @@ impl BpfMap for ArrayMap {
         let idx = u32::from_le_bytes([key[0], key[1], key[2], key[3]]);
         if idx >= self.info.max_entries as u32 {
             return Err(BpfMapError::InvalidKeySize {
-                expected: self.info.max_entries as usize,
+                expected: self.info.max_entries,
                 actual: idx as usize,
             });
         }
-        Ok(self.data.get(&idx).map(|ref_multi| ref_multi.value().clone()))
+        Ok(self
+            .data
+            .get(&idx)
+            .map(|ref_multi| ref_multi.value().clone()))
     }
 
     fn update(&self, key: &[u8], value: &[u8], _flags: u64) -> Result<()> {
@@ -448,7 +481,7 @@ impl BpfMap for ArrayMap {
         let idx = u32::from_le_bytes([key[0], key[1], key[2], key[3]]);
         if idx >= self.info.max_entries as u32 {
             return Err(BpfMapError::InvalidKeySize {
-                expected: self.info.max_entries as usize,
+                expected: self.info.max_entries,
                 actual: idx as usize,
             });
         }
@@ -511,7 +544,10 @@ impl BpfMap for PerCpuArrayMap {
             });
         }
         let idx = u32::from_le_bytes([key[0], key[1], key[2], key[3]]);
-        Ok(self.data.get(&idx).map(|ref_multi| ref_multi.value()[0].clone()))
+        Ok(self
+            .data
+            .get(&idx)
+            .map(|ref_multi| ref_multi.value()[0].clone()))
     }
 
     fn update(&self, key: &[u8], value: &[u8], _flags: u64) -> Result<()> {
@@ -530,7 +566,7 @@ impl BpfMap for PerCpuArrayMap {
         let idx = u32::from_le_bytes([key[0], key[1], key[2], key[3]]);
         if idx >= self.info.max_entries as u32 {
             return Err(BpfMapError::InvalidKeySize {
-                expected: self.info.max_entries as usize,
+                expected: self.info.max_entries,
                 actual: idx as usize,
             });
         }
@@ -591,7 +627,10 @@ impl BpfMap for ProgramArrayMap {
             });
         }
         let idx = u32::from_le_bytes([key[0], key[1], key[2], key[3]]);
-        Ok(self.data.get(&idx).map(|ref_multi| ref_multi.value().clone()))
+        Ok(self
+            .data
+            .get(&idx)
+            .map(|ref_multi| ref_multi.value().clone()))
     }
 
     fn update(&self, key: &[u8], value: &[u8], _flags: u64) -> Result<()> {
@@ -610,7 +649,7 @@ impl BpfMap for ProgramArrayMap {
         let idx = u32::from_le_bytes([key[0], key[1], key[2], key[3]]);
         if idx >= self.info.max_entries as u32 {
             return Err(BpfMapError::InvalidKeySize {
-                expected: self.info.max_entries as usize,
+                expected: self.info.max_entries,
                 actual: idx as usize,
             });
         }
@@ -663,7 +702,10 @@ mod tests {
     fn test_map_type_display() {
         assert_eq!(BpfMapType::Hash.to_string(), "BPF_MAP_TYPE_HASH");
         assert_eq!(BpfMapType::LRUHash.to_string(), "BPF_MAP_TYPE_LRU_HASH");
-        assert_eq!(BpfMapType::PerCPUHash.to_string(), "BPF_MAP_TYPE_PERCPU_HASH");
+        assert_eq!(
+            BpfMapType::PerCPUHash.to_string(),
+            "BPF_MAP_TYPE_PERCPU_HASH"
+        );
     }
 
     #[test]

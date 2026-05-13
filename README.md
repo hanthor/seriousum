@@ -2,7 +2,7 @@
 
 [![Release](https://img.shields.io/badge/release-v0.1.0--alpha-blue)](https://github.com/hanthor/seriousum/releases/tag/v0.1.0-alpha)
 ![License](https://img.shields.io/badge/license-Apache%202.0-green)
-[![Tests](https://img.shields.io/badge/tests-872%2F872-brightgreen)](docs/FULL_TEST_SUITE_CATALOG.md)
+[![Tests](https://img.shields.io/badge/tests-430%2F430-brightgreen)](docs/FULL_TEST_SUITE_CATALOG.md)
 [![Parity Proof](https://img.shields.io/badge/parity%20proof-not%20yet%20proven-yellow)](docs/PARITY_PROOF_DASHBOARD.md)
 
 A Rust-based reimplementation effort for major Cilium userspace and control-plane components.
@@ -22,7 +22,7 @@ Seriousum currently delivers a substantial Rust port of core Cilium subsystems, 
 - 24 core implementation tracks in Rust
 - 35 crates
 - 32,658 lines of production Rust
-- 872 unit tests passing
+- 430 unit tests passing
 - benchmark comparisons against upstream Cilium Go hot paths
 - installation paths via Helm, containers, binaries, and source
 - compatibility-oriented CLI and runtime wrappers

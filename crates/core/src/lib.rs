@@ -3,7 +3,7 @@
     clippy::derivable_impls,
     clippy::doc_markdown,
     clippy::must_use_candidate,
-    clippy::return_self_not_must_use,
+    clippy::return_self_not_must_use
 )]
 
 //! Core types, traits, and utilities for seriousum.
@@ -16,13 +16,28 @@ pub mod config;
 pub mod controller;
 pub mod ebpf;
 pub mod error;
+pub mod hive;
 pub mod identity;
 pub mod net;
 pub mod time;
 
-pub use controller::Controller;
+pub use controller::{Controller, ControllerConfig, ControllerStatus};
 pub use error::{Error, Result};
-pub use identity::{Identity, SecurityIdentity, SecurityLabel};
+pub use hive::{Hook, HookError, HookFn, Lifecycle, Promise};
+pub use identity::{
+    Identity, IdentityAllocator, IdentityMap, IdentityScope, IpIdentityPair, LABEL_SOURCE_CIDR,
+    LABEL_SOURCE_FQDN, LABEL_SOURCE_K8S, LABEL_SOURCE_RESERVED, LABEL_SOURCE_UNSPEC, Label, Labels,
+    NamedPort, NumericIdentity, NumericIdentitySlice, NumericIdentitySliceExt,
+    RESERVED_IDENTITY_HEALTH, RESERVED_IDENTITY_HOST, RESERVED_IDENTITY_INGRESS,
+    RESERVED_IDENTITY_INIT, RESERVED_IDENTITY_KUBE_APISERVER, RESERVED_IDENTITY_REMOTE_NODE,
+    RESERVED_IDENTITY_UNKNOWN, RESERVED_IDENTITY_UNMANAGED, RESERVED_IDENTITY_WORLD,
+    RESERVED_IDENTITY_WORLD_IPV4, RESERVED_IDENTITY_WORLD_IPV6, SecurityIdentity, SecurityLabel,
+    SimpleIdentityAllocator, get_all_reserved_identities, get_cidr_labels, get_cluster_id_bits,
+    get_cluster_id_shift, get_reserved_id, label_array_from_sorted_list, labels_from_model,
+    labels_has_host_label, labels_has_ingress_label, labels_has_kube_apiserver_label,
+    labels_has_remote_node_label, labels_is_reserved, lookup_reserved_identity_by_label_map,
+    new_identity_from_label_array, scope_for_label_map,
+};
 pub use net::{IpAddr, IpNetwork, Ipv4Addr, Ipv6Addr, MacAddr, Port, Protocol};
 
 // Re-export commonly used crates
@@ -55,17 +70,13 @@ pub const BPF_MAP_PAGE_SIZE: usize = 4096;
 pub const RESERVED_IDENTITY_START: u32 = 0;
 pub const RESERVED_IDENTITY_END: u32 = 1023;
 
-/// World identity (denotes all identities).
-pub const IDENTITY_WORLD: u32 = 4;
-
-/// Reserved identity for the host.
-pub const IDENTITY_HOST: u32 = 1;
-
-/// Reserved identity for the cluster.
-pub const IDENTITY_CLUSTER: u32 = 2;
-
-/// Reserved identity for unmanaged endpoints.
-pub const IDENTITY_UNMANAGED: u32 = 3;
+// Identity constants are defined in identity.rs; import from there.
+// These aliases exist for legacy call-sites outside the module.
+pub use identity::{
+    IDENTITY_HEALTH, IDENTITY_HOST, IDENTITY_INIT, IDENTITY_INVALID, IDENTITY_SCOPE_GLOBAL,
+    IDENTITY_SCOPE_LOCAL, IDENTITY_SCOPE_MASK, IDENTITY_SCOPE_REMOTE_NODE, IDENTITY_UNKNOWN,
+    IDENTITY_UNMANAGED, IDENTITY_WORLD, IDENTITY_WORLD_IPV4, IDENTITY_WORLD_IPV6,
+};
 
 /// Default health check interval in seconds.
 pub const HEALTH_CHECK_INTERVAL: u64 = 30;

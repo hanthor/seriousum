@@ -1,633 +1,311 @@
-//! Daemon entrypoint and lifecycle wiring.
+//! Pure daemon configuration and lifecycle models.
 //!
-//! This module implements the main agent binary wiring all subsystems together.
-//! It provides:
-//!
-//! - Async component initialization and startup sequencing
-//! - Graceful shutdown handling via signals
-//! - Dependency injection and component registration
-//! - Configuration validation and initialization
-//! - Integration of eBPF, networking, identity, policy, endpoints, LB, DNS, observability
+//! This crate ports the pure data model pieces from Cilium's daemon package
+//! without wiring external systems such as Kubernetes, kvstore, or datapath IO.
 
+use std::net::{Ipv4Addr, Ipv6Addr};
 use std::path::{Path, PathBuf};
+use std::str::FromStr;
 use std::sync::Arc;
 
 use clap::Parser;
-use dashmap::DashMap;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
-use tokio::sync::{broadcast, RwLock};
-use tracing::{debug, error, info, warn};
+use tokio::sync::RwLock;
+use tracing::{debug, warn};
 
-use seriousum_config::Config;
-use seriousum_kvstore::KvStore;
+use seriousum_config::RuntimeConfig;
 
-// ============================================================================
-// Error types
-// ============================================================================
-
-/// Errors that can occur during daemon operation.
+/// Errors returned by pure daemon configuration and lifecycle helpers.
 #[derive(Debug, Error)]
-pub enum Error {
-    #[error("component initialization failed: {0}")]
-    ComponentInitFailed(String),
-
-    #[error("component '{0}' not found")]
-    ComponentNotFound(String),
-
-    #[error("component '{0}' already registered")]
-    ComponentAlreadyRegistered(String),
-
-    #[error("startup sequencing error: {0}")]
-    StartupError(String),
-
-    #[error("graceful shutdown failed: {0}")]
-    ShutdownError(String),
-
-    #[error("configuration validation failed: {0}")]
-    ConfigError(String),
-
-    #[error("signal handling error: {0}")]
-    SignalError(String),
-
-    #[error("subsystem error: {0}")]
-    SubsystemError(String),
-
-    #[error(transparent)]
-    Io(#[from] std::io::Error),
-
-    #[error(transparent)]
-    Other(#[from] anyhow::Error),
+pub enum DaemonError {
+    /// A configuration value was invalid.
+    #[error("invalid config: {0}")]
+    InvalidConfig(String),
+    /// The daemon was queried before it reached a ready phase.
+    #[error("daemon not ready: current phase is {0:?}")]
+    NotReady(DaemonPhase),
+    /// JSON or other serde-based conversion failed.
+    #[error("config serialization failed: {0}")]
+    SerializationError(String),
 }
 
-pub type Result<T> = std::result::Result<T, Error>;
+/// Result type used by daemon helpers.
+pub type Result<T> = std::result::Result<T, DaemonError>;
 
-// ============================================================================
-// Component lifecycle
-// ============================================================================
-
-/// Component state in the daemon lifecycle.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub enum ComponentState {
-    /// Component has been registered but not started.
-    Registered,
-    /// Component is starting (Start hook running).
-    Starting,
-    /// Component is running (Run hook active).
-    Running,
-    /// Component is stopping (Stop hook running).
-    Stopping,
-    /// Component has stopped.
-    Stopped,
-    /// Component encountered an error.
-    Error,
+/// Encapsulation mode for pod-to-pod traffic.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub enum TunnelMode {
+    /// Use VXLAN tunneling.
+    #[default]
+    Vxlan,
+    /// Use Geneve tunneling.
+    Geneve,
+    /// Disable tunneling.
+    Disabled,
 }
 
-impl std::fmt::Display for ComponentState {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::Registered => write!(f, "Registered"),
-            Self::Starting => write!(f, "Starting"),
-            Self::Running => write!(f, "Running"),
-            Self::Stopping => write!(f, "Stopping"),
-            Self::Stopped => write!(f, "Stopped"),
-            Self::Error => write!(f, "Error"),
+/// Policy enforcement behavior for the agent.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub enum PolicyEnforcementMode {
+    /// Follow endpoint and cluster defaults.
+    #[default]
+    Default,
+    /// Always enforce policy.
+    Always,
+    /// Never enforce policy.
+    Never,
+}
+
+impl FromStr for PolicyEnforcementMode {
+    type Err = DaemonError;
+
+    fn from_str(s: &str) -> Result<Self> {
+        match s {
+            "default" | "Default" => Ok(Self::Default),
+            "always" | "Always" => Ok(Self::Always),
+            "never" | "Never" => Ok(Self::Never),
+            other => Err(DaemonError::InvalidConfig(format!(
+                "unknown policy enforcement mode: {other}"
+            ))),
         }
     }
 }
 
-/// Dependency information for a component.
-#[derive(Debug, Clone)]
-pub struct ComponentDependency {
-    /// Name of the dependency.
-    pub name: String,
-    /// Is this dependency optional?
-    pub optional: bool,
+/// Backend used to allocate security identities.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[allow(clippy::upper_case_acronyms)]
+pub enum IdentityAllocationMode {
+    /// Allocate identities via kvstore.
+    #[default]
+    Kvstore,
+    /// Allocate identities via Kubernetes CRDs.
+    CRD,
 }
 
-/// Lifecycle hooks for a component.
-#[async_trait::async_trait]
-pub trait ComponentHooks: Send + Sync {
-    /// Called during component initialization. Should perform lightweight setup.
-    async fn start(&self) -> Result<()> {
-        Ok(())
-    }
-
-    /// Called after all components are started. Main work loop runs here.
-    /// Block until the component should stop (e.g., via cancellation token).
-    async fn run(&self) -> Result<()> {
-        Ok(())
-    }
-
-    /// Called during daemon shutdown. Should clean up resources.
-    async fn stop(&self) -> Result<()> {
-        Ok(())
-    }
-
-    /// Get dependencies this component requires.
-    fn dependencies(&self) -> Vec<ComponentDependency> {
-        vec![]
-    }
+/// NodePort forwarding behavior.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub enum NodePortMode {
+    /// Always perform SNAT.
+    Snat,
+    /// Use hybrid SNAT/DSR behavior.
+    #[default]
+    Hybrid,
+    /// Use direct server return.
+    Dsr,
 }
 
-/// Metadata for a registered component.
-#[derive(Clone)]
-pub struct ComponentMetadata {
-    /// Component name (must be unique).
-    pub name: String,
-    /// Component description.
-    pub description: String,
-    /// Lifecycle hooks.
-    pub hooks: Arc<dyn ComponentHooks>,
+/// Datapath attachment mode for endpoints.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub enum DatapathMode {
+    /// Use veth pairs.
+    #[default]
+    Veth,
+    /// Use ipvlan devices.
+    Ipvlan,
+    /// Use netkit attachment.
+    Netkit,
 }
 
-// ============================================================================
-// Configuration
-// ============================================================================
-
-/// Daemon configuration validation rules.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+/// Pure daemon configuration ported from `option.DaemonConfig`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
 #[allow(clippy::struct_excessive_bools)]
 pub struct DaemonConfig {
-    /// Cluster name.
+    /// Whether IPv4 support is enabled.
+    pub ipv4_enabled: bool,
+    /// Whether IPv6 support is enabled.
+    pub ipv6_enabled: bool,
+    /// Tunnel encapsulation mode.
+    pub tunnel_mode: TunnelMode,
+    /// Native routing CIDR when tunneling is disabled.
+    pub native_routing_cidr: Option<String>,
+    /// Cluster name advertised by the agent.
     pub cluster_name: String,
-    /// Local node name.
-    pub node_name: String,
-    /// Enable Kubernetes integration.
-    pub enable_kubernetes: bool,
-    /// Enable eBPF datapath.
-    pub enable_ebpf: bool,
-    /// Enable policy enforcement.
-    pub enable_policy: bool,
-    /// Enable identity management.
-    pub enable_identity: bool,
-    /// Enable load balancing.
-    pub enable_loadbalancer: bool,
-    /// Enable DNS proxy.
-    pub enable_dns_proxy: bool,
-    /// Enable observability (Hubble).
-    pub enable_observability: bool,
-    /// Enable health checks.
-    pub enable_health_checks: bool,
+    /// Numeric cluster identifier.
+    pub cluster_id: u8,
+    /// Policy enforcement mode.
+    pub policy_enforcement_mode: PolicyEnforcementMode,
+    /// Whether policy audit mode is enabled.
+    pub enable_policy_audit_mode: bool,
+    /// Identity allocation backend.
+    pub identity_allocation_mode: IdentityAllocationMode,
+    /// Grace period for identity changes in milliseconds.
+    pub identity_change_grace_period_ms: u64,
+    /// Whether topology-aware service routing is enabled.
+    pub enable_service_topology: bool,
+    /// Whether ExternalIPs are enabled.
+    pub enable_external_ips: bool,
+    /// NodePort forwarding mode.
+    pub node_port_mode: NodePortMode,
+    /// Whether Hubble is enabled.
+    pub enable_hubble: bool,
+    /// Address used by the Hubble server.
+    pub hubble_listen_address: String,
+    /// Size of the Hubble flow buffer.
+    pub hubble_flow_buffer_size: u32,
+    /// Endpoint datapath mode.
+    pub datapath_mode: DatapathMode,
+    /// Dynamic BPF map sizing ratio.
+    pub bpf_map_dynamic_size_ratio: f64,
+    /// Maximum TCP conntrack entries.
+    pub bpf_ct_tcp_max: u32,
+    /// Maximum non-TCP conntrack entries.
+    pub bpf_ct_any_max: u32,
+    /// Additional labels applied to the agent.
+    pub agent_labels: Vec<String>,
+    /// Configuration directory path.
+    pub config_dir: String,
+    /// Runtime state directory path.
+    pub state_dir: String,
+    /// Default daemon log level.
+    pub log_level: String,
 }
 
 impl Default for DaemonConfig {
     fn default() -> Self {
         Self {
-            cluster_name: "default".to_string(),
-            node_name: "local-node".to_string(),
-            enable_kubernetes: true,
-            enable_ebpf: true,
-            enable_policy: true,
-            enable_identity: true,
-            enable_loadbalancer: true,
-            enable_dns_proxy: true,
-            enable_observability: true,
-            enable_health_checks: true,
+            ipv4_enabled: true,
+            ipv6_enabled: false,
+            tunnel_mode: TunnelMode::Vxlan,
+            native_routing_cidr: None,
+            cluster_name: "default".into(),
+            cluster_id: 0,
+            policy_enforcement_mode: PolicyEnforcementMode::Default,
+            enable_policy_audit_mode: false,
+            identity_allocation_mode: IdentityAllocationMode::Kvstore,
+            identity_change_grace_period_ms: 5_000,
+            enable_service_topology: false,
+            enable_external_ips: true,
+            node_port_mode: NodePortMode::Hybrid,
+            enable_hubble: false,
+            hubble_listen_address: "localhost:4244".into(),
+            hubble_flow_buffer_size: 4_096,
+            datapath_mode: DatapathMode::Veth,
+            bpf_map_dynamic_size_ratio: 0.0025,
+            bpf_ct_tcp_max: 524_288,
+            bpf_ct_any_max: 262_144,
+            agent_labels: vec![],
+            config_dir: "/var/lib/cilium".into(),
+            state_dir: "/var/run/cilium".into(),
+            log_level: "info".into(),
         }
     }
 }
 
-impl DaemonConfig {
-    /// Validate the daemon configuration.
-    pub fn validate(&self) -> Result<()> {
-        if self.cluster_name.is_empty() {
-            return Err(Error::ConfigError("cluster_name cannot be empty".to_string()));
-        }
-        if self.node_name.is_empty() {
-            return Err(Error::ConfigError("node_name cannot be empty".to_string()));
-        }
-        if self.cluster_name.len() > 253 {
-            return Err(Error::ConfigError(
-                "cluster_name exceeds maximum length (253 chars)".to_string(),
-            ));
-        }
-        if self.node_name.len() > 253 {
-            return Err(Error::ConfigError(
-                "node_name exceeds maximum length (253 chars)".to_string(),
-            ));
-        }
-        Ok(())
-    }
-}
-
-// ============================================================================
-// Component registry
-// ============================================================================
-
-/// Registry for all daemon components.
-#[derive(Clone)]
-pub struct ComponentRegistry {
-    components: Arc<DashMap<String, ComponentMetadata>>,
-    states: Arc<DashMap<String, ComponentState>>,
-}
-
-impl ComponentRegistry {
-    /// Create a new component registry.
-    pub fn new() -> Self {
-        Self {
-            components: Arc::new(DashMap::new()),
-            states: Arc::new(DashMap::new()),
-        }
-    }
-
-    /// Register a component.
-    pub fn register(&self, component: ComponentMetadata) -> Result<()> {
-        if self.components.contains_key(&component.name) {
-            return Err(Error::ComponentAlreadyRegistered(component.name));
-        }
-        self.states.insert(component.name.clone(), ComponentState::Registered);
-        self.components.insert(component.name.clone(), component);
-        Ok(())
-    }
-
-    /// Get a registered component by name.
-    pub fn get(&self, name: &str) -> Option<ComponentMetadata> {
-        self.components.get(name).map(|r| r.clone())
-    }
-
-    /// List all registered component names.
-    pub fn list(&self) -> Vec<String> {
-        self.components
-            .iter()
-            .map(|r| r.key().clone())
-            .collect()
-    }
-
-    /// Get the current state of a component.
-    pub fn state(&self, name: &str) -> Option<ComponentState> {
-        self.states.get(name).map(|r| *r)
-    }
-
-    /// Set the state of a component.
-    fn set_state(&self, name: &str, state: ComponentState) {
-        self.states.insert(name.to_string(), state);
-    }
-
-    /// Check if all dependencies are satisfied for a component.
-    pub fn dependencies_satisfied(&self, name: &str) -> Result<bool> {
-        let component = self
-            .get(name)
-            .ok_or_else(|| Error::ComponentNotFound(name.to_string()))?;
-
-        for dep in component.hooks.dependencies() {
-            if !dep.optional && !self.components.contains_key(&dep.name) {
-                return Ok(false);
-            }
-        }
-        Ok(true)
-    }
-}
-
-impl Default for ComponentRegistry {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-// ============================================================================
-// Module definitions
-// ============================================================================
-
-/// Infrastructure module components (external services).
-#[derive(Debug, Clone)]
-#[allow(clippy::struct_excessive_bools)]
-pub struct InfrastructureModule {
-    /// K8s client component enabled.
-    pub kubernetes_enabled: bool,
-    /// KVStore component enabled.
-    pub kvstore_enabled: bool,
-    /// Metrics component enabled.
-    pub metrics_enabled: bool,
-    /// CNI component enabled.
-    pub cni_enabled: bool,
-    /// Health check component enabled.
-    pub healthz_enabled: bool,
-}
-
-impl Default for InfrastructureModule {
-    fn default() -> Self {
-        Self {
-            kubernetes_enabled: true,
-            kvstore_enabled: true,
-            metrics_enabled: true,
-            cni_enabled: true,
-            healthz_enabled: true,
-        }
-    }
-}
-
-/// Control plane module components (core control logic).
-#[derive(Debug, Clone)]
-#[allow(clippy::struct_excessive_bools)]
-pub struct ControlPlaneModule {
-    /// Endpoint management enabled.
-    pub endpoints_enabled: bool,
-    /// Policy enforcement enabled.
-    pub policy_enabled: bool,
-    /// Identity management enabled.
-    pub identity_enabled: bool,
-    /// Load balancing enabled.
-    pub loadbalancer_enabled: bool,
-    /// Proxy/L7 enabled.
-    pub proxy_enabled: bool,
-    /// K8s watchers enabled.
-    pub k8s_watchers_enabled: bool,
-    /// DNS proxy enabled.
-    pub dns_proxy_enabled: bool,
-    /// Observability (Hubble) enabled.
-    pub observability_enabled: bool,
-}
-
-impl Default for ControlPlaneModule {
-    fn default() -> Self {
-        Self {
-            endpoints_enabled: true,
-            policy_enabled: true,
-            identity_enabled: true,
-            loadbalancer_enabled: true,
-            proxy_enabled: true,
-            k8s_watchers_enabled: true,
-            dns_proxy_enabled: true,
-            observability_enabled: true,
-        }
-    }
-}
-
-// ============================================================================
-// Daemon instance
-// ============================================================================
-
-/// Signals that can be sent to the daemon.
-#[derive(Debug, Clone)]
-pub enum DaemonSignal {
-    /// Request graceful shutdown.
-    Shutdown,
-    /// Request reconfiguration.
-    Reconfigure,
-}
-
-/// Internal daemon state.
+/// High-level lifecycle phase of the agent.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum DaemonState {
-    Init,
+pub enum DaemonPhase {
+    /// Agent is initializing.
     Starting,
+    /// Waiting for Kubernetes connectivity.
+    WaitingForK8s,
+    /// Waiting for initial identity allocation.
+    WaitingForIdentity,
+    /// Agent is fully operational.
     Running,
+    /// Agent is shutting down.
     Stopping,
+    /// Agent has stopped.
     Stopped,
-    Error,
 }
 
-/// The daemon runtime orchestrating all subsystems.
+/// Current daemon runtime status.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DaemonStatus {
+    /// Current daemon lifecycle phase.
+    pub phase: DaemonPhase,
+    /// Node name associated with the daemon.
+    pub node_name: String,
+    /// Reported Cilium/seriousum version.
+    pub cilium_version: String,
+    /// Kernel version string if known.
+    pub kernel_version: String,
+    /// Primary IPv4 address.
+    pub ipv4_address: Option<Ipv4Addr>,
+    /// Primary IPv6 address.
+    pub ipv6_address: Option<Ipv6Addr>,
+    /// Number of managed endpoints.
+    pub endpoint_count: u32,
+    /// Number of managed identities.
+    pub identity_count: u32,
+    /// Number of installed policies.
+    pub policy_count: u32,
+    /// Daemon uptime in seconds.
+    pub uptime_secs: u64,
+}
+
+impl DaemonStatus {
+    /// Creates a new daemon status for the provided node.
+    pub fn new(node_name: impl Into<String>) -> Self {
+        Self {
+            phase: DaemonPhase::Starting,
+            node_name: node_name.into(),
+            cilium_version: env!("CARGO_PKG_VERSION").to_string(),
+            kernel_version: String::from("unknown"),
+            ipv4_address: None,
+            ipv6_address: None,
+            endpoint_count: 0,
+            identity_count: 0,
+            policy_count: 0,
+            uptime_secs: 0,
+        }
+    }
+
+    /// Returns `true` when the daemon is fully operational.
+    pub fn is_ready(&self) -> bool {
+        self.phase == DaemonPhase::Running
+    }
+}
+
+/// In-memory daemon state container.
+#[derive(Debug, Clone)]
 pub struct Daemon {
     config: Arc<DaemonConfig>,
-    registry: Arc<ComponentRegistry>,
-    kvstore: Arc<KvStore>,
-    signal_tx: Arc<broadcast::Sender<DaemonSignal>>,
-    #[allow(dead_code)]
-    infrastructure: Arc<InfrastructureModule>,
-    #[allow(dead_code)]
-    controlplane: Arc<ControlPlaneModule>,
-    state: Arc<RwLock<DaemonState>>,
+    status: Arc<RwLock<DaemonStatus>>,
 }
 
 impl Daemon {
-    /// Create a new daemon with the given configuration.
-    pub fn new(config: DaemonConfig) -> Result<Self> {
-        config.validate()?;
-
-        let (signal_tx, _) = broadcast::channel(32);
-
-        Ok(Self {
+    /// Creates a new in-memory daemon model.
+    pub fn new(config: DaemonConfig, node_name: impl Into<String>) -> Self {
+        Self {
             config: Arc::new(config),
-            registry: Arc::new(ComponentRegistry::new()),
-            kvstore: Arc::new(KvStore::new()),
-            signal_tx: Arc::new(signal_tx),
-            infrastructure: Arc::new(InfrastructureModule::default()),
-            controlplane: Arc::new(ControlPlaneModule::default()),
-            state: Arc::new(RwLock::new(DaemonState::Init)),
-        })
-    }
-
-    /// Get the daemon configuration.
-    pub fn config(&self) -> Arc<DaemonConfig> {
-        self.config.clone()
-    }
-
-    /// Get the component registry.
-    pub fn registry(&self) -> Arc<ComponentRegistry> {
-        self.registry.clone()
-    }
-
-    /// Register a component.
-    pub fn register_component(&self, component: ComponentMetadata) -> Result<()> {
-        self.registry.register(component)
-    }
-
-    /// Get the signal sender for sending signals to the daemon.
-    pub fn signal_sender(&self) -> Arc<broadcast::Sender<DaemonSignal>> {
-        self.signal_tx.clone()
-    }
-
-    /// Run the daemon with full lifecycle management.
-    ///
-    /// This function:
-    /// 1. Initializes all components
-    /// 2. Starts all components in dependency order
-    /// 3. Runs all components concurrently
-    /// 4. On signal or error, cleanly shuts down all components
-    /// 5. Returns when all components are stopped
-    pub async fn run(&self) -> Result<()> {
-        info!(
-            cluster = %self.config.cluster_name,
-            node = %self.config.node_name,
-            "starting seriousum daemon"
-        );
-
-        // Transition to starting state
-        *self.state.write().await = DaemonState::Starting;
-
-        // Initialize kvstore
-        self.kvstore
-            .set("daemon/state", b"starting".to_vec())
-            .await;
-        self.kvstore
-            .set("daemon/cluster", self.config.cluster_name.as_bytes().to_vec())
-            .await;
-        self.kvstore
-            .set("daemon/node", self.config.node_name.as_bytes().to_vec())
-            .await;
-
-        // Start all components
-        if let Err(e) = self.start_all_components().await {
-            error!("failed to start components: {e}");
-            *self.state.write().await = DaemonState::Error;
-            return Err(e);
-        }
-
-        // Transition to running state
-        *self.state.write().await = DaemonState::Running;
-        info!("daemon is now running");
-
-        // Wait for shutdown signal or component failure
-        let result = self.wait_for_shutdown().await;
-
-        // Graceful shutdown
-        *self.state.write().await = DaemonState::Stopping;
-        info!("daemon is shutting down gracefully");
-
-        if let Err(e) = self.stop_all_components().await {
-            error!("errors during shutdown: {e}");
-            *self.state.write().await = DaemonState::Error;
-            self.kvstore.set("daemon/state", b"error".to_vec()).await;
-            return Err(e);
-        }
-
-        *self.state.write().await = DaemonState::Stopped;
-        self.kvstore.set("daemon/state", b"stopped".to_vec()).await;
-        info!("daemon stopped successfully");
-
-        result
-    }
-
-    /// Start all registered components in dependency order.
-    async fn start_all_components(&self) -> Result<()> {
-        let component_names = self.registry.list();
-        debug!("starting {} components", component_names.len());
-
-        for name in component_names {
-            self.start_component(&name).await?;
-        }
-
-        Ok(())
-    }
-
-    /// Start a single component.
-    async fn start_component(&self, name: &str) -> Result<()> {
-        let component = self
-            .registry
-            .get(name)
-            .ok_or_else(|| Error::ComponentNotFound(name.to_string()))?;
-
-        // Check dependencies
-        if !self.registry.dependencies_satisfied(name)? {
-            return Err(Error::StartupError(format!(
-                "component '{name}' has unsatisfied dependencies"
-            )));
-        }
-
-        debug!("starting component: {name}");
-        self.registry.set_state(name, ComponentState::Starting);
-
-        match component.hooks.start().await {
-            Ok(()) => {
-                self.registry.set_state(name, ComponentState::Running);
-                debug!("component started: {name}");
-                Ok(())
-            }
-            Err(e) => {
-                self.registry.set_state(name, ComponentState::Error);
-                Err(Error::ComponentInitFailed(format!(
-                    "component '{name}' failed to start: {e}"
-                )))
-            }
+            status: Arc::new(RwLock::new(DaemonStatus::new(node_name))),
         }
     }
 
-    /// Stop all registered components in reverse dependency order.
-    async fn stop_all_components(&self) -> Result<()> {
-        let mut component_names = self.registry.list();
-        // Reverse order for graceful shutdown (LIFO)
-        component_names.reverse();
-
-        debug!("stopping {} components", component_names.len());
-
-        let mut errors = vec![];
-        for name in component_names {
-            if let Err(e) = self.stop_component(&name).await {
-                errors.push(format!("{e}"));
-            }
-        }
-
-        if !errors.is_empty() {
-            return Err(Error::ShutdownError(errors.join("; ")));
-        }
-
-        Ok(())
+    /// Returns the daemon configuration.
+    pub fn config(&self) -> &DaemonConfig {
+        self.config.as_ref()
     }
 
-    /// Stop a single component.
-    async fn stop_component(&self, name: &str) -> Result<()> {
-        let component = self
-            .registry
-            .get(name)
-            .ok_or_else(|| Error::ComponentNotFound(name.to_string()))?;
-
-        if self.registry.state(name) != Some(ComponentState::Running) {
-            debug!("component '{name}' not running, skipping stop");
-            return Ok(());
-        }
-
-        debug!("stopping component: {name}");
-        self.registry.set_state(name, ComponentState::Stopping);
-
-        match component.hooks.stop().await {
-            Ok(()) => {
-                self.registry.set_state(name, ComponentState::Stopped);
-                debug!("component stopped: {name}");
-                Ok(())
-            }
-            Err(e) => {
-                self.registry.set_state(name, ComponentState::Error);
-                Err(Error::SubsystemError(format!(
-                    "component '{name}' failed to stop: {e}"
-                )))
-            }
-        }
+    /// Returns a snapshot of the current daemon status.
+    pub async fn status(&self) -> DaemonStatus {
+        self.status.read().await.clone()
     }
 
-    /// Wait for shutdown signal or component failure.
-    async fn wait_for_shutdown(&self) -> Result<()> {
-        let mut signal_rx = self.signal_tx.subscribe();
-
-        tokio::select! {
-            result = signal_rx.recv() => {
-                match result {
-                    Ok(DaemonSignal::Shutdown) => {
-                        debug!("received shutdown signal");
-                        Ok(())
-                    }
-                    Ok(DaemonSignal::Reconfigure) => {
-                        debug!("received reconfigure signal (treated as shutdown)");
-                        Ok(())
-                    }
-                    Err(broadcast::error::RecvError::Lagged(_)) => {
-                        warn!("signal buffer lagged, treating as shutdown");
-                        Ok(())
-                    }
-                    Err(broadcast::error::RecvError::Closed) => {
-                        debug!("signal channel closed");
-                        Ok(())
-                    }
-                }
-            }
-        }
+    /// Updates the current daemon phase.
+    pub async fn set_phase(&self, phase: DaemonPhase) {
+        debug!(?phase, "updating daemon phase");
+        self.status.write().await.phase = phase;
     }
 
-    /// Get the current daemon state.
-    pub async fn state(&self) -> DaemonState {
-        *self.state.read().await
+    /// Returns whether the daemon is ready.
+    pub async fn is_ready(&self) -> bool {
+        self.status.read().await.is_ready()
     }
 
-    /// Check if daemon is running.
-    pub async fn is_running(&self) -> bool {
-        *self.state.read().await == DaemonState::Running
+    /// Increments the endpoint count.
+    pub async fn increment_endpoint_count(&self) {
+        self.status.write().await.endpoint_count += 1;
+    }
+
+    /// Decrements the endpoint count without underflowing.
+    pub async fn decrement_endpoint_count(&self) {
+        let mut status = self.status.write().await;
+        status.endpoint_count = status.endpoint_count.saturating_sub(1);
     }
 }
-
-// ============================================================================
-// CLI and configuration loading
-// ============================================================================
 
 /// Command-line arguments for the daemon.
 #[derive(Debug, Clone, Parser)]
@@ -643,525 +321,241 @@ pub fn default_config_path() -> PathBuf {
     PathBuf::from("seriousum.json")
 }
 
-fn load_config_from_path(path: &Path) -> anyhow::Result<Config> {
-    seriousum_config::Config::load(path)
+fn load_config_from_path(path: &Path) -> anyhow::Result<RuntimeConfig> {
+    RuntimeConfig::load(path)
 }
 
-/// Loads daemon configuration.
-pub fn load_config(path: Option<PathBuf>) -> anyhow::Result<Config> {
+/// Loads daemon configuration from disk or falls back to defaults.
+pub fn load_config(path: Option<PathBuf>) -> anyhow::Result<RuntimeConfig> {
     match path {
         Some(path) if path.exists() => load_config_from_path(path.as_path()),
         Some(path) => {
             warn!(path = %path.display(), "configuration file not found; using defaults");
-            Ok(Config::default())
+            Ok(RuntimeConfig::default())
         }
         None => {
             let path = default_config_path();
             if path.exists() {
                 load_config_from_path(path.as_path())
             } else {
-                Ok(Config::default())
+                Ok(RuntimeConfig::default())
             }
         }
     }
 }
 
-/// Initializes tracing for the daemon.
+/// Initializes tracing for daemon binaries.
 pub fn init_tracing() {
     let _ = tracing_subscriber::fmt()
         .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
         .try_init();
 }
 
-/// Execute the daemon.
+/// Executes the daemon binary entrypoint without external subsystem IO.
 pub async fn execute(cli: Cli) -> anyhow::Result<()> {
     init_tracing();
+
     let config = load_config(cli.config)?;
+    let cluster_id = u8::try_from(config.agent.cluster_id)
+        .map_err(|_| anyhow::anyhow!("cluster id {} exceeds u8 range", config.agent.cluster_id))?;
 
-    let daemon_config = DaemonConfig {
-        cluster_name: config.agent.cluster_name.clone(),
-        node_name: config.agent.node_name.clone(),
-        ..Default::default()
-    };
+    let daemon = Daemon::new(
+        DaemonConfig {
+            ipv4_enabled: config.agent.enable_ipv4,
+            ipv6_enabled: config.agent.enable_ipv6,
+            cluster_name: config.agent.cluster_name.clone(),
+            cluster_id,
+            ..DaemonConfig::default()
+        },
+        config.agent.node_name.clone(),
+    );
 
-    let daemon = Daemon::new(daemon_config)?;
-    daemon.run().await.map_err(|e| anyhow::anyhow!("{e}"))
+    daemon.set_phase(DaemonPhase::Running).await;
+    debug!(
+        cluster_name = %daemon.config().cluster_name,
+        node_name = %config.agent.node_name,
+        ready = daemon.is_ready().await,
+        "initialized in-memory daemon state"
+    );
+
+    Ok(())
 }
 
-// ============================================================================
-// Tests
-// ============================================================================
+/// Mutable runtime options toggled during daemon setup.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct MutableDaemonOptions {
+    /// Emit drop notifications.
+    pub drop_notify: bool,
+    /// Emit trace notifications.
+    pub trace_notify: bool,
+    /// Emit policy verdict notifications.
+    pub policy_verdict_notify: bool,
+}
+
+/// Runtime configuration options initialized during daemon setup.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RuntimeConfigOptions {
+    /// Identity allocation mode.
+    pub identity_allocation_mode: IdentityAllocationMode,
+    /// Enable dry mode for control-plane only tests.
+    pub dry_mode: bool,
+    /// Mutable daemon options.
+    pub mutable_options: MutableDaemonOptions,
+}
+
+impl Default for RuntimeConfigOptions {
+    fn default() -> Self {
+        Self {
+            identity_allocation_mode: IdentityAllocationMode::CRD,
+            dry_mode: false,
+            mutable_options: MutableDaemonOptions::default(),
+        }
+    }
+}
+
+/// Applies daemon test-style configuration bootstrapping.
+///
+/// Ported from `setupConfigOptions` in `daemon/cmd/daemon_test.go`.
+pub fn setup_config_options(options: &mut RuntimeConfigOptions) {
+    options.identity_allocation_mode = IdentityAllocationMode::Kvstore;
+    options.dry_mode = true;
+    options.mutable_options.drop_notify = true;
+    options.mutable_options.trace_notify = true;
+    options.mutable_options.policy_verdict_notify = true;
+}
+
+/// Minimal policy rule entry for daemon policy update parity.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PolicyEntry {
+    /// Rule identifier.
+    pub name: String,
+}
+
+/// Policy update request mirrored from `policyTypes.PolicyUpdate`.
+#[derive(Debug)]
+pub struct PolicyUpdate {
+    /// Policy rules being updated.
+    pub rules: Vec<PolicyEntry>,
+    /// Update source or resource identifier.
+    pub resource: String,
+    /// Completion signal channel carrying policy revision.
+    pub done_chan: Option<std::sync::mpsc::SyncSender<u64>>,
+}
+
+impl PolicyUpdate {
+    /// Creates a policy update.
+    pub fn new(resource: impl Into<String>, rules: Vec<PolicyEntry>) -> Self {
+        Self {
+            rules,
+            resource: resource.into(),
+            done_chan: None,
+        }
+    }
+}
+
+/// Interface for applying policy updates.
+pub trait PolicyImporter: Send + Sync {
+    /// Apply a policy update and eventually signal completion on `done_chan`.
+    fn update_policy(&self, update: PolicyUpdate) -> Result<()>;
+}
+
+/// Convenience wrapper that adds a single policy source update.
+///
+/// Ported from `policyImport` in `daemon/cmd/daemon_test.go`.
+pub fn policy_import(importer: &dyn PolicyImporter, rules: Vec<PolicyEntry>) -> Result<u64> {
+    update_policy(importer, PolicyUpdate::new("policy", rules))
+}
+
+/// Convenience wrapper that synchronously performs a policy update.
+///
+/// Ported from `updatePolicy` in `daemon/cmd/daemon_test.go`.
+pub fn update_policy(importer: &dyn PolicyImporter, mut update: PolicyUpdate) -> Result<u64> {
+    let (done_tx, done_rx) = std::sync::mpsc::sync_channel(1);
+    update.done_chan = Some(done_tx);
+
+    importer.update_policy(update)?;
+    done_rx
+        .recv()
+        .map_err(|_| DaemonError::InvalidConfig("policy update did not signal completion".into()))
+}
 
 #[cfg(test)]
 mod tests {
+    use std::path::PathBuf;
+    use std::sync::Mutex;
+
     use super::*;
 
-    fn unique_path(name: &str) -> PathBuf {
-        let mut path = std::env::temp_dir();
-        let nonce = format!(
-            "seriousum-daemon-{name}-{}-{}",
+    fn test_artifact_path(name: &str) -> PathBuf {
+        let dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join(".test-artifacts");
+        std::fs::create_dir_all(&dir).expect("create test artifacts directory");
+        dir.join(format!(
+            "{name}-{}-{}.json",
             std::process::id(),
             std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
                 .expect("clock before epoch")
                 .as_nanos()
-        );
-        path.push(nonce);
-        path
-    }
-
-    // ========== Configuration tests ==========
-
-    #[test]
-    fn daemon_config_default_is_valid() {
-        let config = DaemonConfig::default();
-        assert!(config.validate().is_ok());
+        ))
     }
 
     #[test]
-    fn daemon_config_validates_cluster_name() {
-        let mut config = DaemonConfig::default();
-        config.cluster_name = String::new();
-        assert!(config.validate().is_err());
+    fn test_default_config() {
+        let cfg = DaemonConfig::default();
+        assert!(cfg.ipv4_enabled);
+        assert!(!cfg.ipv6_enabled);
+        assert_eq!(cfg.tunnel_mode, TunnelMode::Vxlan);
+        assert_eq!(cfg.cluster_name, "default");
     }
 
     #[test]
-    fn daemon_config_validates_node_name() {
-        let mut config = DaemonConfig::default();
-        config.node_name = String::new();
-        assert!(config.validate().is_err());
-    }
-
-    #[test]
-    fn daemon_config_validates_cluster_name_length() {
-        let mut config = DaemonConfig::default();
-        config.cluster_name = "x".repeat(254);
-        assert!(config.validate().is_err());
-    }
-
-    #[test]
-    fn daemon_config_validates_node_name_length() {
-        let mut config = DaemonConfig::default();
-        config.node_name = "x".repeat(254);
-        assert!(config.validate().is_err());
-    }
-
-    // ========== Component registry tests ==========
-
-    #[test]
-    fn registry_starts_empty() {
-        let registry = ComponentRegistry::new();
-        assert_eq!(registry.list().len(), 0);
-    }
-
-    #[tokio::test]
-    async fn registry_registers_component() {
-        let registry = ComponentRegistry::new();
-
-        let component = ComponentMetadata {
-            name: "test-component".to_string(),
-            description: "A test component".to_string(),
-            hooks: Arc::new(TestComponent),
-        };
-
-        assert!(registry.register(component).is_ok());
-        assert_eq!(registry.list().len(), 1);
-    }
-
-    #[tokio::test]
-    async fn registry_prevents_duplicate_registration() {
-        let registry = ComponentRegistry::new();
-
-        let component = ComponentMetadata {
-            name: "test-component".to_string(),
-            description: "A test component".to_string(),
-            hooks: Arc::new(TestComponent),
-        };
-
-        assert!(registry.register(component.clone()).is_ok());
-        assert!(registry.register(component).is_err());
-    }
-
-    #[tokio::test]
-    async fn registry_tracks_component_state() {
-        let registry = ComponentRegistry::new();
-
-        let component = ComponentMetadata {
-            name: "test-component".to_string(),
-            description: "A test component".to_string(),
-            hooks: Arc::new(TestComponent),
-        };
-
-        registry.register(component).unwrap();
+    fn test_policy_enforcement_mode_parse() {
         assert_eq!(
-            registry.state("test-component"),
-            Some(ComponentState::Registered)
+            "always".parse::<PolicyEnforcementMode>().unwrap(),
+            PolicyEnforcementMode::Always
         );
+        assert_eq!(
+            "Never".parse::<PolicyEnforcementMode>().unwrap(),
+            PolicyEnforcementMode::Never
+        );
+        assert!("bogus".parse::<PolicyEnforcementMode>().is_err());
     }
 
     #[tokio::test]
-    async fn registry_retrieves_component() {
-        let registry = ComponentRegistry::new();
-
-        let component = ComponentMetadata {
-            name: "test-component".to_string(),
-            description: "A test component".to_string(),
-            hooks: Arc::new(TestComponent),
-        };
-
-        registry.register(component.clone()).unwrap();
-
-        let retrieved = registry.get("test-component");
-        assert!(retrieved.is_some());
-        assert_eq!(retrieved.unwrap().name, "test-component");
+    async fn test_daemon_phase_transitions() {
+        let daemon = Daemon::new(DaemonConfig::default(), "node1");
+        assert!(!daemon.is_ready().await);
+        daemon.set_phase(DaemonPhase::Running).await;
+        assert!(daemon.is_ready().await);
+        daemon.set_phase(DaemonPhase::Stopping).await;
+        assert!(!daemon.is_ready().await);
     }
 
     #[tokio::test]
-    async fn registry_returns_none_for_nonexistent_component() {
-        let registry = ComponentRegistry::new();
-        assert!(registry.get("nonexistent").is_none());
+    async fn test_endpoint_count() {
+        let daemon = Daemon::new(DaemonConfig::default(), "node1");
+        daemon.increment_endpoint_count().await;
+        daemon.increment_endpoint_count().await;
+        assert_eq!(daemon.status().await.endpoint_count, 2);
+        daemon.decrement_endpoint_count().await;
+        assert_eq!(daemon.status().await.endpoint_count, 1);
     }
-
-    #[tokio::test]
-    async fn registry_satisfies_dependencies_when_available() {
-        let registry = ComponentRegistry::new();
-
-        let component1 = ComponentMetadata {
-            name: "component-1".to_string(),
-            description: "First component".to_string(),
-            hooks: Arc::new(TestComponent),
-        };
-
-        registry.register(component1).unwrap();
-
-        let component2 = ComponentMetadata {
-            name: "component-2".to_string(),
-            description: "Second component".to_string(),
-            hooks: Arc::new(TestComponentWithDeps),
-        };
-
-        registry.register(component2).unwrap();
-
-        assert!(registry
-            .dependencies_satisfied("component-2")
-            .unwrap_or_default());
-    }
-
-    // ========== Daemon lifecycle tests ==========
-
-    #[tokio::test]
-    async fn daemon_creates_with_valid_config() {
-        let config = DaemonConfig::default();
-        let daemon = Daemon::new(config);
-        assert!(daemon.is_ok());
-    }
-
-    #[tokio::test]
-    async fn daemon_rejects_invalid_cluster_name() {
-        let mut config = DaemonConfig::default();
-        config.cluster_name = String::new();
-        let daemon = Daemon::new(config);
-        assert!(daemon.is_err());
-    }
-
-    #[tokio::test]
-    async fn daemon_rejects_invalid_node_name() {
-        let mut config = DaemonConfig::default();
-        config.node_name = String::new();
-        let daemon = Daemon::new(config);
-        assert!(daemon.is_err());
-    }
-
-    #[tokio::test]
-    async fn daemon_starts_in_init_state() {
-        let config = DaemonConfig::default();
-        let daemon = Daemon::new(config).unwrap();
-        assert_eq!(daemon.state().await, DaemonState::Init);
-    }
-
-    #[tokio::test]
-    async fn daemon_accepts_signal_sender() {
-        let config = DaemonConfig::default();
-        let daemon = Daemon::new(config).unwrap();
-        let sender = daemon.signal_sender();
-        let _rx = sender.subscribe();
-        assert!(sender.send(DaemonSignal::Shutdown).is_ok());
-    }
-
-    #[tokio::test]
-    async fn daemon_initializes_kvstore() {
-        let config = DaemonConfig::default();
-        let daemon = Daemon::new(config).unwrap();
-
-        // Check that we can access kvstore
-        let kvstore = daemon.kvstore.clone();
-        kvstore.set("test_key", b"test_value".to_vec()).await;
-
-        // Note: kvstore is in-memory so this just verifies it was created
-    }
-
-    #[tokio::test]
-    async fn daemon_registers_component() {
-        let config = DaemonConfig::default();
-        let daemon = Daemon::new(config).unwrap();
-
-        let component = ComponentMetadata {
-            name: "test-component".to_string(),
-            description: "A test component".to_string(),
-            hooks: Arc::new(TestComponent),
-        };
-
-        assert!(daemon.register_component(component).is_ok());
-    }
-
-    #[tokio::test]
-    async fn daemon_prevents_duplicate_component_registration() {
-        let config = DaemonConfig::default();
-        let daemon = Daemon::new(config).unwrap();
-
-        let component = ComponentMetadata {
-            name: "test-component".to_string(),
-            description: "A test component".to_string(),
-            hooks: Arc::new(TestComponent),
-        };
-
-        assert!(daemon.register_component(component.clone()).is_ok());
-        assert!(daemon.register_component(component).is_err());
-    }
-
-    // ========== Component state tests ==========
 
     #[test]
-    fn component_state_display() {
-        assert_eq!(ComponentState::Registered.to_string(), "Registered");
-        assert_eq!(ComponentState::Starting.to_string(), "Starting");
-        assert_eq!(ComponentState::Running.to_string(), "Running");
-        assert_eq!(ComponentState::Stopping.to_string(), "Stopping");
-        assert_eq!(ComponentState::Stopped.to_string(), "Stopped");
-        assert_eq!(ComponentState::Error.to_string(), "Error");
+    fn test_config_serde_roundtrip() {
+        let cfg = DaemonConfig::default();
+        let json = serde_json::to_string(&cfg).expect("serialize");
+        let back: DaemonConfig = serde_json::from_str(&json).expect("deserialize");
+        assert_eq!(cfg.cluster_name, back.cluster_name);
+        assert_eq!(cfg.ipv4_enabled, back.ipv4_enabled);
     }
 
-    #[tokio::test]
-    async fn registry_rejects_missing_dependency() {
-        let registry = ComponentRegistry::new();
-
-        let component = ComponentMetadata {
-            name: "dependent-component".to_string(),
-            description: "A component with missing dependency".to_string(),
-            hooks: Arc::new(TestComponentWithDeps),
-        };
-
-        registry.register(component).unwrap();
-
-        // Dependency is not satisfied (component-1 not registered)
-        let result = registry.dependencies_satisfied("dependent-component");
-        assert!(result.is_ok());
-        assert!(!result.unwrap());
+    #[test]
+    fn test_daemon_status_not_ready_by_default() {
+        let status = DaemonStatus::new("my-node");
+        assert!(!status.is_ready());
+        assert_eq!(status.phase, DaemonPhase::Starting);
     }
-
-    #[tokio::test]
-    async fn component_metadata_clones_correctly() {
-        let component = ComponentMetadata {
-            name: "test".to_string(),
-            description: "test".to_string(),
-            hooks: Arc::new(TestComponent),
-        };
-
-        let cloned = component.clone();
-        assert_eq!(cloned.name, component.name);
-        assert_eq!(cloned.description, component.description);
-    }
-
-    #[tokio::test]
-    async fn infrastructure_module_has_sensible_defaults() {
-        let infra = InfrastructureModule::default();
-        assert!(infra.kubernetes_enabled);
-        assert!(infra.kvstore_enabled);
-        assert!(infra.metrics_enabled);
-        assert!(infra.cni_enabled);
-        assert!(infra.healthz_enabled);
-    }
-
-    #[tokio::test]
-    async fn controlplane_module_has_sensible_defaults() {
-        let cp = ControlPlaneModule::default();
-        assert!(cp.endpoints_enabled);
-        assert!(cp.policy_enabled);
-        assert!(cp.identity_enabled);
-        assert!(cp.loadbalancer_enabled);
-        assert!(cp.proxy_enabled);
-        assert!(cp.k8s_watchers_enabled);
-        assert!(cp.dns_proxy_enabled);
-        assert!(cp.observability_enabled);
-    }
-
-    #[tokio::test]
-    async fn daemon_component_not_found_error() {
-        let config = DaemonConfig::default();
-        let daemon = Daemon::new(config).unwrap();
-        let result = daemon.stop_component("nonexistent").await;
-        assert!(result.is_err());
-        match result {
-            Err(Error::ComponentNotFound(name)) => assert_eq!(name, "nonexistent"),
-            _ => panic!("expected ComponentNotFound error"),
-        }
-    }
-
-    #[tokio::test]
-    async fn registry_list_returns_all_components() {
-        let registry = ComponentRegistry::new();
-
-        for i in 0..3 {
-            let component = ComponentMetadata {
-                name: format!("component-{i}"),
-                description: format!("Component {i}"),
-                hooks: Arc::new(TestComponent),
-            };
-            registry.register(component).ok();
-        }
-
-        let list = registry.list();
-        assert_eq!(list.len(), 3);
-    }
-
-    #[tokio::test]
-    async fn component_dependency_creates_correctly() {
-        let dep = ComponentDependency {
-            name: "my-dep".to_string(),
-            optional: false,
-        };
-        assert_eq!(dep.name, "my-dep");
-        assert!(!dep.optional);
-
-        let optional_dep = ComponentDependency {
-            name: "optional-dep".to_string(),
-            optional: true,
-        };
-        assert!(optional_dep.optional);
-    }
-
-    #[tokio::test]
-    async fn daemon_signal_enum_variants() {
-        let shutdown = DaemonSignal::Shutdown;
-        let reconfigure = DaemonSignal::Reconfigure;
-
-        match shutdown {
-            DaemonSignal::Shutdown => {},
-            _ => panic!("wrong variant"),
-        }
-
-        match reconfigure {
-            DaemonSignal::Reconfigure => {},
-            _ => panic!("wrong variant"),
-        }
-    }
-
-    #[tokio::test]
-    async fn daemon_handles_graceful_shutdown() {
-        let config = DaemonConfig::default();
-        let daemon = Daemon::new(config).unwrap();
-
-        let component = ComponentMetadata {
-            name: "test-component".to_string(),
-            description: "A test component".to_string(),
-            hooks: Arc::new(TestComponent),
-        };
-
-        daemon.register_component(component).unwrap();
-
-        // Spawn daemon in background
-        let daemon_clone = Arc::new(daemon);
-        let daemon_for_spawn = daemon_clone.clone();
-
-        let daemon_handle = tokio::spawn(async move {
-            let _ = daemon_for_spawn.run().await;
-        });
-
-        // Give daemon time to start
-        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
-
-        // Send shutdown signal
-        let sender = daemon_clone.signal_sender();
-        let _ = sender.send(DaemonSignal::Shutdown);
-
-        // Wait for daemon to finish
-        let result = tokio::time::timeout(
-            std::time::Duration::from_secs(5),
-            daemon_handle,
-        )
-        .await;
-
-        assert!(result.is_ok());
-    }
-
-    #[tokio::test]
-    async fn daemon_handles_multiple_component_stop_errors() {
-        let config = DaemonConfig::default();
-        let daemon = Daemon::new(config).unwrap();
-
-        let component = ComponentMetadata {
-            name: "test-component".to_string(),
-            description: "A test component".to_string(),
-            hooks: Arc::new(TestComponent),
-        };
-
-        daemon.register_component(component).unwrap();
-
-        // Manually set up a component to test stop
-        let registry = daemon.registry();
-        registry.set_state("test-component", ComponentState::Running);
-
-        // Test that we can stop components
-        let stop_result = daemon.stop_component("test-component").await;
-        assert!(stop_result.is_ok());
-    }
-
-    #[tokio::test]
-    async fn daemon_transitions_states_correctly() {
-        let config = DaemonConfig::default();
-        let daemon = Daemon::new(config).unwrap();
-
-        let component = ComponentMetadata {
-            name: "test-component".to_string(),
-            description: "A test component".to_string(),
-            hooks: Arc::new(TestComponent),
-        };
-
-        daemon.register_component(component).unwrap();
-
-        // Initial state
-        assert_eq!(daemon.state().await, DaemonState::Init);
-
-        let daemon_clone = Arc::new(daemon);
-        let daemon_for_spawn = daemon_clone.clone();
-
-        let daemon_handle = tokio::spawn(async move {
-            let _ = daemon_for_spawn.run().await;
-        });
-
-        // Wait a bit for state transitions
-        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-
-        // Should be starting or running
-        let state = daemon_clone.state().await;
-        assert!(
-            state == DaemonState::Starting || state == DaemonState::Running,
-            "state should be Starting or Running, got {state:?}",
-        );
-
-        // Shutdown
-        daemon_clone.signal_sender().send(DaemonSignal::Shutdown).ok();
-
-        let result = tokio::time::timeout(
-            std::time::Duration::from_secs(5),
-            daemon_handle,
-        )
-        .await;
-
-        assert!(result.is_ok());
-    }
-
-    // ========== CLI tests ==========
 
     #[test]
     fn cli_parses() {
@@ -1177,69 +571,123 @@ mod tests {
 
     #[test]
     fn load_config_uses_defaults_when_explicit_path_is_missing() {
-        let path = unique_path("missing.json");
-
-        let config = load_config(Some(path.clone())).expect("load default config");
-
-        assert_eq!(config, Config::default());
+        let path = test_artifact_path("missing");
+        let config = load_config(Some(path)).expect("load default config");
+        assert_eq!(config, RuntimeConfig::default());
     }
 
     #[test]
     fn load_config_uses_defaults_when_default_path_is_missing() {
         let original_dir = std::env::current_dir().expect("current dir");
-        let temp_dir = unique_path("cwd");
-        std::fs::create_dir_all(&temp_dir).expect("create temp dir");
-        std::env::set_current_dir(&temp_dir).expect("set temp dir");
+        let temp_dir = test_artifact_path("cwd");
+        std::fs::create_dir_all(&temp_dir).expect("create test directory");
+        std::env::set_current_dir(&temp_dir).expect("set test directory");
 
         let config = load_config(None).expect("load default config");
 
         std::env::set_current_dir(original_dir).expect("restore cwd");
-        assert_eq!(config, Config::default());
+        let _ = std::fs::remove_dir_all(&temp_dir);
+        assert_eq!(config, RuntimeConfig::default());
     }
 
-    // ========== Test fixtures ==========
+    #[test]
+    fn parity_setup_config_options() {
+        let mut options = RuntimeConfigOptions::default();
+        setup_config_options(&mut options);
 
-    struct TestComponent;
+        assert_eq!(
+            options.identity_allocation_mode,
+            IdentityAllocationMode::Kvstore
+        );
+        assert!(options.dry_mode);
+        assert!(options.mutable_options.drop_notify);
+        assert!(options.mutable_options.trace_notify);
+        assert!(options.mutable_options.policy_verdict_notify);
+    }
 
-    #[async_trait::async_trait]
-    impl ComponentHooks for TestComponent {
-        async fn start(&self) -> Result<()> {
-            debug!("test component started");
-            Ok(())
+    #[derive(Debug, Clone, PartialEq, Eq)]
+    struct CapturedPolicyUpdate {
+        rules: Vec<PolicyEntry>,
+        resource: String,
+    }
+
+    #[derive(Default)]
+    struct MockPolicyImporter {
+        revision: u64,
+        updates: Mutex<Vec<CapturedPolicyUpdate>>,
+    }
+
+    impl MockPolicyImporter {
+        fn with_revision(revision: u64) -> Self {
+            Self {
+                revision,
+                updates: Mutex::new(vec![]),
+            }
         }
+    }
 
-        async fn run(&self) -> Result<()> {
-            // Don't actually block in tests
-            Ok(())
-        }
+    impl PolicyImporter for MockPolicyImporter {
+        fn update_policy(&self, mut update: PolicyUpdate) -> Result<()> {
+            if let Some(done_chan) = update.done_chan.take() {
+                done_chan.send(self.revision).map_err(|_| {
+                    DaemonError::InvalidConfig("failed to deliver policy revision".into())
+                })?;
+            } else {
+                return Err(DaemonError::InvalidConfig(
+                    "policy update missing completion channel".into(),
+                ));
+            }
 
-        async fn stop(&self) -> Result<()> {
-            debug!("test component stopped");
+            let mut updates = self
+                .updates
+                .lock()
+                .map_err(|_| DaemonError::InvalidConfig("mock importer lock poisoned".into()))?;
+            updates.push(CapturedPolicyUpdate {
+                rules: update.rules,
+                resource: update.resource,
+            });
+
             Ok(())
         }
     }
 
-    struct TestComponentWithDeps;
+    #[test]
+    fn parity_policy_import() {
+        let importer = MockPolicyImporter::with_revision(42);
+        let rules = vec![PolicyEntry {
+            name: "allow-all".to_string(),
+        }];
 
-    #[async_trait::async_trait]
-    impl ComponentHooks for TestComponentWithDeps {
-        async fn start(&self) -> Result<()> {
-            Ok(())
-        }
+        let revision = policy_import(&importer, rules.clone()).unwrap();
+        assert_eq!(revision, 42);
 
-        async fn run(&self) -> Result<()> {
-            Ok(())
-        }
+        let updates = importer.updates.lock().unwrap();
+        assert_eq!(updates.len(), 1);
+        assert_eq!(updates[0].resource, "policy");
+        assert_eq!(updates[0].rules, rules);
+    }
 
-        async fn stop(&self) -> Result<()> {
-            Ok(())
-        }
+    #[test]
+    fn parity_update_policy() {
+        let importer = MockPolicyImporter::with_revision(99);
+        let update = PolicyUpdate::new(
+            "custom-resource",
+            vec![PolicyEntry {
+                name: "rule-a".to_string(),
+            }],
+        );
 
-        fn dependencies(&self) -> Vec<ComponentDependency> {
-            vec![ComponentDependency {
-                name: "component-1".to_string(),
-                optional: false,
+        let revision = update_policy(&importer, update).unwrap();
+        assert_eq!(revision, 99);
+
+        let updates = importer.updates.lock().unwrap();
+        assert_eq!(updates.len(), 1);
+        assert_eq!(updates[0].resource, "custom-resource");
+        assert_eq!(
+            updates[0].rules,
+            vec![PolicyEntry {
+                name: "rule-a".to_string(),
             }]
-        }
+        );
     }
 }

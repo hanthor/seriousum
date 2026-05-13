@@ -6,7 +6,7 @@
 //! - Deleting endpoints
 //! - Viewing endpoint BPF maps
 
-use crate::{Endpoint, EndpointId, NumericIdentity, Result, Error};
+use crate::{Endpoint, EndpointId, Error, NumericIdentity, Result};
 use std::collections::HashMap;
 use std::net::Ipv4Addr;
 
@@ -23,7 +23,8 @@ pub fn list_endpoints() -> Result<Vec<Endpoint>> {
     ep1.identity = Some(NumericIdentity(256));
     ep1.state = "ready".to_string();
     ep1.labels.insert("app".to_string(), "frontend".to_string());
-    ep1.labels.insert("k8s-app".to_string(), "nginx".to_string());
+    ep1.labels
+        .insert("k8s-app".to_string(), "nginx".to_string());
     endpoints.push(ep1);
 
     // Endpoint 2
@@ -60,7 +61,10 @@ pub fn get_endpoint_status(endpoint_id: u16) -> Result<String> {
                 endpoint_id, ep.state, ipv4_str, ipv6_str, identity_str
             ))
         }
-        None => Err(Error::NotFound(format!("endpoint {} not found", endpoint_id))),
+        None => Err(Error::NotFound(format!(
+            "endpoint {} not found",
+            endpoint_id
+        ))),
     }
 }
 
@@ -68,7 +72,10 @@ pub fn get_endpoint_status(endpoint_id: u16) -> Result<String> {
 pub fn get_endpoint_labels(endpoint_id: u16) -> Result<HashMap<String, String>> {
     match get_endpoint(endpoint_id)? {
         Some(ep) => Ok(ep.labels),
-        None => Err(Error::NotFound(format!("endpoint {} not found", endpoint_id))),
+        None => Err(Error::NotFound(format!(
+            "endpoint {} not found",
+            endpoint_id
+        ))),
     }
 }
 

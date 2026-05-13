@@ -4,8 +4,11 @@ version.workspace = true
 edition.workspace = true
 
 [dependencies]
+thiserror = "2"
 anyhow = { workspace = true }
 seriousum-core = { workspace = true }
+serde = { workspace = true, features = ["derive"] }
+tracing = { workspace = true }
 
 [dev-dependencies]
 tokio = { workspace = true }

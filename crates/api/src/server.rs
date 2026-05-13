@@ -2,8 +2,8 @@
 
 use crate::handlers::{self, HandlerState};
 use axum::{
-    routing::{delete, get, patch, put},
     Router,
+    routing::{delete, get, patch, put},
 };
 use std::net::SocketAddr;
 use tower_http::cors::CorsLayer;
@@ -73,7 +73,7 @@ impl Server {
 
         axum::serve(listener, self.router())
             .await
-            .map_err(|e| std::io::Error::other(e))
+            .map_err(std::io::Error::other)
     }
 
     /// Get the server address.

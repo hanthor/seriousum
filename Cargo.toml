@@ -10,10 +10,11 @@ repository = "https://github.com/seriousum/seriousum"
 anyhow.workspace = true
 clap = { workspace = true, features = ["derive"] }
 tokio.workspace = true
+tracing.workspace = true
 seriousum_cli = { path = "crates/cli", package = "seriousum-cli" }
-seriousum_daemon = { path = "crates/daemon", package = "seriousum-daemon" }
+seriousum_daemon = { path = "crates/daemon", package = "cilium-daemon" }
 seriousum_hubble = { path = "crates/hubble", package = "seriousum-hubble" }
-seriousum_clustermesh = { path = "crates/clustermesh", package = "seriousum-clustermesh" }
+seriousum_clustermesh = { path = "crates/clustermesh", package = "cilium-clustermesh" }
 seriousum_operator = { path = "crates/operator", package = "seriousum-operator" }
 
 [workspace]

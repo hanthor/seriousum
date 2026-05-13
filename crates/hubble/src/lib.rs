@@ -8,11 +8,325 @@
 
 pub mod relay;
 
+use std::collections::VecDeque;
+use std::net::IpAddr;
+use std::time::SystemTime;
+
 use serde::{Deserialize, Serialize};
 use seriousum_core::{Error, Port, Protocol, Result, SecurityIdentity, SecurityLabel};
+use tracing::debug;
 
 /// Default component name used by the Hubble scaffold.
 pub const HUBBLE_COMPONENT: &str = "seriousum-hubble";
+
+/// Metadata describing one end of a flow.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct Endpoint {
+    /// Optional IP address associated with the endpoint.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub ip: Option<IpAddr>,
+
+    /// Optional transport-layer port.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub port: Option<u16>,
+
+    /// Optional numeric security identity.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub identity: Option<u32>,
+
+    /// Kubernetes namespace for the endpoint, when known.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub namespace: String,
+
+    /// Kubernetes pod name for the endpoint, when known.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub pod_name: String,
+
+    /// Security labels attached to the endpoint.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub labels: Vec<String>,
+}
+
+/// Verdict attached to a flow.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Verdict {
+    /// The flow was forwarded.
+    Forwarded,
+    /// The flow was dropped.
+    Dropped,
+    /// The datapath reported an error.
+    Error,
+    /// The flow was observed in audit mode.
+    Audit,
+    /// The flow was redirected.
+    Redirected,
+    /// The verdict is unknown.
+    Unknown,
+}
+
+/// TCP flag summary for a flow event.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TcpFlags {
+    /// SYN flag.
+    pub syn: bool,
+    /// ACK flag.
+    pub ack: bool,
+    /// FIN flag.
+    pub fin: bool,
+    /// RST flag.
+    pub rst: bool,
+    /// PSH flag.
+    pub psh: bool,
+}
+
+/// Layer 4 protocol details for a flow.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum L4Proto {
+    /// TCP source and destination ports plus relevant flags.
+    TCP {
+        /// TCP source port.
+        source_port: u16,
+        /// TCP destination port.
+        dest_port: u16,
+        /// TCP flag summary.
+        flags: TcpFlags,
+    },
+    /// UDP source and destination ports.
+    UDP {
+        /// UDP source port.
+        source_port: u16,
+        /// UDP destination port.
+        dest_port: u16,
+    },
+    /// ICMPv4 type and code.
+    ICMPv4 {
+        /// ICMPv4 type.
+        type_: u8,
+        /// ICMPv4 code.
+        code: u8,
+    },
+    /// ICMPv6 type and code.
+    ICMPv6 {
+        /// ICMPv6 type.
+        type_: u8,
+        /// ICMPv6 code.
+        code: u8,
+    },
+}
+
+/// Direction of observed traffic.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TrafficDirection {
+    /// Direction is unknown.
+    Unknown,
+    /// Traffic is ingress to the endpoint or node.
+    Ingress,
+    /// Traffic is egress from the endpoint or node.
+    Egress,
+}
+
+/// Monitor event type attached to a flow.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct EventType {
+    /// Primary event type.
+    pub type_: i32,
+    /// Event subtype.
+    pub sub_type: i32,
+}
+
+/// Core flow event observed by Hubble.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Flow {
+    /// Timestamp when the flow was observed.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub time: Option<SystemTime>,
+
+    /// Flow verdict.
+    pub verdict: Verdict,
+
+    /// Numeric drop reason; zero means not dropped.
+    pub drop_reason: u32,
+
+    /// Source endpoint metadata.
+    pub source: Endpoint,
+
+    /// Destination endpoint metadata.
+    pub destination: Endpoint,
+
+    /// Optional layer 4 protocol details.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub l4: Option<L4Proto>,
+
+    /// Traffic direction for the event.
+    pub traffic_direction: TrafficDirection,
+
+    /// Whether the event is marked as a reply.
+    pub reply: bool,
+
+    /// Optional reply marker retained from the source event.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub is_reply: Option<bool>,
+
+    /// Name of the node that observed the flow.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub node_name: String,
+
+    /// Optional monitor event type.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub event_type: Option<EventType>,
+}
+
+/// Predicate applied to flows.
+pub trait FlowFilter: Send + Sync {
+    /// Returns true when the flow matches the filter.
+    fn matches(&self, flow: &Flow) -> bool;
+}
+
+/// Filter matching flows by verdict.
+#[derive(Debug, Clone, Default)]
+pub struct VerdictFilter {
+    /// Verdicts accepted by the filter.
+    pub verdicts: Vec<Verdict>,
+}
+
+impl FlowFilter for VerdictFilter {
+    fn matches(&self, flow: &Flow) -> bool {
+        self.verdicts.contains(&flow.verdict)
+    }
+}
+
+/// Filter matching flows by traffic direction.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DirectionFilter {
+    /// Direction accepted by the filter.
+    pub direction: TrafficDirection,
+}
+
+impl FlowFilter for DirectionFilter {
+    fn matches(&self, flow: &Flow) -> bool {
+        flow.traffic_direction == self.direction
+    }
+}
+
+/// Filter that requires every child filter to match.
+#[derive(Default)]
+pub struct AndFilter {
+    /// Child filters evaluated with AND semantics.
+    pub filters: Vec<Box<dyn FlowFilter>>,
+}
+
+impl FlowFilter for AndFilter {
+    fn matches(&self, flow: &Flow) -> bool {
+        self.filters.iter().all(|filter| filter.matches(flow))
+    }
+}
+
+/// Fixed-capacity flow ring buffer.
+#[derive(Debug, Clone)]
+pub struct FlowRing {
+    buf: VecDeque<Flow>,
+    capacity: usize,
+}
+
+impl FlowRing {
+    /// Creates a new ring buffer, promoting zero capacity to one entry.
+    #[must_use]
+    pub fn new(capacity: usize) -> Self {
+        if capacity == 0 {
+            debug!("requested zero-capacity flow ring; promoting capacity to one");
+        }
+        let capacity = capacity.max(1);
+        Self {
+            buf: VecDeque::with_capacity(capacity),
+            capacity,
+        }
+    }
+
+    /// Creates a new ring buffer or returns an error for zero capacity.
+    pub fn try_new(capacity: usize) -> std::result::Result<Self, HubbleError> {
+        if capacity == 0 {
+            return Err(HubbleError::InvalidCapacity);
+        }
+        Ok(Self {
+            buf: VecDeque::with_capacity(capacity),
+            capacity,
+        })
+    }
+
+    /// Pushes a flow, evicting the oldest entry when the ring is full.
+    pub fn push(&mut self, flow: Flow) {
+        if self.buf.len() == self.capacity {
+            debug!(capacity = self.capacity, "evicting oldest flow from ring");
+            let _ = self.buf.pop_front();
+        }
+        self.buf.push_back(flow);
+    }
+
+    /// Returns the number of stored flows.
+    #[must_use]
+    pub fn len(&self) -> usize {
+        self.buf.len()
+    }
+
+    /// Returns true when the ring is empty.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.buf.is_empty()
+    }
+
+    /// Iterates over flows from oldest to newest.
+    pub fn iter(&self) -> impl Iterator<Item = &Flow> + '_ {
+        self.buf.iter()
+    }
+
+    /// Returns the last n flows, ordered from oldest to newest within the slice.
+    #[must_use]
+    pub fn last_n(&self, n: usize) -> Vec<&Flow> {
+        let start = self.buf.len().saturating_sub(n);
+        self.buf.iter().skip(start).collect()
+    }
+}
+
+/// Connection status for a Hubble node.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum NodeStatus {
+    /// The node is connected and serving flows.
+    Connected,
+    /// The node is currently unavailable.
+    Unavailable,
+    /// The node reported an error message.
+    Error(String),
+}
+
+/// Aggregated status for a Hubble node.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct HubbleNodeState {
+    /// Node name.
+    pub name: String,
+    /// Current node status.
+    pub status: NodeStatus,
+    /// Observed flow rate in flows per second.
+    pub flows_per_second: f64,
+    /// Number of flows currently stored.
+    pub num_flows: u64,
+    /// Maximum configured flow capacity.
+    pub max_flows: u64,
+    /// Total number of flows seen since startup.
+    pub seen_flows: u64,
+}
+
+/// Errors returned by the Hubble data model.
+#[derive(Debug, thiserror::Error)]
+pub enum HubbleError {
+    /// The configured ring capacity was invalid.
+    #[error("ring buffer capacity must be > 0")]
+    InvalidCapacity,
+    /// The observer is not running.
+    #[error("observer not running")]
+    NotRunning,
+}
 
 /// Direction of a captured flow.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -322,6 +636,496 @@ pub fn run() -> Result<String> {
     render_report(&HubbleReport::scaffold())
 }
 
+const FLOW_PRINT_COUNT: u64 = 20;
+
+const MONITOR_MESSAGE_TYPE_NAMES: [&str; 8] = [
+    "capture",
+    "drop",
+    "trace",
+    "policy-verdict",
+    "debug",
+    "l7",
+    "agent",
+    "trace-sock",
+];
+
+const FLOW_EVENT_TYPES: [&str; 6] = [
+    "capture",
+    "drop",
+    "l7",
+    "policy-verdict",
+    "trace",
+    "trace-sock",
+];
+
+const DEFAULT_FIELD_MASK: [&str; 20] = [
+    "time",
+    "verdict",
+    "ethernet",
+    "IP",
+    "l4",
+    "source.identity",
+    "source.namespace",
+    "source.pod_name",
+    "destination.identity",
+    "destination.namespace",
+    "destination.pod_name",
+    "Type",
+    "node_name",
+    "l7",
+    "event_type",
+    "source_service",
+    "destination_service",
+    "is_reply",
+    "Summary",
+    "ip_trace_id",
+];
+
+type RawFlowFilter = serde_json::Map<String, serde_json::Value>;
+
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+struct SelectorOptions {
+    all: bool,
+    last: u64,
+    since: Option<String>,
+    until: Option<String>,
+    follow: bool,
+    first: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+struct MaskOptions {
+    field_mask: Vec<String>,
+    use_default_masks: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct FormattingOptions {
+    output: String,
+}
+
+impl Default for FormattingOptions {
+    fn default() -> Self {
+        Self {
+            output: String::from("compact"),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+struct OtherOptions {
+    input_file: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+struct FlowRequest {
+    number: u64,
+    follow: bool,
+    first: bool,
+    since: Option<String>,
+    until: Option<String>,
+    whitelist: Vec<RawFlowFilter>,
+    blacklist: Vec<RawFlowFilter>,
+    field_mask: Vec<String>,
+}
+
+fn apply_flow_args(
+    formatting: &FormattingOptions,
+    masks: &mut MaskOptions,
+) -> std::result::Result<(), String> {
+    let json_output = matches!(formatting.output.as_str(), "json" | "jsonpb" | "JSON");
+    if !json_output {
+        if !masks.field_mask.is_empty() {
+            return Err(format!(
+                "{} output format is not compatible with custom field mask",
+                formatting.output
+            ));
+        }
+        if masks.use_default_masks {
+            masks.field_mask = DEFAULT_FIELD_MASK
+                .iter()
+                .map(|path| (*path).to_owned())
+                .collect();
+        }
+    }
+    Ok(())
+}
+
+fn parse_raw_filters(filters: &[String]) -> std::result::Result<Vec<RawFlowFilter>, String> {
+    let mut parsed = Vec::new();
+    for raw in filters {
+        let stream = serde_json::Deserializer::from_str(raw).into_iter::<RawFlowFilter>();
+        for item in stream {
+            let filter = item.map_err(|error| format!("failed to decode '{raw}': {error}"))?;
+            for key in filter.keys() {
+                if !is_valid_flow_filter_key(key) {
+                    return Err(format!(
+                        "failed to decode '{raw}': unknown filter key '{key}'"
+                    ));
+                }
+            }
+            parsed.push(filter);
+        }
+    }
+    Ok(parsed)
+}
+
+fn is_valid_flow_filter_key(key: &str) -> bool {
+    matches!(
+        key,
+        "source_pod"
+            | "destination_pod"
+            | "source_ip"
+            | "destination_ip"
+            | "source_label"
+            | "destination_label"
+            | "source_port"
+            | "destination_port"
+            | "source_service"
+            | "destination_service"
+            | "source_identity"
+            | "destination_identity"
+            | "event_type"
+            | "verdict"
+            | "protocol"
+            | "reply"
+    )
+}
+
+fn get_flow_filters_yaml(request: &FlowRequest) -> std::result::Result<String, String> {
+    let allowlist = request
+        .whitelist
+        .iter()
+        .map(serde_json::to_string)
+        .collect::<std::result::Result<Vec<_>, _>>()
+        .map_err(|error| error.to_string())?;
+    let denylist = request
+        .blacklist
+        .iter()
+        .map(serde_json::to_string)
+        .collect::<std::result::Result<Vec<_>, _>>()
+        .map_err(|error| error.to_string())?;
+
+    let mut out = String::new();
+    if !allowlist.is_empty() {
+        out.push_str("allowlist:\n");
+        for filter in allowlist {
+            out.push_str("    - '");
+            out.push_str(&filter);
+            out.push_str("'\n");
+        }
+    }
+    if !denylist.is_empty() {
+        out.push_str("denylist:\n");
+        for filter in denylist {
+            out.push_str("    - '");
+            out.push_str(&filter);
+            out.push_str("'\n");
+        }
+    }
+    Ok(out)
+}
+
+fn get_flows_request(
+    selector: &mut SelectorOptions,
+    masks: &MaskOptions,
+    other: &OtherOptions,
+    allowlist: &[String],
+    denylist: &[String],
+) -> std::result::Result<FlowRequest, String> {
+    let first = selector.first > 0;
+    let last = selector.last > 0;
+    if first && last {
+        return Err(String::from("cannot set both --first and --last"));
+    }
+    if first && selector.all {
+        return Err(String::from("cannot set both --first and --all"));
+    }
+    if first && selector.follow {
+        return Err(String::from("cannot set both --first and --follow"));
+    }
+    if last && selector.all {
+        return Err(String::from("cannot set both --last and --all"));
+    }
+
+    let since = selector.since.clone();
+    let until = if selector.follow {
+        None
+    } else {
+        selector.until.clone()
+    };
+
+    if since.is_none() && until.is_none() && !first {
+        if selector.all {
+            selector.last = u64::MAX;
+        } else if selector.last == 0 && !selector.follow && other.input_file.is_none() {
+            selector.last = FLOW_PRINT_COUNT;
+        }
+    }
+
+    let whitelist = parse_raw_filters(allowlist)
+        .map_err(|error| format!("invalid --allowlist flag: {error}"))?;
+    let blacklist =
+        parse_raw_filters(denylist).map_err(|error| format!("invalid --denylist flag: {error}"))?;
+
+    let number = if first { selector.first } else { selector.last };
+    if let Some(path) = masks
+        .field_mask
+        .iter()
+        .find(|path| !is_valid_field_mask_path(path.as_str()))
+    {
+        return Err(format!(
+            "failed to construct field mask: invalid path '{path}'"
+        ));
+    }
+
+    Ok(FlowRequest {
+        number,
+        follow: selector.follow,
+        first,
+        since,
+        until,
+        whitelist,
+        blacklist,
+        field_mask: masks.field_mask.clone(),
+    })
+}
+
+fn is_valid_field_mask_path(path: &str) -> bool {
+    DEFAULT_FIELD_MASK.contains(&path)
+}
+
+// ============================================================================
+// Parity tests — ported from hubble/cmd/cli_test.go and
+//                           hubble/cmd/observe/flows_test.go
+// ============================================================================
+
+#[cfg(test)]
+mod parity_tests {
+    use super::*;
+
+    // ------ hubble/cmd/cli_test.go ------
+
+    /// Exercises the Hubble cobra CLI with various argument combinations (no flags,
+    /// formatting flags, server flags, filter flags, --help, observe help, raw filters).
+    /// Requires the hubble cobra command tree, observe package, IOReaderObserver, and
+    /// an embedded observe_help.txt asset.
+    #[test]
+    #[ignore = "TODO(parity): requires hubble cobra CLI + observe package + IOReaderObserver + embedded observe_help.txt — from TestTestHubbleObserve in hubble/cmd/cli_test.go"]
+    fn parity_hubble_observe_cli_variants() {}
+
+    // ------ hubble/cmd/observe/flows_test.go ------
+
+    /// Validates that flowEventTypes slice stays in sync with monitorAPI.MessageTypeNames
+    /// (excluding agent and debug types).
+    #[test]
+    fn parity_event_types_sync_with_monitor_api() {
+        assert_eq!(FLOW_EVENT_TYPES.len(), MONITOR_MESSAGE_TYPE_NAMES.len() - 2);
+        for event_type in FLOW_EVENT_TYPES {
+            assert!(MONITOR_MESSAGE_TYPE_NAMES.contains(&event_type));
+        }
+        for event_type in MONITOR_MESSAGE_TYPE_NAMES {
+            if event_type == "agent" || event_type == "debug" {
+                continue;
+            }
+            assert!(FLOW_EVENT_TYPES.contains(&event_type));
+        }
+    }
+
+    /// Tests getFlowsRequest with no since/until sets Number=defaults.FlowPrintCount;
+    /// with both since and until set, the Since/Until protobuf timestamps are populated.
+    #[test]
+    fn parity_get_flows_request_since_until() {
+        let mut selector = SelectorOptions::default();
+        let masks = MaskOptions {
+            field_mask: DEFAULT_FIELD_MASK.iter().map(ToString::to_string).collect(),
+            use_default_masks: true,
+        };
+        let other = OtherOptions::default();
+        let request = get_flows_request(&mut selector, &masks, &other, &[], &[]).expect("request");
+        assert_eq!(request.number, FLOW_PRINT_COUNT);
+        assert_eq!(request.field_mask, masks.field_mask);
+
+        selector.since = Some(String::from("2021-03-23T00:00:00Z"));
+        selector.until = Some(String::from("2021-03-24T00:00:00Z"));
+        let request = get_flows_request(&mut selector, &masks, &other, &[], &[]).expect("request");
+        assert_eq!(request.number, FLOW_PRINT_COUNT);
+        assert_eq!(request.since.as_deref(), Some("2021-03-23T00:00:00Z"));
+        assert_eq!(request.until.as_deref(), Some("2021-03-24T00:00:00Z"));
+    }
+
+    /// Tests getFlowsRequest when only until is set (no since).
+    #[test]
+    fn parity_get_flows_request_without_since() {
+        let mut selector = SelectorOptions::default();
+        let masks = MaskOptions {
+            field_mask: DEFAULT_FIELD_MASK.iter().map(ToString::to_string).collect(),
+            use_default_masks: true,
+        };
+        let other = OtherOptions::default();
+        let request = get_flows_request(&mut selector, &masks, &other, &[], &[]).expect("request");
+        assert_eq!(request.number, FLOW_PRINT_COUNT);
+        assert!(request.since.is_none());
+        assert!(request.until.is_none());
+
+        selector.until = Some(String::from("2021-03-24T00:00:00Z"));
+        let request = get_flows_request(&mut selector, &masks, &other, &[], &[]).expect("request");
+        assert_eq!(request.until.as_deref(), Some("2021-03-24T00:00:00Z"));
+    }
+
+    /// Tests getFlowsRequest correctly encodes raw allowlist/denylist JSON filters into
+    /// the protobuf whitelist/blacklist fields.
+    #[test]
+    fn parity_get_flows_request_raw_filters() {
+        let mut selector = SelectorOptions::default();
+        let masks = MaskOptions::default();
+        let other = OtherOptions::default();
+        let allowlist = vec![
+            String::from(
+                r#"{"source_label":["k8s:io.kubernetes.pod.namespace=kube-system","reserved:host"]}"#,
+            ),
+            String::from(
+                r#"{"destination_label":["k8s:io.kubernetes.pod.namespace=kube-system","reserved:host"]}"#,
+            ),
+        ];
+        let denylist = vec![
+            String::from(r#"{"source_label":["k8s:k8s-app=kube-dns"]}"#),
+            String::from(r#"{"destination_label":["k8s:k8s-app=kube-dns"]}"#),
+        ];
+
+        let request = get_flows_request(&mut selector, &masks, &other, &allowlist, &denylist)
+            .expect("request");
+        let encoded_allowlist =
+            serde_json::to_string(&request.whitelist).expect("allowlist should serialize");
+        let encoded_denylist =
+            serde_json::to_string(&request.blacklist).expect("denylist should serialize");
+        assert_eq!(encoded_allowlist, format!("[{}]", allowlist.join(",")));
+        assert_eq!(encoded_denylist, format!("[{}]", denylist.join(",")));
+    }
+
+    /// Tests that invalid raw filter JSON returns a descriptive error for both allowlist
+    /// and denylist.
+    #[test]
+    fn parity_get_flows_request_invalid_raw_filters() {
+        let mut selector = SelectorOptions::default();
+        let masks = MaskOptions::default();
+        let other = OtherOptions::default();
+        let filters = vec![String::from(r#"{"invalid":["filters"]}"#)];
+
+        let error = get_flows_request(&mut selector, &masks, &other, &filters, &[])
+            .expect_err("allowlist should fail");
+        assert!(error.contains("invalid --allowlist flag"));
+        assert!(error.contains(r#"{"invalid":["filters"]}"#));
+
+        let error = get_flows_request(&mut selector, &masks, &other, &[], &filters)
+            .expect_err("denylist should fail");
+        assert!(error.contains("invalid --denylist flag"));
+        assert!(error.contains(r#"{"invalid":["filters"]}"#));
+    }
+
+    /// Tests getFlowFiltersYAML renders whitelist/blacklist filters as YAML with
+    /// allowlist/denylist keys.
+    #[test]
+    fn parity_get_flow_filters_yaml() {
+        let mut request = FlowRequest::default();
+        request.whitelist =
+            vec![serde_json::from_str(r#"{"source_ip":["1.2.3.4/16"]}"#).expect("valid filter")];
+        request.blacklist =
+            vec![serde_json::from_str(r#"{"source_port":["80"]}"#).expect("valid filter")];
+
+        let output = get_flow_filters_yaml(&request).expect("yaml output");
+        let expected = "allowlist:\n    - '{\"source_ip\":[\"1.2.3.4/16\"]}'\ndenylist:\n    - '{\"source_port\":[\"80\"]}'\n";
+        assert_eq!(output, expected);
+    }
+
+    /// Tests getFlowsRequest with a valid explicit field mask.
+    #[test]
+    fn parity_get_flows_request_field_mask_valid() {
+        let mut selector = SelectorOptions::default();
+        let masks = MaskOptions {
+            field_mask: vec![String::from("time"), String::from("verdict")],
+            use_default_masks: false,
+        };
+        let other = OtherOptions::default();
+        let request = get_flows_request(&mut selector, &masks, &other, &[], &[]).expect("request");
+        assert_eq!(request.number, FLOW_PRINT_COUNT);
+        assert_eq!(request.field_mask, vec!["time", "verdict"]);
+    }
+
+    /// Tests getFlowsRequest returns an error for an invalid field mask path.
+    #[test]
+    fn parity_get_flows_request_field_mask_invalid() {
+        let mut selector = SelectorOptions::default();
+        let masks = MaskOptions {
+            field_mask: vec![
+                String::from("time"),
+                String::from("verdict"),
+                String::from("invalid-field"),
+            ],
+            use_default_masks: false,
+        };
+        let other = OtherOptions::default();
+        let error = get_flows_request(&mut selector, &masks, &other, &[], &[])
+            .expect_err("invalid field mask should fail");
+        assert!(error.contains("invalid-field"));
+    }
+
+    /// Tests that maskOpts.useDefaultMasks + dict output applies the default field mask.
+    #[test]
+    fn parity_get_flows_request_use_default_field_mask() {
+        let formatting = FormattingOptions {
+            output: String::from("dict"),
+        };
+        let mut masks = MaskOptions {
+            field_mask: Vec::new(),
+            use_default_masks: true,
+        };
+        apply_flow_args(&formatting, &mut masks).expect("dict output should be valid");
+
+        let mut selector = SelectorOptions::default();
+        let other = OtherOptions::default();
+        let request = get_flows_request(&mut selector, &masks, &other, &[], &[]).expect("request");
+        let default_mask = DEFAULT_FIELD_MASK
+            .iter()
+            .map(ToString::to_string)
+            .collect::<Vec<_>>();
+        assert_eq!(request.field_mask, default_mask);
+    }
+
+    /// Tests that a non-JSON output format (compact) combined with an explicit field mask
+    /// returns a "not compatible" error from handleFlowArgs.
+    #[test]
+    fn parity_get_flows_request_field_mask_non_json_output() {
+        let formatting = FormattingOptions {
+            output: String::from("compact"),
+        };
+        let mut masks = MaskOptions {
+            field_mask: vec![String::from("time"), String::from("verdict")],
+            use_default_masks: true,
+        };
+        let error = apply_flow_args(&formatting, &mut masks).expect_err("should be incompatible");
+        assert!(error.contains("not compatible"));
+    }
+
+    /// Tests that --input-file suppresses the default Number in GetFlowsRequest, but an
+    /// explicit --last flag overrides that.
+    #[test]
+    fn parity_get_flows_request_with_input_file() {
+        let masks = MaskOptions::default();
+        let mut selector = SelectorOptions::default();
+        let mut other = OtherOptions {
+            input_file: Some(String::from("myfile")),
+        };
+        let request = get_flows_request(&mut selector, &masks, &other, &[], &[]).expect("request");
+        assert_eq!(request.number, 0);
+
+        selector.last = 42;
+        other.input_file = Some(String::from("myfile"));
+        let request = get_flows_request(&mut selector, &masks, &other, &[], &[]).expect("request");
+        assert_eq!(request.number, 42);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -337,7 +1141,7 @@ mod tests {
             FlowEndpoint::new()
                 .with_ip(std::net::Ipv4Addr::new(10, 0, 0, 2))
                 .with_port(443)
-                .with_identity(SecurityIdentity::cluster()),
+                .with_identity(SecurityIdentity::remote_node()),
             Protocol::Tcp,
             FlowDirection::Ingress,
         )
@@ -405,5 +1209,91 @@ mod tests {
         assert_eq!(report.metadata.component, HUBBLE_COMPONENT);
         assert_eq!(report.summary, FlowSummary::default());
         assert!(report.observations.is_empty());
+    }
+
+    fn make_test_flow() -> Flow {
+        Flow {
+            time: None,
+            verdict: Verdict::Forwarded,
+            drop_reason: 0,
+            source: Endpoint::default(),
+            destination: Endpoint::default(),
+            l4: None,
+            traffic_direction: TrafficDirection::Egress,
+            reply: false,
+            is_reply: None,
+            node_name: String::from("node1"),
+            event_type: None,
+        }
+    }
+
+    #[test]
+    fn test_flow_ring_eviction() {
+        let mut ring = FlowRing::new(3);
+        for i in 0..5_u32 {
+            let mut flow = make_test_flow();
+            flow.drop_reason = i;
+            ring.push(flow);
+        }
+
+        assert_eq!(ring.len(), 3);
+        let reasons: Vec<u32> = ring.iter().map(|flow| flow.drop_reason).collect();
+        assert_eq!(reasons, vec![2, 3, 4]);
+    }
+
+    #[test]
+    fn test_verdict_filter() {
+        let filter = VerdictFilter {
+            verdicts: vec![Verdict::Dropped],
+        };
+        let mut flow = make_test_flow();
+        flow.verdict = Verdict::Dropped;
+        assert!(filter.matches(&flow));
+
+        flow.verdict = Verdict::Forwarded;
+        assert!(!filter.matches(&flow));
+    }
+
+    #[test]
+    fn test_and_filter() {
+        let filter = AndFilter {
+            filters: vec![
+                Box::new(VerdictFilter {
+                    verdicts: vec![Verdict::Dropped],
+                }),
+                Box::new(DirectionFilter {
+                    direction: TrafficDirection::Ingress,
+                }),
+            ],
+        };
+        let mut flow = make_test_flow();
+        flow.verdict = Verdict::Dropped;
+        flow.traffic_direction = TrafficDirection::Ingress;
+        assert!(filter.matches(&flow));
+
+        flow.verdict = Verdict::Forwarded;
+        assert!(!filter.matches(&flow));
+    }
+
+    #[test]
+    fn test_last_n() {
+        let mut ring = FlowRing::new(10);
+        for i in 0..7_u32 {
+            let mut flow = make_test_flow();
+            flow.drop_reason = i;
+            ring.push(flow);
+        }
+
+        let last_three = ring.last_n(3);
+        assert_eq!(last_three.len(), 3);
+        assert_eq!(last_three[2].drop_reason, 6);
+    }
+
+    #[test]
+    fn test_try_new_rejects_zero_capacity() {
+        assert!(matches!(
+            FlowRing::try_new(0),
+            Err(HubbleError::InvalidCapacity)
+        ));
     }
 }

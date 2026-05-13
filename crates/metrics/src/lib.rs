@@ -181,12 +181,14 @@ impl MetricValue {
 }
 
 impl From<u64> for MetricValue {
+    #[allow(clippy::cast_precision_loss)]
     fn from(v: u64) -> Self {
         Self(v as f64)
     }
 }
 
 impl From<i64> for MetricValue {
+    #[allow(clippy::cast_precision_loss)]
     fn from(v: i64) -> Self {
         Self(v as f64)
     }
@@ -328,13 +330,13 @@ impl Labels {
                 return Err(Error::LabelValidation(format!("missing label: {name}")));
             }
             let value = labels.get(&name).unwrap();
-            if let Some(label) = self.0.iter().find(|l| l.name == name) {
-                if !label.values.contains(value) {
-                    return Err(Error::InvalidLabelValue {
-                        label: name,
-                        value: value.clone(),
-                    });
-                }
+            if let Some(label) = self.0.iter().find(|l| l.name == name)
+                && !label.values.contains(value)
+            {
+                return Err(Error::InvalidLabelValue {
+                    label: name,
+                    value: value.clone(),
+                });
             }
         }
         Ok(())
@@ -941,6 +943,386 @@ impl WithMetadata for HistogramVec {
     }
 }
 
+/// In-memory Prometheus-style metric primitives and registry types.
+///
+/// These types model pure registration and collection behavior without exposing
+/// an HTTP endpoint or scrape handler.
+pub mod registry {
+    use std::collections::HashMap;
+    use std::sync::{
+        Arc, Mutex,
+        atomic::{AtomicI64, AtomicU64, Ordering},
+    };
+
+    /// A label key-value pair attached to a metric.
+    #[derive(Debug, Clone, PartialEq, Eq, Hash)]
+    pub struct Label {
+        /// Label key.
+        pub key: String,
+        /// Label value.
+        pub value: String,
+    }
+
+    impl Label {
+        /// Creates a new label pair.
+        pub fn new(key: impl Into<String>, value: impl Into<String>) -> Self {
+            Self {
+                key: key.into(),
+                value: value.into(),
+            }
+        }
+    }
+
+    /// Common metric metadata.
+    #[derive(Debug, Clone)]
+    pub struct MetricDesc {
+        /// Metric name.
+        pub name: String,
+        /// Human-readable help text.
+        pub help: String,
+        /// Ordered label names expected by the metric.
+        pub label_names: Vec<String>,
+    }
+
+    impl MetricDesc {
+        /// Creates a new metric descriptor.
+        pub fn new(name: impl Into<String>, help: impl Into<String>) -> Self {
+            Self {
+                name: name.into(),
+                help: help.into(),
+                label_names: vec![],
+            }
+        }
+
+        /// Attaches label names to the descriptor.
+        pub fn with_labels<I, S>(mut self, labels: I) -> Self
+        where
+            I: IntoIterator<Item = S>,
+            S: Into<String>,
+        {
+            self.label_names = labels.into_iter().map(Into::into).collect();
+            self
+        }
+    }
+
+    /// Errors returned by the in-memory metrics registry.
+    #[derive(Debug, thiserror::Error)]
+    pub enum MetricsError {
+        /// Returned when a metric name is registered twice.
+        #[error("metric already registered: {0}")]
+        AlreadyRegistered(String),
+        /// Returned when a requested metric does not exist.
+        #[error("metric not found: {0}")]
+        NotFound(String),
+    }
+
+    /// A monotonically increasing counter.
+    #[derive(Debug, Clone)]
+    pub struct Counter {
+        desc: MetricDesc,
+        value: Arc<AtomicU64>,
+    }
+
+    impl Counter {
+        /// Creates a new counter.
+        pub fn new(desc: MetricDesc) -> Self {
+            Self {
+                desc,
+                value: Arc::new(AtomicU64::new(0)),
+            }
+        }
+
+        /// Increments the counter by one.
+        pub fn inc(&self) {
+            self.value.fetch_add(1, Ordering::Relaxed);
+        }
+
+        /// Adds an arbitrary delta to the counter.
+        pub fn add(&self, n: u64) {
+            self.value.fetch_add(n, Ordering::Relaxed);
+        }
+
+        /// Returns the current counter value.
+        pub fn get(&self) -> u64 {
+            self.value.load(Ordering::Relaxed)
+        }
+
+        /// Returns the metric descriptor.
+        pub fn desc(&self) -> &MetricDesc {
+            &self.desc
+        }
+    }
+
+    /// A gauge that can go up and down.
+    #[derive(Debug, Clone)]
+    pub struct Gauge {
+        desc: MetricDesc,
+        value: Arc<AtomicI64>,
+    }
+
+    impl Gauge {
+        /// Creates a new gauge.
+        pub fn new(desc: MetricDesc) -> Self {
+            Self {
+                desc,
+                value: Arc::new(AtomicI64::new(0)),
+            }
+        }
+
+        /// Sets the gauge to an exact value.
+        pub fn set(&self, v: i64) {
+            self.value.store(v, Ordering::Relaxed);
+        }
+
+        /// Increments the gauge by one.
+        pub fn inc(&self) {
+            self.value.fetch_add(1, Ordering::Relaxed);
+        }
+
+        /// Decrements the gauge by one.
+        pub fn dec(&self) {
+            self.value.fetch_sub(1, Ordering::Relaxed);
+        }
+
+        /// Adds a signed delta to the gauge.
+        pub fn add(&self, n: i64) {
+            self.value.fetch_add(n, Ordering::Relaxed);
+        }
+
+        /// Returns the current gauge value.
+        pub fn get(&self) -> i64 {
+            self.value.load(Ordering::Relaxed)
+        }
+
+        /// Returns the metric descriptor.
+        pub fn desc(&self) -> &MetricDesc {
+            &self.desc
+        }
+    }
+
+    /// A histogram with configurable buckets.
+    #[derive(Debug, Clone)]
+    pub struct Histogram {
+        desc: MetricDesc,
+        buckets: Vec<f64>,
+        counts: Arc<Mutex<Vec<u64>>>,
+        sum: Arc<AtomicU64>,
+        total_count: Arc<AtomicU64>,
+    }
+
+    impl Histogram {
+        /// Creates a histogram with explicit bucket upper bounds.
+        pub fn new(desc: MetricDesc, mut buckets: Vec<f64>) -> Self {
+            buckets.sort_by(f64::total_cmp);
+            let bucket_count = buckets.len();
+            Self {
+                desc,
+                buckets,
+                counts: Arc::new(Mutex::new(vec![0; bucket_count])),
+                sum: Arc::new(AtomicU64::new(0.0f64.to_bits())),
+                total_count: Arc::new(AtomicU64::new(0)),
+            }
+        }
+
+        /// Returns the default Prometheus latency buckets in seconds.
+        pub fn default_buckets() -> Vec<f64> {
+            vec![
+                0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0, 2.5, 5.0, 10.0,
+            ]
+        }
+
+        /// Records an observation.
+        pub fn observe(&self, v: f64) {
+            self.total_count.fetch_add(1, Ordering::Relaxed);
+            self.add_to_sum(v);
+
+            if let Some(index) = self.buckets.iter().position(|&upper| v <= upper) {
+                let mut counts = self.counts.lock().unwrap();
+                counts[index] += 1;
+            }
+        }
+
+        /// Returns the total number of observations.
+        pub fn count(&self) -> u64 {
+            self.total_count.load(Ordering::Relaxed)
+        }
+
+        /// Returns the sum of all observed values.
+        pub fn sum(&self) -> f64 {
+            f64::from_bits(self.sum.load(Ordering::Relaxed))
+        }
+
+        /// Returns the metric descriptor.
+        pub fn desc(&self) -> &MetricDesc {
+            &self.desc
+        }
+
+        /// Returns `(upper_bound, cumulative_count)` pairs.
+        pub fn bucket_counts(&self) -> Vec<(f64, u64)> {
+            let counts = self.counts.lock().unwrap();
+            let mut cumulative = 0u64;
+            self.buckets
+                .iter()
+                .zip(counts.iter())
+                .map(|(&upper, &count)| {
+                    cumulative += count;
+                    (upper, cumulative)
+                })
+                .collect()
+        }
+
+        fn add_to_sum(&self, value: f64) {
+            let mut current = self.sum.load(Ordering::Relaxed);
+            loop {
+                let next = (f64::from_bits(current) + value).to_bits();
+                match self.sum.compare_exchange_weak(
+                    current,
+                    next,
+                    Ordering::Relaxed,
+                    Ordering::Relaxed,
+                ) {
+                    Ok(_) => break,
+                    Err(observed) => current = observed,
+                }
+            }
+        }
+    }
+
+    /// Metric variant for type-erased registry storage.
+    #[derive(Debug, Clone)]
+    pub enum Metric {
+        /// Counter metric.
+        Counter(Counter),
+        /// Gauge metric.
+        Gauge(Gauge),
+        /// Histogram metric.
+        Histogram(Histogram),
+    }
+
+    impl Metric {
+        /// Returns the metric name.
+        pub fn name(&self) -> &str {
+            match self {
+                Self::Counter(counter) => &counter.desc().name,
+                Self::Gauge(gauge) => &gauge.desc().name,
+                Self::Histogram(histogram) => &histogram.desc().name,
+            }
+        }
+    }
+
+    /// An in-memory metric registry with no Prometheus HTTP endpoint.
+    #[derive(Debug, Default)]
+    pub struct Registry {
+        metrics: HashMap<String, Metric>,
+    }
+
+    impl Registry {
+        /// Creates a new empty registry.
+        pub fn new() -> Self {
+            Self::default()
+        }
+
+        /// Registers a counter metric.
+        pub fn register_counter(&mut self, desc: MetricDesc) -> Result<Counter, MetricsError> {
+            let name = desc.name.clone();
+            if self.metrics.contains_key(&name) {
+                return Err(MetricsError::AlreadyRegistered(name));
+            }
+            let counter = Counter::new(desc);
+            tracing::debug!(metric = %counter.desc().name, "registering counter");
+            self.metrics.insert(
+                counter.desc().name.clone(),
+                Metric::Counter(counter.clone()),
+            );
+            Ok(counter)
+        }
+
+        /// Registers a gauge metric.
+        pub fn register_gauge(&mut self, desc: MetricDesc) -> Result<Gauge, MetricsError> {
+            let name = desc.name.clone();
+            if self.metrics.contains_key(&name) {
+                return Err(MetricsError::AlreadyRegistered(name));
+            }
+            let gauge = Gauge::new(desc);
+            tracing::debug!(metric = %gauge.desc().name, "registering gauge");
+            self.metrics
+                .insert(gauge.desc().name.clone(), Metric::Gauge(gauge.clone()));
+            Ok(gauge)
+        }
+
+        /// Registers a histogram metric.
+        pub fn register_histogram(
+            &mut self,
+            desc: MetricDesc,
+            buckets: Vec<f64>,
+        ) -> Result<Histogram, MetricsError> {
+            let name = desc.name.clone();
+            if self.metrics.contains_key(&name) {
+                return Err(MetricsError::AlreadyRegistered(name));
+            }
+            let histogram = Histogram::new(desc, buckets);
+            tracing::debug!(metric = %histogram.desc().name, "registering histogram");
+            self.metrics.insert(
+                histogram.desc().name.clone(),
+                Metric::Histogram(histogram.clone()),
+            );
+            Ok(histogram)
+        }
+
+        /// Looks up a metric by name.
+        pub fn get(&self, name: &str) -> Option<&Metric> {
+            self.metrics.get(name)
+        }
+
+        /// Returns the number of registered metrics.
+        pub fn len(&self) -> usize {
+            self.metrics.len()
+        }
+
+        /// Returns true when the registry is empty.
+        pub fn is_empty(&self) -> bool {
+            self.metrics.is_empty()
+        }
+
+        /// Collects a snapshot of counter and gauge values by metric name.
+        pub fn snapshot(&self) -> HashMap<String, i64> {
+            self.metrics
+                .iter()
+                .filter_map(|(name, metric)| {
+                    let value = match metric {
+                        Metric::Counter(counter) => {
+                            Some(i64::try_from(counter.get()).unwrap_or(i64::MAX))
+                        }
+                        Metric::Gauge(gauge) => Some(gauge.get()),
+                        Metric::Histogram(_) => None,
+                    };
+                    value.map(|value| (name.clone(), value))
+                })
+                .collect()
+        }
+    }
+}
+
+/// Common Cilium metric names mirrored from `pkg/metrics`.
+pub mod names {
+    /// Endpoint count gauge name.
+    pub const ENDPOINT_COUNT: &str = "cilium_endpoint_count";
+    /// Policy regeneration counter name.
+    pub const POLICY_REGENERATION_TOTAL: &str = "cilium_policy_regeneration_total";
+    /// Identity count gauge name.
+    pub const IDENTITY_COUNT: &str = "cilium_identity_count";
+    /// Proxy redirect count gauge name.
+    pub const PROXY_REDIRECTS: &str = "cilium_proxy_redirects";
+    /// Drop count counter name.
+    pub const DROP_COUNT: &str = "cilium_drop_count_total";
+    /// Forward count counter name.
+    pub const FORWARD_COUNT: &str = "cilium_forward_count_total";
+    /// BPF map operations counter name.
+    pub const BPF_MAP_OPS: &str = "cilium_bpf_map_ops_total";
+    /// Kubernetes event received counter name.
+    pub const K8S_EVENT_RECEIVED: &str = "cilium_k8s_event_received_total";
+}
+
 // ============================================================================
 // Monitor event types (ported from pkg/monitor/api/types.go)
 // ============================================================================
@@ -1051,6 +1433,7 @@ pub mod monitor {
             Self::default()
         }
 
+        #[allow(clippy::should_implement_trait)]
         pub fn add(mut self, msg_type: MessageType) -> Self {
             if !self.0.contains(&msg_type) {
                 self.0.push(msg_type);
@@ -1539,5 +1922,90 @@ mod tests {
 
         map.insert("method".to_string(), "DELETE".to_string());
         assert!(labels.validate_map(&map).is_err());
+    }
+}
+
+#[cfg(test)]
+mod registry_tests {
+    use super::names;
+    use super::registry::{Counter, Gauge, Histogram, MetricDesc, Registry};
+
+    #[test]
+    fn test_counter_inc_add() {
+        let counter = Counter::new(MetricDesc::new("hits", "Total hits"));
+        counter.inc();
+        counter.inc();
+        counter.add(3);
+        assert_eq!(counter.get(), 5);
+    }
+
+    #[test]
+    fn test_gauge_set_inc_dec() {
+        let gauge = Gauge::new(MetricDesc::new("conn", "Active connections"));
+        gauge.set(10);
+        gauge.inc();
+        gauge.dec();
+        gauge.dec();
+        assert_eq!(gauge.get(), 9);
+        gauge.add(-4);
+        assert_eq!(gauge.get(), 5);
+    }
+
+    #[test]
+    fn test_histogram_observe() {
+        let histogram = Histogram::new(
+            MetricDesc::new("latency", "Request latency"),
+            vec![0.1, 0.5, 1.0],
+        );
+        histogram.observe(0.05);
+        histogram.observe(0.2);
+        histogram.observe(0.8);
+        assert_eq!(histogram.count(), 3);
+        let buckets = histogram.bucket_counts();
+        assert_eq!(buckets[0], (0.1, 1));
+        assert_eq!(buckets[1], (0.5, 2));
+        assert_eq!(buckets[2], (1.0, 3));
+    }
+
+    #[test]
+    fn test_registry_register_and_snapshot() {
+        let mut registry = Registry::new();
+        let counter = registry
+            .register_counter(MetricDesc::new(names::ENDPOINT_COUNT, "Endpoints"))
+            .unwrap();
+        let gauge = registry
+            .register_gauge(MetricDesc::new(names::IDENTITY_COUNT, "Identities"))
+            .unwrap();
+        counter.add(5);
+        gauge.set(3);
+        let snapshot = registry.snapshot();
+        assert_eq!(snapshot[names::ENDPOINT_COUNT], 5);
+        assert_eq!(snapshot[names::IDENTITY_COUNT], 3);
+    }
+
+    #[test]
+    fn test_registry_duplicate_registration_error() {
+        let mut registry = Registry::new();
+        registry
+            .register_counter(MetricDesc::new("foo", "bar"))
+            .unwrap();
+        assert!(
+            registry
+                .register_counter(MetricDesc::new("foo", "bar"))
+                .is_err()
+        );
+        assert!(
+            registry
+                .register_gauge(MetricDesc::new("foo", "bar"))
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn test_counter_is_clone_shared() {
+        let counter = Counter::new(MetricDesc::new("x", "x"));
+        let counter_clone = counter.clone();
+        counter.add(7);
+        assert_eq!(counter_clone.get(), 7);
     }
 }

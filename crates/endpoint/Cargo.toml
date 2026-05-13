@@ -1,15 +1,16 @@
 [package]
-name = "seriousum-endpoint"
+name = "cilium-endpoint"
 version.workspace = true
 edition.workspace = true
 
+[lib]
+name = "seriousum_endpoint"
+
 [dependencies]
-tokio = { workspace = true }
+thiserror = "2"
 tracing = { workspace = true }
-serde = { workspace = true }
-serde_json = { workspace = true }
-seriousum-core = { workspace = true }
-seriousum-api = { workspace = true }
+serde = { workspace = true, features = ["derive"] }
+tokio = { workspace = true, features = ["sync"] }
 
 [lints]
 workspace = true

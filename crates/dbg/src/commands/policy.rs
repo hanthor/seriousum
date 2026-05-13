@@ -6,21 +6,30 @@
 //! - Adding/deleting policy rules
 //! - Flushing policy maps
 
-use crate::{PolicyEntry, TrafficDirection, NumericIdentity, Result, Error};
+use crate::{NumericIdentity, PolicyEntry, Result, TrafficDirection};
 
 /// List all policy maps in the system
 pub fn list_all_policy_maps() -> Result<Vec<(u16, String)>> {
     // In a real implementation, this would scan /sys/kernel/debug/tracing/events/
     // to find cilium_policy_* maps
     Ok(vec![
-        (1, "/sys/kernel/debug/tracing/events/cilium_policy_0001".to_string()),
-        (2, "/sys/kernel/debug/tracing/events/cilium_policy_0002".to_string()),
-        (42, "/sys/kernel/debug/tracing/events/cilium_policy_002a".to_string()),
+        (
+            1,
+            "/sys/kernel/debug/tracing/events/cilium_policy_0001".to_string(),
+        ),
+        (
+            2,
+            "/sys/kernel/debug/tracing/events/cilium_policy_0002".to_string(),
+        ),
+        (
+            42,
+            "/sys/kernel/debug/tracing/events/cilium_policy_002a".to_string(),
+        ),
     ])
 }
 
 /// Get policy entries for an endpoint
-pub fn get_endpoint_policies(endpoint_id: u16) -> Result<Vec<PolicyEntry>> {
+pub fn get_endpoint_policies(_endpoint_id: u16) -> Result<Vec<PolicyEntry>> {
     // In a real implementation, this would open the BPF map for this endpoint
     // and read all entries
     Ok(vec![
@@ -68,10 +77,7 @@ pub fn get_policy_decisions(endpoint_id: u16) -> Result<Vec<(String, bool)>> {
         .map(|p| {
             let rule_desc = format!(
                 "{} {} {}:{}",
-                p.traffic_direction,
-                p.identity,
-                p.port,
-                p.protocol
+                p.traffic_direction, p.identity, p.port, p.protocol
             );
             (rule_desc, !p.is_deny)
         })
@@ -168,8 +174,7 @@ mod tests {
     #[test]
     fn test_remove_policy_rule_requires_root() {
         if !crate::is_root() {
-            let result =
-                remove_policy_rule(42, TrafficDirection::Ingress, NumericIdentity::WORLD);
+            let result = remove_policy_rule(42, TrafficDirection::Ingress, NumericIdentity::WORLD);
             assert!(result.is_err());
         }
     }

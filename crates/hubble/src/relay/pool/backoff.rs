@@ -38,11 +38,7 @@ impl ExponentialBackoff {
         let result = Duration::from_millis(millis as u64);
 
         // Cap at maximum
-        if result > self.max {
-            self.max
-        } else {
-            result
-        }
+        if result > self.max { self.max } else { result }
     }
 }
 

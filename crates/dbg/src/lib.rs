@@ -11,7 +11,7 @@
 //! https://github.com/cilium/cilium/tree/main/cilium-dbg/cmd
 
 use std::collections::HashMap;
-use std::fmt::Write as FmtWrite;
+
 use std::io;
 use std::net::{Ipv4Addr, Ipv6Addr};
 use std::str::FromStr;
@@ -69,9 +69,7 @@ pub type Result<T> = std::result::Result<T, Error>;
 // ============================================================================
 
 /// NumericIdentity represents a security identity
-#[derive(
-    Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize,
-)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
 pub struct NumericIdentity(pub u32);
 
 impl NumericIdentity {
@@ -113,9 +111,7 @@ impl FromStr for NumericIdentity {
 }
 
 /// EndpointId represents an endpoint's identifier
-#[derive(
-    Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize,
-)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
 pub struct EndpointId(pub u16);
 
 impl std::fmt::Display for EndpointId {
@@ -133,9 +129,7 @@ impl FromStr for EndpointId {
 }
 
 /// ServiceId represents a service identifier
-#[derive(
-    Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize,
-)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
 pub struct ServiceId(pub u32);
 
 impl std::fmt::Display for ServiceId {
@@ -265,6 +259,187 @@ pub struct BpfMapInfo {
     pub key_size: u32,
     pub value_size: u32,
     pub max_entries: u32,
+}
+
+/// Component-level debug information.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ComponentDebugInfo {
+    /// Component name.
+    pub name: String,
+    /// Component state.
+    pub state: String,
+    /// Optional human-readable message.
+    pub msg: Option<String>,
+    /// Additional structured fields.
+    pub fields: HashMap<String, String>,
+}
+
+impl ComponentDebugInfo {
+    /// Creates a new component debug info entry.
+    pub fn new(name: impl Into<String>, state: impl Into<String>) -> Self {
+        Self {
+            name: name.into(),
+            state: state.into(),
+            msg: None,
+            fields: Default::default(),
+        }
+    }
+
+    /// Adds a structured field.
+    pub fn with_field(mut self, k: impl Into<String>, v: impl Into<String>) -> Self {
+        self.fields.insert(k.into(), v.into());
+        self
+    }
+
+    /// Sets a human-readable message.
+    pub fn with_msg(mut self, msg: impl Into<String>) -> Self {
+        self.msg = Some(msg.into());
+        self
+    }
+}
+
+/// Full debug info dump corresponding to `cilium-dbg debuginfo` output.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct DebugInfo {
+    /// Reported Cilium version.
+    pub cilium_version: String,
+    /// Reported kernel version.
+    pub kernel_version: String,
+    /// Component-level entries.
+    pub components: Vec<ComponentDebugInfo>,
+}
+
+impl DebugInfo {
+    /// Creates an empty debug info dump.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Appends a component entry.
+    pub fn add_component(&mut self, c: ComponentDebugInfo) {
+        self.components.push(c);
+    }
+
+    /// Returns a component by name.
+    pub fn component(&self, name: &str) -> Option<&ComponentDebugInfo> {
+        self.components.iter().find(|component| component.name == name)
+    }
+}
+
+/// A single entry in a BPF map dump.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BpfMapEntry {
+    /// Name of the map the entry came from.
+    pub map_name: String,
+    /// Human-readable key representation.
+    pub key: String,
+    /// Human-readable value representation.
+    pub value: String,
+}
+
+/// BPF map dump result.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct BpfMapDump {
+    /// Name of the dumped map.
+    pub map_name: String,
+    /// Dumped entries.
+    pub entries: Vec<BpfMapEntry>,
+}
+
+impl BpfMapDump {
+    /// Creates an empty dump for a map.
+    pub fn new(map_name: impl Into<String>) -> Self {
+        Self {
+            map_name: map_name.into(),
+            entries: vec![],
+        }
+    }
+
+    /// Adds a human-readable key/value entry.
+    pub fn add(&mut self, key: impl Into<String>, value: impl Into<String>) {
+        self.entries.push(BpfMapEntry {
+            map_name: self.map_name.clone(),
+            key: key.into(),
+            value: value.into(),
+        });
+    }
+
+    /// Returns the number of dumped entries.
+    pub fn len(&self) -> usize {
+        self.entries.len()
+    }
+
+    /// Returns whether the dump is empty.
+    pub fn is_empty(&self) -> bool {
+        self.entries.is_empty()
+    }
+}
+
+/// Verbosity level for policy tracing.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum TraceVerbosity {
+    /// Minimal trace output.
+    Brief,
+    /// Default trace output.
+    Normal,
+    /// Detailed trace output.
+    Detailed,
+}
+
+impl Default for TraceVerbosity {
+    fn default() -> Self {
+        Self::Normal
+    }
+}
+
+/// A single policy trace result entry.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TraceEntry {
+    /// Trace verdict, such as `allowed` or `denied`.
+    pub verdict: String,
+    /// Human-readable explanation for the verdict.
+    pub reason: String,
+    /// Optional matching policy reference.
+    pub policy_ref: Option<String>,
+}
+
+impl TraceEntry {
+    /// Creates an allowed trace entry.
+    pub fn allowed(reason: impl Into<String>) -> Self {
+        Self {
+            verdict: "allowed".into(),
+            reason: reason.into(),
+            policy_ref: None,
+        }
+    }
+
+    /// Creates a denied trace entry.
+    pub fn denied(reason: impl Into<String>) -> Self {
+        Self {
+            verdict: "denied".into(),
+            reason: reason.into(),
+            policy_ref: None,
+        }
+    }
+
+    /// Returns whether the verdict is allowed.
+    pub fn is_allowed(&self) -> bool {
+        self.verdict == "allowed"
+    }
+}
+
+/// Errors returned by pure debug data helpers.
+#[derive(Debug, thiserror::Error)]
+pub enum DbgError {
+    /// A requested component was not present.
+    #[error("component not found: {0}")]
+    ComponentNotFound(String),
+    /// A requested map was not present.
+    #[error("map not found: {0}")]
+    MapNotFound(String),
+    /// JSON serialization or deserialization failed.
+    #[error("serialization error: {0}")]
+    Serde(#[from] serde_json::Error),
 }
 
 // ============================================================================
@@ -523,5 +698,53 @@ mod tests {
         };
         assert_eq!(entry.source_ip, "10.0.0.1");
         assert_eq!(entry.state, "ESTABLISHED");
+    }
+
+    #[test]
+    fn test_debug_info_component_lookup() {
+        let mut di = DebugInfo::new();
+        di.add_component(ComponentDebugInfo::new("policy", "ok").with_field("rules", "5"));
+        assert!(di.component("policy").is_some());
+        assert_eq!(di.component("policy").unwrap().fields["rules"], "5");
+        assert!(di.component("nonexistent").is_none());
+    }
+
+    #[test]
+    fn test_bpf_map_dump() {
+        let mut dump = BpfMapDump::new("cilium_ct4_global");
+        assert!(dump.is_empty());
+        dump.add("10.0.0.1:80->10.0.0.2:45678", "flags=0x3 lifetime=1000");
+        assert_eq!(dump.len(), 1);
+    }
+
+    #[test]
+    fn test_trace_entry_verdict() {
+        let t = TraceEntry::allowed("policy rule 1");
+        assert!(t.is_allowed());
+
+        let t = TraceEntry::denied("no matching rule");
+        assert!(!t.is_allowed());
+    }
+
+    #[test]
+    fn test_debug_info_serialization() {
+        let mut di = DebugInfo {
+            cilium_version: "1.15.0".into(),
+            ..Default::default()
+        };
+        di.add_component(ComponentDebugInfo::new("daemon", "running"));
+        let json = serde_json::to_string(&di).unwrap();
+        let di2: DebugInfo = serde_json::from_str(&json).unwrap();
+        assert_eq!(di2.cilium_version, "1.15.0");
+        assert_eq!(di2.components.len(), 1);
+    }
+
+    #[test]
+    fn test_component_debug_info_builder() {
+        let c = ComponentDebugInfo::new("hubble", "active")
+            .with_field("flows_per_sec", "1000")
+            .with_msg("all good");
+        assert_eq!(c.fields["flows_per_sec"], "1000");
+        assert!(c.msg.is_some());
     }
 }

@@ -10,7 +10,7 @@ This is a lightweight parity manifest for the currently rewritten Rust crates. I
 | `pkg/option/config_test.go` | `seriousum-config` | `cargo test -p seriousum-config` | Thin re-export crate; parity is currently limited to default config access. Future work: add merge/override behavior if the Rust config layer starts owning more policy. |
 | `pkg/crypto/crypto_test.go`, `pkg/crypto/key_test.go` | `seriousum-crypto` | `cargo test -p seriousum-crypto` | Covers fingerprints and keypair helpers. Future work: add certificate, signing, and rotation parity when the Rust crypto layer grows beyond the current scaffolding. |
 | `pkg/kvstore/kvstore_test.go` | `seriousum-kvstore` | `cargo test -p seriousum-kvstore` | Covers in-memory async set/get/delete semantics. Future work: add persistence, watch, and prefix-scoped behavior if the Rust store expands. |
-| `daemon/cmd/daemon_test.go`, `daemon/cmd/config_test.go` | `seriousum-daemon` | `cargo test -p seriousum-daemon` | Covers CLI parsing and config fallback behavior. Future work: add lifecycle, signal handling, and subsystem wiring parity as the daemon becomes real. |
+| `daemon/cmd/daemon_test.go`, `daemon/cmd/config_test.go` | `seriousum-daemon` | `cargo test -p cilium-daemon` | Covers CLI parsing and config fallback behavior. Future work: add lifecycle, signal handling, and subsystem wiring parity as the daemon becomes real. |
 | `pkg/api/v1/api_test.go`, `pkg/api/v1/health_test.go` | `seriousum-api` | `cargo test -p seriousum-api` | Covers request/response envelopes and health/version metadata. Future work: add additional message schemas and compatibility checks as the shared API contract stabilizes. |
 | `cilium-cli/cli/cmd_test.go`, `cilium-cli/cli/install_test.go`, `cilium-cli/clustermesh/clustermesh_test.go` | `seriousum-cli` | `cargo test -p seriousum-cli` | Covers CLI wiring, config checking, and synthesized operator reporting. Future work: add more subcommands and richer validation once the CLI grows beyond the scaffold. |
 | `operator/cmd/root_test.go`, `operator/api/server_test.go`, `operator/api/health_test.go` | `seriousum-operator` | `cargo test -p seriousum-operator` | Covers operator startup/reporting scaffold and health metadata. Future work: add real HTTP endpoints and k8s-backed behavior when the operator service becomes live. |
@@ -23,7 +23,7 @@ This is a lightweight parity manifest for the currently rewritten Rust crates. I
 | `pkg/bgp/test/script_test.go`, `pkg/bgp/types/conversions_test.go` | `seriousum-bgp` | `cargo test -p seriousum-bgp` | Covers BGP route/neighbor/report scaffolding. Future work: add K8s-backed route writer and script parity later. |
 | `pkg/fqdn/cache_test.go`, `pkg/fqdn/dnsproxy/helpers_test.go`, `pkg/fqdn/dns/dns_test.go` | `seriousum-fqdn` | `cargo test -p seriousum-fqdn` | Covers FQDN cache/report scaffolding. Future work: add TTL/zombie GC and selector matching parity later. |
 | `pkg/envoy/standalone_envoy_test.go`, `pkg/ciliumenvoyconfig/script_test.go`, `pkg/ciliumenvoyconfig/cec_resource_parser_test.go` | `seriousum-envoy` | `cargo test -p seriousum-envoy` | Covers Envoy model/report scaffolding. Future work: add listener/cluster resource parsing and NACK handling later. |
-| `pkg/k8s/utils/utils_test.go`, `pkg/k8s/client/testutils/script_test.go`, `pkg/k8s/tables/script_test.go` | `seriousum-k8s` | `cargo test -p seriousum-k8s` | Covers K8s status/report scaffolding. Future work: add fake client, table processing, and endpoint/service utilities later. |
+| `pkg/k8s/utils/utils_test.go`, `pkg/k8s/client/testutils/script_test.go`, `pkg/k8s/tables/script_test.go` | `cilium-k8s` | `cargo test -p cilium-k8s` | Covers pure K8s resource metadata, slim pod/node types, label selectors, and an in-process watch store. Future work: add fake client, table processing, and endpoint/service utilities later. |
 | `pkg/datapath/connector/config_test.go`, `pkg/datapath/linux/config/config_test.go`, `pkg/datapath/linux/devices_controller_test.go` | `seriousum-datapath` | `cargo test -p seriousum-datapath` | Covers datapath model/report scaffolding. Future work: add real connector/config/device-controller logic later. |
 | `pkg/bpf/map_linux_test.go`, `pkg/bpf/unused_maps_test.go`, `pkg/bpf/ops_linux_test.go` | `seriousum-ebpf` | `cargo test -p seriousum-ebpf` | Covers eBPF descriptor/report scaffolding. Future work: add real map lifecycle, pruning, and reconciler parity later. |
 | `pkg/controller/controller_test.go` | `seriousum-controller` | `cargo test -p seriousum-controller` | Covers controller lifecycle/report scaffolding. Future work: add real add/remove/wait semantics and cancellation parity later. |
@@ -47,7 +47,7 @@ This is a lightweight parity manifest for the currently rewritten Rust crates. I
 15. `seriousum-bgp`
 16. `seriousum-fqdn`
 17. `seriousum-envoy`
-18. `seriousum-k8s`
+18. `cilium-k8s`
 19. `seriousum-datapath`
 20. `seriousum-ebpf`
 21. `seriousum-controller`

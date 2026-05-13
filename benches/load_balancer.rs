@@ -1,7 +1,10 @@
 //! Benchmark: load-balancer backend selection.
 
 use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
-use seriousum_loadbalancer::{Backend, Frontend, L3n4Addr, L4Protocol, LoadBalancer, MaglevHash, Service, ServiceName, SvcType};
+use seriousum_loadbalancer::{
+    Backend, Frontend, L3n4Addr, L4Protocol, LoadBalancer, MaglevHash, Service, ServiceName,
+    SvcType,
+};
 use std::hint::black_box;
 use std::net::{IpAddr, Ipv4Addr};
 
@@ -67,7 +70,11 @@ fn bench_service_name_display(c: &mut Criterion) {
 }
 
 fn bench_l3n4addr_display_ipv4(c: &mut Criterion) {
-    let addr = L3n4Addr::new(IpAddr::V4(Ipv4Addr::new(192, 168, 123, 210)), 8080, L4Protocol::TCP);
+    let addr = L3n4Addr::new(
+        IpAddr::V4(Ipv4Addr::new(192, 168, 123, 210)),
+        8080,
+        L4Protocol::TCP,
+    );
     c.bench_function("lb_l3n4addr_display_ipv4", |b| {
         b.iter(|| black_box(addr.to_string()))
     });
@@ -79,7 +86,11 @@ fn bench_upsert_service_1(c: &mut Criterion) {
             let lb = LoadBalancer::new();
             let name = ServiceName::new("test", "svc-1");
             let frontend = Frontend::new(
-                L3n4Addr::new(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)), 8080, L4Protocol::TCP),
+                L3n4Addr::new(
+                    IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)),
+                    8080,
+                    L4Protocol::TCP,
+                ),
                 SvcType::ClusterIp,
                 name.clone(),
             );
@@ -96,7 +107,11 @@ fn bench_upsert_service_100(c: &mut Criterion) {
             for i in 0..100 {
                 let name = ServiceName::new("test", format!("svc-{i}"));
                 let frontend = Frontend::new(
-                    L3n4Addr::new(IpAddr::V4(Ipv4Addr::new(10, 0, 0, (i % 250 + 1) as u8)), 8080, L4Protocol::TCP),
+                    L3n4Addr::new(
+                        IpAddr::V4(Ipv4Addr::new(10, 0, 0, (i % 250 + 1) as u8)),
+                        8080,
+                        L4Protocol::TCP,
+                    ),
                     SvcType::ClusterIp,
                     name.clone(),
                 );
@@ -111,7 +126,11 @@ fn bench_update_backends_100(c: &mut Criterion) {
     let lb = LoadBalancer::new();
     let service_name = ServiceName::new("test", "svc");
     let frontend = Frontend::new(
-        L3n4Addr::new(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)), 8080, L4Protocol::TCP),
+        L3n4Addr::new(
+            IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)),
+            8080,
+            L4Protocol::TCP,
+        ),
         SvcType::ClusterIp,
         service_name.clone(),
     );
@@ -122,13 +141,22 @@ fn bench_update_backends_100(c: &mut Criterion) {
         .map(|i| {
             Backend::new(
                 service_name.clone(),
-                L3n4Addr::new(IpAddr::V4(Ipv4Addr::new(10, 1, 0, (i % 250 + 1) as u8)), 8080, L4Protocol::TCP),
+                L3n4Addr::new(
+                    IpAddr::V4(Ipv4Addr::new(10, 1, 0, (i % 250 + 1) as u8)),
+                    8080,
+                    L4Protocol::TCP,
+                ),
             )
         })
         .collect();
 
     c.bench_function("lb_update_backends_100", |b| {
-        b.iter(|| black_box(lb.update_backends(&service_name, black_box(backends.clone())).unwrap()))
+        b.iter(|| {
+            black_box(
+                lb.update_backends(&service_name, black_box(backends.clone()))
+                    .unwrap(),
+            )
+        })
     });
 }
 

@@ -102,18 +102,59 @@ impl DnsMessage {
     }
 }
 
-/// Normalizes DNS name (lowercase, adds trailing dot)
+/// Normalizes DNS name (lowercase, adds trailing dot).
+///
+/// Uses the full `is_fqdn` semantics (backslash-aware). Equivalent to
+/// `dns.FQDN` from `cilium/pkg/fqdn/dns`.
 pub fn normalize_fqdn(name: &str) -> String {
-    let lower = name.to_lowercase();
-    if lower.ends_with('.') {
-        lower
+    fqdn(name)
+}
+
+/// Reports whether the domain name s is fully qualified.
+///
+/// A name is FQDN if it ends with an unescaped `.`. The trailing dot is
+/// unescaped when it is not preceded by an odd number of backslashes.
+///
+/// Ported from `cilium/pkg/fqdn/dns/dns.go` (originally from `github.com/miekg/dns`).
+pub fn is_fqdn(s: &str) -> bool {
+    // Must end with '.'
+    if s.is_empty() || !s.ends_with('.') {
+        return false;
+    }
+    // Strip the trailing dot
+    let s = &s[..s.len() - 1];
+
+    // If there's no backslash immediately before the dot, it's unescaped.
+    if s.is_empty() || !s.ends_with('\\') {
+        return true;
+    }
+
+    // Count the number of consecutive backslashes before the dot.
+    // An even count means the backslashes escape each other (dot is unescaped).
+    // An odd count means the last backslash escapes the dot.
+    let backslash_count = s.chars().rev().take_while(|&c| c == '\\').count();
+    backslash_count % 2 == 0
+}
+
+/// Returns the fully qualified domain name from s.
+///
+/// If s is already fully qualified, it is returned (lowercased) unchanged.
+/// Otherwise a trailing `.` is appended.
+///
+/// Ported from `cilium/pkg/fqdn/dns/dns.go`.
+pub fn fqdn(s: &str) -> String {
+    if is_fqdn(s) {
+        s.to_lowercase()
     } else {
-        format!("{}.", lower)
+        format!("{}.", s.to_lowercase())
     }
 }
 
-/// Checks if a name is fully qualified (ends with .)
-pub fn is_fqdn(name: &str) -> bool {
+/// Checks if a name is fully qualified (ends with .).
+///
+/// Note: this is a simplified check that does not account for backslash
+/// escaping. Use `is_fqdn` for the full semantics from `cilium/pkg/fqdn/dns`.
+pub fn is_fqdn_simple(name: &str) -> bool {
     name.ends_with('.')
 }
 
@@ -174,5 +215,85 @@ mod tests {
     fn is_fqdn_check() {
         assert!(is_fqdn("example.com."));
         assert!(!is_fqdn("example.com"));
+        // Escaped dot: not FQDN
+        assert!(!is_fqdn("example.com\\."));
+        // Double-escaped backslash + dot: FQDN
+        assert!(is_fqdn("example.com\\\\."));
+    }
+}
+
+#[cfg(test)]
+mod parity_tests {
+    //! Parity tests ported from `cilium/pkg/fqdn/dns/dns_test.go`.
+
+    use super::*;
+
+    /// Ported from `TestIsFQDN` in `cilium/pkg/fqdn/dns/dns_test.go`.
+    #[test]
+    fn test_is_fqdn() {
+        let cases: &[(&str, bool)] = &[
+            (".", true),
+            ("\\.", false),
+            ("\\\\.", true),
+            ("\\\\\\.", false),
+            ("\\\\\\\\.", true),
+            ("a.", true),
+            ("a\\.", false),
+            ("a\\\\.", true),
+            ("a\\\\\\.", false),
+            ("ab.", true),
+            ("ab\\.", false),
+            ("ab\\\\.", true),
+            ("ab\\\\\\.", false),
+            ("..", true),
+            (".\\.", false),
+            (".\\\\.", true),
+            (".\\\\\\.", false),
+            ("example.org.", true),
+            ("example.org\\.", false),
+            ("example.org\\\\.", true),
+            ("example.org\\\\\\.", false),
+            ("example\\.org.", true),
+            ("example\\\\.org.", true),
+            ("example\\\\\\.org.", true),
+            ("\\example.org.", true),
+            ("\\\\example.org.", true),
+            ("\\\\\\example.org.", true),
+        ];
+
+        for (s, expect) in cases {
+            assert_eq!(
+                is_fqdn(s),
+                *expect,
+                "is_fqdn({s:?}) = {}, expected {}",
+                is_fqdn(s),
+                expect
+            );
+        }
+    }
+
+    /// Ported from `TestFQDN` in `cilium/pkg/fqdn/dns/dns_test.go`.
+    #[test]
+    fn test_fqdn() {
+        let cases: &[(&str, &str)] = &[
+            (".", "."),
+            ("\\.", "\\.."),
+            ("example.org", "example.org."),
+            ("example.org.", "example.org."),
+            ("example.org\\.", "example.org\\.."),
+            ("example.org\\\\.", "example.org\\\\."),
+            ("EXAMPLE.ORG", "example.org."),
+            ("eXAMPLE.org.", "example.org."),
+        ];
+
+        for (s, expect) in cases {
+            assert_eq!(
+                fqdn(s),
+                *expect,
+                "fqdn({s:?}) = {:?}, expected {:?}",
+                fqdn(s),
+                expect
+            );
+        }
     }
 }

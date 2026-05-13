@@ -1,9 +1,9 @@
 //! Network flow verification and analysis for Track U.
-//! 
+//!
 //! Provides flow analysis, filtering, and statistics collection.
 
-use serde::{Deserialize, Serialize};
 use crate::Result;
+use serde::{Deserialize, Serialize};
 
 /// Information about a network flow.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -143,9 +143,7 @@ impl FlowAnalyzer {
     /// Filter flows based on an expression.
     pub fn filter_flows(&self, expression: &str) -> Result<Vec<NetworkFlow>> {
         // Simple expression parsing - just check if it contains keywords
-        let mut flows = self
-            .get_recent_flows(100, None, None)
-            .unwrap_or_default();
+        let mut flows = self.get_recent_flows(100, None, None).unwrap_or_default();
 
         // Simple filter: if expression mentions "denied", show only denied flows
         if expression.contains("denied") {
@@ -256,9 +254,7 @@ mod tests {
     #[test]
     fn test_filter_flows_by_denied() {
         let analyzer = FlowAnalyzer::new();
-        let flows = analyzer
-            .filter_flows("denied")
-            .expect("filter flows");
+        let flows = analyzer.filter_flows("denied").expect("filter flows");
 
         // All filtered flows should be denied
         assert!(flows.iter().all(|f| f.status == "denied"));
@@ -267,9 +263,7 @@ mod tests {
     #[test]
     fn test_filter_flows_by_protocol() {
         let analyzer = FlowAnalyzer::new();
-        let flows = analyzer
-            .filter_flows("tcp")
-            .expect("filter flows");
+        let flows = analyzer.filter_flows("tcp").expect("filter flows");
 
         assert!(flows.iter().all(|f| f.protocol == "tcp"));
     }
@@ -277,11 +271,13 @@ mod tests {
     #[test]
     fn test_filter_flows_combined() {
         let analyzer = FlowAnalyzer::new();
-        let flows = analyzer
-            .filter_flows("tcp denied")
-            .expect("filter flows");
+        let flows = analyzer.filter_flows("tcp denied").expect("filter flows");
 
-        assert!(flows.iter().all(|f| f.protocol == "tcp" || f.status == "denied"));
+        assert!(
+            flows
+                .iter()
+                .all(|f| f.protocol == "tcp" || f.status == "denied")
+        );
     }
 
     #[test]
@@ -318,7 +314,7 @@ mod tests {
 
     #[test]
     fn test_flow_status_variants() {
-        let flows = vec![
+        let flows = [
             NetworkFlow {
                 source_pod: "a".to_string(),
                 dest_pod: "b".to_string(),

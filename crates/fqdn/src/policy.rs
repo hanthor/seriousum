@@ -121,7 +121,7 @@ impl FqdnPolicyRepository {
         for fqdn_sel in &policy.allow_fqdns {
             self.fqdn_to_policies
                 .entry(fqdn_sel.pattern.clone())
-                .or_insert_with(Vec::new)
+                .or_default()
                 .push(name.clone());
         }
 
@@ -189,8 +189,6 @@ impl Default for FqdnPolicyRepository {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use ipnet::Ipv4Net;
-    use std::str::FromStr;
 
     #[test]
     fn policy_selector_creation() {

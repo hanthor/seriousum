@@ -6,7 +6,7 @@
 //! - Inspecting backends and load balancer state
 //! - Viewing service affinity and traffic policies
 
-use crate::{Result, Service, ServiceBackend, ServiceId, Error};
+use crate::{Error, Result, Service, ServiceBackend, ServiceId};
 
 /// List all services configured in the system
 pub fn list_services() -> Result<Vec<Service>> {

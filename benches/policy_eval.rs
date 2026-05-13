@@ -1,8 +1,11 @@
 //! Benchmark: policy selector matching and policy distillation hot path.
 
 use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
-use seriousum_policy::{EndpointIdentity, EndpointSelector, L4Policy, L4Traffic, PolicyRepository, PolicyRule, TrafficDirection};
 use seriousum_policy::l4::Protocol;
+use seriousum_policy::{
+    EndpointIdentity, EndpointSelector, L4Policy, L4Traffic, PolicyRepository, PolicyRule,
+    TrafficDirection,
+};
 use std::collections::HashMap;
 use std::hint::black_box;
 
@@ -50,20 +53,25 @@ fn bench_policy_eval(c: &mut Criterion) {
         group.throughput(Throughput::Elements(policy_count as u64));
         let repo = PolicyRepository::new();
         for i in 0..policy_count {
-            repo.add_ingress_rule(format!("rule-{i}"), make_rule(i)).unwrap();
+            repo.add_ingress_rule(format!("rule-{i}"), make_rule(i))
+                .unwrap();
         }
 
-        group.bench_with_input(BenchmarkId::new("policies", policy_count), &policy_count, |b, _| {
-            b.iter(|| {
-                black_box(
-                    repo.distill_policy(
-                        black_box(EndpointIdentity::new(1234)),
-                        black_box(&endpoint_labels),
+        group.bench_with_input(
+            BenchmarkId::new("policies", policy_count),
+            &policy_count,
+            |b, _| {
+                b.iter(|| {
+                    black_box(
+                        repo.distill_policy(
+                            black_box(EndpointIdentity::new(1234)),
+                            black_box(&endpoint_labels),
+                        )
+                        .unwrap(),
                     )
-                    .unwrap(),
-                )
-            })
-        });
+                })
+            },
+        );
     }
 
     group.finish();
@@ -72,7 +80,8 @@ fn bench_policy_eval(c: &mut Criterion) {
 fn bench_policy_eval_no_match(c: &mut Criterion) {
     let repo = PolicyRepository::new();
     for i in 0..1000usize {
-        repo.add_ingress_rule(format!("rule-{i}"), make_rule(i)).unwrap();
+        repo.add_ingress_rule(format!("rule-{i}"), make_rule(i))
+            .unwrap();
     }
     let endpoint_labels = labels("other", "worker", "dev");
 
@@ -89,5 +98,10 @@ fn bench_policy_eval_no_match(c: &mut Criterion) {
     });
 }
 
-criterion_group!(policy_benches, bench_selector_match, bench_policy_eval, bench_policy_eval_no_match);
+criterion_group!(
+    policy_benches,
+    bench_selector_match,
+    bench_policy_eval,
+    bench_policy_eval_no_match
+);
 criterion_main!(policy_benches);

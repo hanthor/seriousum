@@ -4,9 +4,12 @@ version.workspace = true
 edition.workspace = true
 
 [dependencies]
+thiserror = "2"
 seriousum-core = { workspace = true }
+ipnet.workspace = true
 serde = { workspace = true, features = ["derive"] }
 serde_json.workspace = true
+tracing = { workspace = true }
 
 [lints]
 workspace = true

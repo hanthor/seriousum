@@ -1,13 +1,12 @@
 [package]
-name = "seriousum-clustermesh"
+name = "cilium-clustermesh"
 version.workspace = true
 edition.workspace = true
 
 [dependencies]
 serde = { workspace = true, features = ["derive"] }
-serde_json.workspace = true
-seriousum-api = { path = "../api" }
-seriousum-core = { workspace = true }
+thiserror = "2"
+tracing = { workspace = true }
 
 [lints]
 workspace = true

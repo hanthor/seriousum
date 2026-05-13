@@ -10,6 +10,8 @@ privileged = []
 serde = { workspace = true }
 serde_json = { workspace = true }
 seriousum-core = { workspace = true }
+thiserror = "2"
+tracing = { workspace = true }
 
 [lints]
 workspace = true

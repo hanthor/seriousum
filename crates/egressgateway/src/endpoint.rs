@@ -23,12 +23,7 @@ pub struct EndpointMetadata {
 
 impl EndpointMetadata {
     /// Create new endpoint metadata
-    pub fn new(
-        id: EndpointID,
-        labels: Labels,
-        ips: Vec<IpAddr>,
-        node_ip: String,
-    ) -> Self {
+    pub fn new(id: EndpointID, labels: Labels, ips: Vec<IpAddr>, node_ip: String) -> Self {
         Self {
             id,
             labels,
@@ -92,8 +87,8 @@ impl EndpointMetadata {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::str::FromStr;
     use std::collections::HashMap;
+    use std::str::FromStr;
 
     #[test]
     fn test_endpoint_metadata_creation() {
@@ -105,12 +100,7 @@ mod tests {
             IpAddr::from_str("fd00::1").unwrap(),
         ];
 
-        let meta = EndpointMetadata::new(
-            EndpointID(123),
-            labels,
-            ips,
-            "192.168.1.1".to_string(),
-        );
+        let meta = EndpointMetadata::new(EndpointID(123), labels, ips, "192.168.1.1".to_string());
 
         assert_eq!(meta.ips.len(), 2);
         assert!(meta.has_ipv4());

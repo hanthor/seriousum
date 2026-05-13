@@ -3,12 +3,15 @@
 //! This module provides IP address allocation and management for pods and other endpoints,
 //! supporting both IPv4 and IPv6 addresses with bitmap-based allocation strategies.
 
+#![allow(clippy::unused_async, clippy::should_implement_trait)]
+
 use anyhow::anyhow;
 use dashmap::DashMap;
 use ipnet::IpNet;
-use std::collections::HashMap;
-use std::net::IpAddr;
-use std::sync::Arc;
+use std::collections::{HashMap, HashSet};
+use std::fmt::Write as _;
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
+use std::sync::{Arc, RwLock as StdRwLock};
 use thiserror::Error;
 use tokio::sync::RwLock;
 use tracing::{debug, warn};
@@ -50,6 +53,12 @@ pub enum IpamError {
     #[error("invalid CIDR: {0}")]
     InvalidCidr(String),
 
+    #[error("allocator lock poisoned")]
+    LockPoisoned,
+
+    #[error("allocator not configured: {0}")]
+    AllocatorUnavailable(String),
+
     #[error(transparent)]
     Other(#[from] anyhow::Error),
 }
@@ -57,8 +66,27 @@ pub enum IpamError {
 /// Result type for IPAM operations.
 pub type IpamResult<T> = std::result::Result<T, IpamError>;
 
+/// Result type for core allocator operations.
+pub type Result<T> = IpamResult<T>;
+
+/// Error type for the pure data-model allocators.
+#[allow(clippy::upper_case_acronyms)]
+#[derive(Debug, thiserror::Error)]
+pub enum IPAMError {
+    #[error("IP already allocated: {0}")]
+    AlreadyAllocated(String),
+    #[error("IP not allocated: {0}")]
+    NotAllocated(String),
+    #[error("IP out of pool range: {0}")]
+    OutOfRange(String),
+    #[error("Pool exhausted")]
+    Exhausted,
+    #[error("Invalid CIDR: {0}")]
+    InvalidCidr(String),
+}
+
 /// IP address family (IPv4 or IPv6).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
 pub enum Family {
     IPv4,
     IPv6,
@@ -74,6 +102,35 @@ impl std::fmt::Display for Family {
 }
 
 use serde::{Deserialize, Serialize};
+
+/// Address family alias for the pure IPAM allocator data model.
+pub type AddressFamily = Family;
+
+/// Supported IPAM backends.
+#[allow(clippy::upper_case_acronyms)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub enum IPAMMode {
+    Kubernetes,
+    /// ENI-backed AWS IPAM.
+    AWS,
+    Azure,
+    GKE,
+    AlibabaCloud,
+    Delegated,
+    HostScope,
+    ClusterPoolV2,
+}
+
+/// Request to allocate an address for an owner.
+#[derive(Debug, Clone)]
+pub struct AllocationRequest {
+    /// Requested address family.
+    pub family: AddressFamily,
+    /// Allocation owner, typically in pod namespace/name form.
+    pub owner: String,
+    /// Whether the allocation should be tracked with expiration state.
+    pub expiration: bool,
+}
 
 /// Pool name for IP allocation.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -121,28 +178,40 @@ pub struct AllocationResult {
     /// The allocated IP address.
     pub ip: IpAddr,
 
-    /// The pool from which the IP was allocated.
-    pub pool_name: Pool,
-
-    /// List of CIDRs to which this IP has direct access.
+    /// Gateway IP for this allocation, when provided by the backing network.
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub cidrs: Option<Vec<IpNet>>,
+    pub gw: Option<IpAddr>,
 
-    /// Primary MAC address of the interface (if applicable).
+    /// The pod CIDR or subnet that produced this allocation.
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub primary_mac: Option<String>,
+    pub cidr: Option<IpNet>,
 
-    /// Gateway IP for this allocation (if applicable).
+    /// Generic interface identifier used by cloud-specific allocators.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub interface_index: Option<u32>,
+
+    /// Backward-compatible alias for the interface index field.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub interface_number: Option<u32>,
+
+    /// Backward-compatible alias for the gateway IP field.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub gateway_ip: Option<IpAddr>,
+
+    /// MAC address of the master interface for this allocation.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub master_mac: Option<[u8; 6]>,
+
+    /// Interface name for this allocation.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub interface_name: Option<String>,
+
+    /// The pool from which the IP was allocated.
+    pub pool_name: Pool,
 
     /// UUID of the expiration timer (if applicable).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub expiration_uuid: Option<String>,
-
-    /// Interface number (ENI mode only).
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub interface_number: Option<String>,
 
     /// Whether to skip masquerade for this IP.
     #[serde(default)]
@@ -154,24 +223,34 @@ impl AllocationResult {
     pub fn new(ip: IpAddr, pool: Pool) -> Self {
         Self {
             ip,
-            pool_name: pool,
-            cidrs: None,
-            primary_mac: None,
-            gateway_ip: None,
-            expiration_uuid: None,
+            gw: None,
+            cidr: None,
+            interface_index: None,
             interface_number: None,
+            gateway_ip: None,
+            master_mac: None,
+            interface_name: None,
+            pool_name: pool,
+            expiration_uuid: None,
             skip_masquerade: false,
         }
     }
 
-    /// Sets the CIDR list.
+    /// Sets the allocation CIDR.
+    pub fn with_cidr(mut self, cidr: IpNet) -> Self {
+        self.cidr = Some(cidr);
+        self
+    }
+
+    /// Sets the first CIDR from a list of directly reachable CIDRs.
     pub fn with_cidrs(mut self, cidrs: Vec<IpNet>) -> Self {
-        self.cidrs = Some(cidrs);
+        self.cidr = cidrs.first().cloned();
         self
     }
 
     /// Sets the gateway IP.
     pub fn with_gateway(mut self, gateway: IpAddr) -> Self {
+        self.gw = Some(gateway);
         self.gateway_ip = Some(gateway);
         self
     }
@@ -180,6 +259,383 @@ impl AllocationResult {
     pub fn with_skip_masquerade(mut self, skip: bool) -> Self {
         self.skip_masquerade = skip;
         self
+    }
+}
+
+/// Allocation map keyed by IP address.
+pub type AllocationMap = HashMap<IpAddr, String>;
+
+/// Allocates and releases IPs from a backing address range.
+pub trait Allocator: Send + Sync {
+    /// Allocates a specific IP for the provided owner.
+    fn allocate(&self, ip: IpAddr, owner: &str) -> Result<AllocationResult>;
+
+    /// Allocates the next available IP for the provided owner.
+    fn allocate_next(&self, owner: &str) -> Result<AllocationResult>;
+
+    /// Releases a previously allocated IP.
+    fn release(&self, ip: IpAddr, owner: &str) -> Result<()>;
+
+    /// Returns all current allocations and a one-line status string.
+    fn dump(&self) -> (AllocationMap, String);
+
+    /// Reports whether the allocator can serve requests.
+    fn healthy(&self) -> bool;
+}
+
+fn ip_in_cidr(cidr: &IpNet, ip: IpAddr) -> bool {
+    match (cidr, ip) {
+        (IpNet::V4(net), IpAddr::V4(addr)) => net.contains(&addr),
+        (IpNet::V6(net), IpAddr::V6(addr)) => net.contains(&addr),
+        _ => false,
+    }
+}
+
+fn ip_to_integer(ip: IpAddr) -> u128 {
+    match ip {
+        IpAddr::V4(addr) => u32::from(addr) as u128,
+        IpAddr::V6(addr) => u128::from_be_bytes(addr.octets()),
+    }
+}
+
+fn integer_to_ip(value: u128, is_ipv4: bool) -> IpAddr {
+    if is_ipv4 {
+        IpAddr::V4(Ipv4Addr::from(value as u32))
+    } else {
+        IpAddr::V6(Ipv6Addr::from(value))
+    }
+}
+
+fn usable_ip_bounds(cidr: &IpNet) -> (u128, u128, bool) {
+    match cidr {
+        IpNet::V4(net) => {
+            let network = u32::from(net.network()) as u128;
+            let host_bits = 32_u32.saturating_sub(u32::from(net.prefix_len()));
+            let size_minus_one = if host_bits == 32 {
+                u32::MAX as u128
+            } else {
+                (1_u128 << host_bits) - 1
+            };
+            let mut start = network;
+            let mut end = network + size_minus_one;
+            if size_minus_one >= 2 {
+                start += 1;
+                end -= 1;
+            }
+            (start, end, true)
+        }
+        IpNet::V6(net) => {
+            let network = u128::from_be_bytes(net.network().octets());
+            let host_bits = 128_u32.saturating_sub(u32::from(net.prefix_len()));
+            let size_minus_one = if host_bits == 128 {
+                u128::MAX
+            } else {
+                (1_u128 << host_bits) - 1
+            };
+            let mut start = network;
+            let mut end = network + size_minus_one;
+            if size_minus_one >= 2 {
+                start += 1;
+                end -= 1;
+            }
+            (start, end, false)
+        }
+    }
+}
+
+fn ip_is_usable(cidr: &IpNet, ip: IpAddr) -> bool {
+    if !ip_in_cidr(cidr, ip) {
+        return false;
+    }
+
+    let (start, end, _) = usable_ip_bounds(cidr);
+    let ip_value = ip_to_integer(ip);
+    ip_value >= start && ip_value <= end
+}
+
+/// Allocates pod IPs directly from a single node CIDR.
+#[derive(Debug, Clone)]
+pub struct HostScopeAllocator {
+    cidr: IpNet,
+    allocated: Arc<StdRwLock<HashMap<IpAddr, String>>>,
+}
+
+impl HostScopeAllocator {
+    /// Creates a new host-scoped allocator for the provided CIDR.
+    pub fn new(cidr: IpNet) -> Self {
+        Self {
+            cidr,
+            allocated: Arc::new(StdRwLock::new(HashMap::new())),
+        }
+    }
+}
+
+impl Allocator for HostScopeAllocator {
+    fn allocate(&self, ip: IpAddr, owner: &str) -> Result<AllocationResult> {
+        if !ip_is_usable(&self.cidr, ip) {
+            return Err(IpamError::InvalidIp(format!(
+                "IP {ip} is outside allocatable range {}",
+                self.cidr
+            )));
+        }
+
+        let mut allocated = self
+            .allocated
+            .write()
+            .map_err(|_| IpamError::LockPoisoned)?;
+        if allocated.contains_key(&ip) {
+            return Err(IpamError::IpAlreadyAllocated(ip.to_string()));
+        }
+
+        allocated.insert(ip, owner.to_string());
+        debug!(ip = %ip, owner = %owner, cidr = %self.cidr, "allocated host-scoped IP");
+        Ok(AllocationResult::new(ip, Pool::default()).with_cidr(self.cidr))
+    }
+
+    fn allocate_next(&self, owner: &str) -> Result<AllocationResult> {
+        let (start, end, is_ipv4) = usable_ip_bounds(&self.cidr);
+        let mut allocated = self
+            .allocated
+            .write()
+            .map_err(|_| IpamError::LockPoisoned)?;
+
+        for candidate in start..=end {
+            let ip = integer_to_ip(candidate, is_ipv4);
+            if allocated.contains_key(&ip) {
+                continue;
+            }
+
+            allocated.insert(ip, owner.to_string());
+            debug!(ip = %ip, owner = %owner, cidr = %self.cidr, "allocated next host-scoped IP");
+            return Ok(AllocationResult::new(ip, Pool::default()).with_cidr(self.cidr));
+        }
+
+        Err(IpamError::PoolExhausted)
+    }
+
+    fn release(&self, ip: IpAddr, owner: &str) -> Result<()> {
+        let mut allocated = self
+            .allocated
+            .write()
+            .map_err(|_| IpamError::LockPoisoned)?;
+        if allocated.remove(&ip).is_none() {
+            return Err(IpamError::IpNotFound(ip.to_string()));
+        }
+
+        debug!(ip = %ip, owner = %owner, cidr = %self.cidr, "released host-scoped IP");
+        Ok(())
+    }
+
+    fn dump(&self) -> (AllocationMap, String) {
+        let allocations = self
+            .allocated
+            .read()
+            .map(|entries| entries.clone())
+            .unwrap_or_default();
+        (allocations, self.cidr.to_string())
+    }
+
+    fn healthy(&self) -> bool {
+        self.allocated.read().is_ok()
+    }
+}
+
+/// Per-node IPAM state backed by a host-scoped allocator.
+pub struct HostScopeNodeIPAM {
+    /// Kubernetes node name associated with this IPAM state.
+    pub node_name: String,
+    /// Pod CIDR currently assigned to the node.
+    pub pod_cidr: Option<IpNet>,
+    /// Allocator serving addresses from the assigned pod CIDR.
+    pub allocator: Option<Arc<dyn Allocator>>,
+}
+
+impl HostScopeNodeIPAM {
+    /// Creates a new empty node IPAM state.
+    pub fn new(node_name: impl Into<String>) -> Self {
+        Self {
+            node_name: node_name.into(),
+            pod_cidr: None,
+            allocator: None,
+        }
+    }
+
+    /// Assigns a pod CIDR and recreates the backing host-scoped allocator.
+    pub fn set_pod_cidr(&mut self, cidr: IpNet) -> Result<()> {
+        self.pod_cidr = Some(cidr);
+        self.allocator = Some(Arc::new(HostScopeAllocator::new(cidr)));
+        debug!(node = %self.node_name, cidr = %cidr, "configured node pod CIDR");
+        Ok(())
+    }
+
+    /// Allocates the next available IP for an owner from the node's pod CIDR.
+    pub fn allocate_next(&self, owner: &str) -> Result<AllocationResult> {
+        let allocator = self.allocator.as_ref().ok_or_else(|| {
+            IpamError::AllocatorUnavailable(format!(
+                "node {} has no pod CIDR allocator",
+                self.node_name
+            ))
+        })?;
+
+        allocator.allocate_next(owner)
+    }
+}
+
+/// Allocates pod CIDRs from a fixed pool.
+#[derive(Debug, Clone)]
+pub struct CIDRPoolAllocator {
+    pool: Vec<IpNet>,
+    allocated: HashSet<IpNet>,
+}
+
+impl CIDRPoolAllocator {
+    /// Creates a new CIDR allocator from the provided pool.
+    pub fn new(pool: Vec<IpNet>) -> Self {
+        Self {
+            pool,
+            allocated: HashSet::new(),
+        }
+    }
+
+    /// Allocates the next available CIDR from the pool.
+    pub fn allocate_next(&mut self) -> Option<IpNet> {
+        let next = self
+            .pool
+            .iter()
+            .find(|cidr| !self.allocated.contains(cidr))
+            .cloned()?;
+        self.allocated.insert(next);
+        Some(next)
+    }
+
+    /// Releases a CIDR back into the pool.
+    pub fn release(&mut self, cidr: &IpNet) -> bool {
+        self.allocated.remove(cidr)
+    }
+
+    /// Returns the number of CIDRs still available for allocation.
+    pub fn available_count(&self) -> usize {
+        self.pool
+            .iter()
+            .filter(|cidr| !self.allocated.contains(cidr))
+            .count()
+    }
+}
+
+/// A simple bit-vector IP pool allocator over a CIDR.
+/// Mirrors cilium/pkg/ipam/allocator internals without kernel IO.
+pub struct CIDRAllocator {
+    network: IpNet,
+    allocated: HashSet<IpAddr>,
+    owner_map: HashMap<IpAddr, String>,
+}
+
+impl CIDRAllocator {
+    /// Creates a new IP allocator for the provided CIDR.
+    pub fn new(network: IpNet) -> Self {
+        Self {
+            network,
+            allocated: Default::default(),
+            owner_map: Default::default(),
+        }
+    }
+
+    /// Allocates the next available IP from the pool.
+    pub fn allocate_next(&mut self, owner: impl Into<String>) -> Option<IpAddr> {
+        let owner = owner.into();
+        for ip in self.network.hosts() {
+            if !self.allocated.contains(&ip) {
+                self.allocated.insert(ip);
+                self.owner_map.insert(ip, owner.clone());
+                return Some(ip);
+            }
+        }
+        None
+    }
+
+    /// Allocates a specific IP from the pool.
+    pub fn allocate(
+        &mut self,
+        ip: IpAddr,
+        owner: impl Into<String>,
+    ) -> std::result::Result<(), IPAMError> {
+        if !self.network.contains(&ip) {
+            return Err(IPAMError::OutOfRange(ip.to_string()));
+        }
+        if self.allocated.contains(&ip) {
+            return Err(IPAMError::AlreadyAllocated(ip.to_string()));
+        }
+        self.allocated.insert(ip);
+        self.owner_map.insert(ip, owner.into());
+        Ok(())
+    }
+
+    /// Releases an IP back to the pool.
+    pub fn release(&mut self, ip: &IpAddr) -> std::result::Result<(), IPAMError> {
+        if !self.allocated.remove(ip) {
+            return Err(IPAMError::NotAllocated(ip.to_string()));
+        }
+        self.owner_map.remove(ip);
+        Ok(())
+    }
+
+    /// Returns whether a specific IP is currently allocated.
+    pub fn is_allocated(&self, ip: &IpAddr) -> bool {
+        self.allocated.contains(ip)
+    }
+
+    /// Returns the number of allocated IPs in the pool.
+    pub fn count_allocated(&self) -> usize {
+        self.allocated.len()
+    }
+
+    /// Returns the number of unallocated host IPs still available.
+    pub fn count_available(&self) -> usize {
+        self.network
+            .hosts()
+            .count()
+            .saturating_sub(self.allocated.len())
+    }
+
+    /// Returns the owner of an allocated IP, if present.
+    pub fn owner_of(&self, ip: &IpAddr) -> Option<&str> {
+        self.owner_map.get(ip).map(String::as_str)
+    }
+}
+
+/// Per-node IPAM state (pure data, mirrors cilium/pkg/ipam/node.go).
+pub struct NodeIPAM {
+    /// Kubernetes node name associated with this IPAM state.
+    pub node_name: String,
+    /// Named IP pools owned by this node.
+    pub pools: HashMap<String, CIDRAllocator>,
+    /// Pod CIDRs assigned to this node.
+    pub pod_cidrs: Vec<IpNet>,
+}
+
+impl NodeIPAM {
+    /// Creates a new node IPAM state container.
+    pub fn new(node_name: impl Into<String>) -> Self {
+        Self {
+            node_name: node_name.into(),
+            pools: Default::default(),
+            pod_cidrs: vec![],
+        }
+    }
+
+    /// Adds a named pool allocator for the supplied CIDR.
+    pub fn add_pool(&mut self, name: impl Into<String>, cidr: IpNet) {
+        self.pools.insert(name.into(), CIDRAllocator::new(cidr));
+    }
+
+    /// Returns the total remaining capacity across all pools.
+    pub fn total_available(&self) -> usize {
+        self.pools.values().map(|pool| pool.count_available()).sum()
+    }
+
+    /// Returns the total number of allocated IPs across all pools.
+    pub fn total_allocated(&self) -> usize {
+        self.pools.values().map(|pool| pool.count_allocated()).sum()
     }
 }
 
@@ -209,15 +665,18 @@ impl AllocationBitmap {
             return Err(IpamError::InvalidCidr(format!(
                 "network too large: {} would require {} IPs (max 2^63)",
                 network,
-                if host_bits < 128 { "2^" } else { "more than 2^63" }
+                if host_bits < 128 {
+                    "2^"
+                } else {
+                    "more than 2^63"
+                }
             )));
         }
 
         let max_ips = 1u64 << host_bits;
         if max_ips > 1_000_000 {
             return Err(IpamError::InvalidCidr(format!(
-                "network too large: {} would require {} entries",
-                network, max_ips
+                "network too large: {network} would require {max_ips} entries"
             )));
         }
 
@@ -273,7 +732,7 @@ impl AllocationBitmap {
                 allocated_write[offset] = true;
                 let mut count = self.count.write().await;
                 *count += 1;
-                return Ok(self.offset_to_ip(offset)?);
+                return self.offset_to_ip(offset);
             }
         }
 
@@ -334,10 +793,8 @@ impl AllocationBitmap {
     {
         let allocated = self.allocated.read().await;
         for (offset, &is_allocated) in allocated.iter().enumerate() {
-            if is_allocated {
-                if let Ok(ip) = self.offset_to_ip(offset) {
-                    f(ip);
-                }
+            if is_allocated && let Ok(ip) = self.offset_to_ip(offset) {
+                f(ip);
             }
         }
         Ok(())
@@ -429,7 +886,8 @@ impl BitmapAllocator {
             .clone();
 
         if bitmap.allocate(addr).await? {
-            self.owners.insert((pool.clone(), addr.to_string()), owner.to_string());
+            self.owners
+                .insert((pool.clone(), addr.to_string()), owner.to_string());
             debug!(ip = %addr, owner = %owner, pool = %pool, "allocated IP");
             Ok(AllocationResult::new(addr, pool.clone()))
         } else {
@@ -461,7 +919,8 @@ impl BitmapAllocator {
             .clone();
 
         let addr = bitmap.allocate_next().await?;
-        self.owners.insert((pool.clone(), addr.to_string()), owner.to_string());
+        self.owners
+            .insert((pool.clone(), addr.to_string()), owner.to_string());
         debug!(ip = %addr, owner = %owner, pool = %pool, "allocated next IP");
         Ok(AllocationResult::new(addr, pool.clone()))
     }
@@ -490,10 +949,7 @@ impl BitmapAllocator {
 
             let capacity = bitmap.capacity().await;
             let count = bitmap.count().await;
-            status.push_str(&format!(
-                "Pool {}: {}/{} allocated, ",
-                pool, count, capacity
-            ));
+            let _ = write!(status, "Pool {pool}: {count}/{capacity} allocated, ");
 
             result.insert(pool, pool_allocs);
         }
@@ -620,7 +1076,8 @@ impl Ipam {
         }
 
         let result = allocator.allocate(ip, owner, &pool).await?;
-        self.owners.insert((pool.clone(), ip.to_string()), owner.to_string());
+        self.owners
+            .insert((pool.clone(), ip.to_string()), owner.to_string());
         Ok(result)
     }
 
@@ -717,10 +1174,10 @@ impl Ipam {
         for owner_ref in self.owners.iter() {
             let (pool, ip) = owner_ref.key();
             let owner = owner_ref.value();
-            let key = if pool.as_str() != "default" {
-                format!("{}/{}", pool, ip)
-            } else {
+            let key = if pool.as_str() == "default" {
                 ip.clone()
+            } else {
+                format!("{pool}/{ip}")
             };
 
             if ip.parse::<std::net::Ipv4Addr>().is_ok() {
@@ -754,14 +1211,15 @@ impl Ipam {
         let uuid = Uuid::new_v4().to_string();
         let (tx, mut rx) = tokio::sync::oneshot::channel::<()>();
 
-        self.expiration_timers.insert(key.clone(), (uuid.clone(), tx));
+        self.expiration_timers
+            .insert(key.clone(), (uuid.clone(), tx));
 
         let pool_clone = pool.clone();
         let ipam_self = self.clone();
 
         tokio::spawn(async move {
             tokio::select! {
-                _ = tokio::time::sleep(timeout) => {
+                () = tokio::time::sleep(timeout) => {
                     if let Err(e) = ipam_self.release_ip(ip, pool_clone).await {
                         warn!("failed to release IP after expiration: {}", e);
                     }
@@ -897,7 +1355,8 @@ mod tests {
         let cidr: IpNet = "10.0.0.0/24".parse().unwrap();
         ipam.add_ipv4_pool(pool.clone(), cidr).await.unwrap();
         let ip: IpAddr = "10.0.0.1".parse().unwrap();
-        ipam.exclude_ip(ip, pool.clone(), "reserved".to_string()).await;
+        ipam.exclude_ip(ip, pool.clone(), "reserved".to_string())
+            .await;
         let result = ipam.allocate_ip(ip, "pod-1", pool).await;
         assert!(result.is_err());
     }
@@ -960,7 +1419,9 @@ mod tests {
             .start_expiration_timer(ip, pool.clone(), std::time::Duration::from_secs(10))
             .await
             .unwrap();
-        ipam.stop_expiration_timer(ip, pool.clone(), &uuid).await.unwrap();
+        ipam.stop_expiration_timer(ip, pool.clone(), &uuid)
+            .await
+            .unwrap();
         tokio::time::sleep(std::time::Duration::from_millis(100)).await;
         let (allocs, _) = ipam.dump().await.unwrap();
         assert_eq!(allocs.len(), 1);
@@ -983,14 +1444,18 @@ mod tests {
     #[tokio::test]
     async fn test_ipv4_only_ipam() {
         let ipam = Ipam::ipv4_only();
-        let result = ipam.allocate_next_family(Family::IPv6, "pod-1", Pool::default()).await;
+        let result = ipam
+            .allocate_next_family(Family::IPv6, "pod-1", Pool::default())
+            .await;
         assert!(result.is_err());
     }
 
     #[tokio::test]
     async fn test_ipv6_only_ipam() {
         let ipam = Ipam::ipv6_only();
-        let result = ipam.allocate_next_family(Family::IPv4, "pod-1", Pool::default()).await;
+        let result = ipam
+            .allocate_next_family(Family::IPv4, "pod-1", Pool::default())
+            .await;
         assert!(result.is_err());
     }
 
@@ -1005,6 +1470,7 @@ mod tests {
             .with_gateway(gateway)
             .with_skip_masquerade(true);
         assert_eq!(result.ip, ip);
+        assert_eq!(result.gw, Some(gateway));
         assert_eq!(result.gateway_ip, Some(gateway));
         assert!(result.skip_masquerade);
     }
@@ -1024,5 +1490,124 @@ mod tests {
         ipam.allocate_ip(ip2, "pod-2", pool2).await.unwrap();
         let (allocs, _) = ipam.dump().await.unwrap();
         assert_eq!(allocs.len(), 2);
+    }
+
+    #[test]
+    fn test_host_scope_allocate_and_release() {
+        let alloc = HostScopeAllocator::new("10.0.0.0/24".parse().unwrap());
+        let r1 = alloc.allocate_next("pod-1").unwrap();
+        assert!(r1.ip.to_string().starts_with("10.0.0."));
+        assert_ne!(r1.ip.to_string(), "10.0.0.0");
+        assert_eq!(r1.cidr, Some("10.0.0.0/24".parse().unwrap()));
+        let r2 = alloc.allocate_next("pod-2").unwrap();
+        assert_ne!(r1.ip, r2.ip);
+        alloc.release(r1.ip, "pod-1").unwrap();
+        let r3 = alloc.allocate_next("pod-3").unwrap();
+        assert!(r3.ip == r1.ip || r3.ip != r2.ip);
+        let (dump, status) = alloc.dump();
+        assert_eq!(status, "10.0.0.0/24");
+        assert_eq!(dump.get(&r2.ip), Some(&"pod-2".to_string()));
+    }
+
+    #[test]
+    fn test_host_scope_allocate_specific_ip() {
+        let alloc = HostScopeAllocator::new("10.0.0.0/30".parse().unwrap());
+        let ip: IpAddr = "10.0.0.1".parse().unwrap();
+        let result = alloc.allocate(ip, "pod-1").unwrap();
+        assert_eq!(result.ip, ip);
+        assert_eq!(result.cidr, Some("10.0.0.0/30".parse().unwrap()));
+        assert_eq!(alloc.dump().0.get(&ip), Some(&"pod-1".to_string()));
+        assert!(matches!(
+            alloc.allocate(ip, "pod-2"),
+            Err(IpamError::IpAlreadyAllocated(_))
+        ));
+        assert!(
+            alloc
+                .allocate("10.0.0.0".parse().unwrap(), "network")
+                .is_err()
+        );
+        assert!(
+            alloc
+                .release("10.0.0.2".parse().unwrap(), "missing")
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn test_host_scope_node_ipam_allocate_next() {
+        let mut node_ipam = HostScopeNodeIPAM::new("worker-1");
+        assert!(node_ipam.allocate_next("pod-1").is_err());
+        node_ipam
+            .set_pod_cidr("10.2.0.0/30".parse().unwrap())
+            .unwrap();
+        let result = node_ipam.allocate_next("pod-1").unwrap();
+        assert_eq!(result.ip.to_string(), "10.2.0.1");
+        assert_eq!(node_ipam.pod_cidr, Some("10.2.0.0/30".parse().unwrap()));
+    }
+
+    #[test]
+    fn test_cidr_pool_allocator_allocate_and_release() {
+        let mut alloc = CIDRPoolAllocator::new(vec![
+            "10.0.0.0/24".parse().unwrap(),
+            "10.0.1.0/24".parse().unwrap(),
+        ]);
+        assert_eq!(alloc.available_count(), 2);
+        let c1 = alloc.allocate_next().unwrap();
+        let c2 = alloc.allocate_next().unwrap();
+        assert_ne!(c1, c2);
+        assert_eq!(alloc.available_count(), 0);
+        assert!(alloc.allocate_next().is_none());
+        assert!(alloc.release(&c1));
+        assert_eq!(alloc.available_count(), 1);
+        assert!(alloc.allocate_next().is_some());
+    }
+
+    #[test]
+    fn test_cidr_allocator_allocate_next() {
+        let net: IpNet = "10.0.0.0/30".parse().unwrap();
+        let mut alloc = CIDRAllocator::new(net);
+        let ip1 = alloc.allocate_next("pod-a").unwrap();
+        let ip2 = alloc.allocate_next("pod-b").unwrap();
+        assert_ne!(ip1, ip2);
+        assert!(alloc.allocate_next("pod-c").is_none());
+    }
+
+    #[test]
+    fn test_cidr_allocator_allocate_specific() {
+        let net: IpNet = "10.0.0.0/24".parse().unwrap();
+        let mut alloc = CIDRAllocator::new(net);
+        let ip: IpAddr = "10.0.0.5".parse().unwrap();
+        alloc.allocate(ip, "owner-1").unwrap();
+        assert!(alloc.is_allocated(&ip));
+        assert_eq!(alloc.owner_of(&ip), Some("owner-1"));
+        assert!(alloc.allocate(ip, "owner-2").is_err());
+    }
+
+    #[test]
+    fn test_cidr_allocator_release() {
+        let net: IpNet = "10.0.0.0/29".parse().unwrap();
+        let mut alloc = CIDRAllocator::new(net);
+        let ip = alloc.allocate_next("pod").unwrap();
+        assert_eq!(alloc.count_allocated(), 1);
+        alloc.release(&ip).unwrap();
+        assert_eq!(alloc.count_allocated(), 0);
+        assert!(alloc.release(&ip).is_err());
+    }
+
+    #[test]
+    fn test_node_ipam_pools() {
+        let mut node = NodeIPAM::new("node-1");
+        node.add_pool("default", "192.168.1.0/24".parse().unwrap());
+        node.add_pool("secondary", "172.16.0.0/24".parse().unwrap());
+        assert!(node.total_available() > 0);
+        assert_eq!(node.total_allocated(), 0);
+    }
+
+    #[test]
+    fn test_ipam_out_of_range() {
+        let net: IpNet = "10.0.0.0/24".parse().unwrap();
+        let mut alloc = CIDRAllocator::new(net);
+        let bad_ip: IpAddr = "192.168.1.1".parse().unwrap();
+        assert!(alloc.allocate(bad_ip, "x").is_err());
     }
 }

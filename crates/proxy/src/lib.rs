@@ -5,10 +5,248 @@ use seriousum_core::{
     Error, Identity, Port, Result, SecurityIdentity, SecurityLabel,
     chrono::{DateTime, Utc},
 };
-use std::{collections::BTreeMap, net::IpAddr};
+use std::{
+    collections::{BTreeMap, HashMap},
+    net::{IpAddr, SocketAddr},
+};
 
 /// Default component name for proxy scaffolds.
 pub const COMPONENT: &str = "seriousum-proxy";
+
+/// Errors returned by pure proxy data model helpers.
+#[derive(Debug, thiserror::Error)]
+pub enum ProxyError {
+    /// Returned when a protocol string cannot be recognized.
+    #[error("unknown protocol: {0}")]
+    UnknownProtocol(String),
+    /// Returned when a proxy port is already reserved.
+    #[error("port {0} already in use")]
+    PortInUse(u16),
+    /// Returned when a redirect lookup misses.
+    #[error("redirect not found for endpoint {0} port {1}")]
+    RedirectNotFound(u16, u16),
+}
+
+/// Layer 7 protocol handled by the proxy.
+#[allow(clippy::upper_case_acronyms)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum L7Protocol {
+    /// No L7 protocol is attached to the redirect.
+    None,
+    /// HTTP traffic handled by Envoy.
+    HTTP,
+    /// Kafka traffic handled by Envoy.
+    Kafka,
+    /// DNS traffic handled by the DNS proxy.
+    DNS,
+    /// Memcache traffic handled by Envoy.
+    Memcache,
+    /// gRPC traffic handled by Envoy.
+    GRPC,
+    /// Sentinel used when the protocol is not known.
+    Unknown,
+}
+
+impl std::fmt::Display for L7Protocol {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let s = match self {
+            Self::None => "none",
+            Self::HTTP => "http",
+            Self::Kafka => "kafka",
+            Self::DNS => "dns",
+            Self::Memcache => "memcache",
+            Self::GRPC => "grpc",
+            Self::Unknown => "unknown",
+        };
+        write!(f, "{s}")
+    }
+}
+
+impl std::str::FromStr for L7Protocol {
+    type Err = ProxyError;
+
+    fn from_str(s: &str) -> std::result::Result<Self, Self::Err> {
+        match s.to_lowercase().as_str() {
+            "http" => Ok(Self::HTTP),
+            "kafka" => Ok(Self::Kafka),
+            "dns" => Ok(Self::DNS),
+            "memcache" => Ok(Self::Memcache),
+            "grpc" => Ok(Self::GRPC),
+            "none" | "" => Ok(Self::None),
+            _ => Err(ProxyError::UnknownProtocol(s.to_string())),
+        }
+    }
+}
+
+/// Redirect implementation used to handle proxied traffic.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RedirectImplementation {
+    /// Envoy-based proxy implementation.
+    Envoy,
+    /// Built-in DNS proxy implementation.
+    DNS,
+}
+
+/// Configuration for a single proxy redirect on a port.
+#[derive(Debug, Clone)]
+pub struct ProxyRedirect {
+    /// Endpoint owning the redirect.
+    pub endpoint_id: u16,
+    /// Port redirected into the proxy.
+    pub port: u16,
+    /// L7 protocol handled on the redirect.
+    pub protocol: L7Protocol,
+    /// Backing implementation for the redirect.
+    pub implementation: RedirectImplementation,
+    /// Whether the redirect applies to ingress traffic.
+    pub ingress: bool,
+}
+
+impl ProxyRedirect {
+    /// Creates a new redirect with Envoy as the default implementation.
+    #[must_use]
+    pub fn new(endpoint_id: u16, port: u16, protocol: L7Protocol) -> Self {
+        Self {
+            endpoint_id,
+            port,
+            protocol,
+            implementation: RedirectImplementation::Envoy,
+            ingress: true,
+        }
+    }
+}
+
+/// Verdict applied to a proxied request.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum AccessLogVerdict {
+    /// Request was forwarded.
+    Forwarded,
+    /// Request was denied.
+    Denied,
+    /// Request processing failed.
+    Error,
+}
+
+/// A single L7 access log entry.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AccessLogEntry {
+    /// Timestamp in Unix milliseconds.
+    pub timestamp: u64,
+    /// Final verdict for the request.
+    pub verdict: AccessLogVerdict,
+    /// Source socket address, when known.
+    pub source: Option<SocketAddr>,
+    /// Destination socket address, when known.
+    pub destination: Option<SocketAddr>,
+    /// L7 protocol associated with the request.
+    pub protocol: L7Protocol,
+    /// HTTP-specific fields.
+    pub http: Option<HttpLogFields>,
+    /// Kafka-specific fields.
+    pub kafka: Option<KafkaLogFields>,
+    /// DNS-specific fields.
+    pub dns: Option<DnsLogFields>,
+}
+
+/// HTTP metadata captured in an L7 access log entry.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct HttpLogFields {
+    /// HTTP method.
+    pub method: String,
+    /// Request URL.
+    pub url: String,
+    /// HTTP protocol version string.
+    pub protocol: String,
+    /// HTTP response status code.
+    pub status_code: u16,
+    /// Request or response headers.
+    pub headers: Vec<(String, String)>,
+}
+
+/// Kafka metadata captured in an L7 access log entry.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct KafkaLogFields {
+    /// Kafka error code.
+    pub error_code: i16,
+    /// Kafka API version.
+    pub api_version: i16,
+    /// Kafka API key.
+    pub api_key: i16,
+    /// Kafka correlation identifier.
+    pub correlation_id: i32,
+    /// Kafka topic.
+    pub topic: String,
+}
+
+/// DNS metadata captured in an L7 access log entry.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DnsLogFields {
+    /// DNS query name.
+    pub query: String,
+    /// IPs returned by the lookup.
+    pub ips: Vec<IpAddr>,
+    /// DNS record TTL in seconds.
+    pub ttl: u32,
+    /// Source of the DNS observation.
+    pub observation_source: String,
+    /// DNS query types.
+    pub qtypes: Vec<String>,
+    /// DNS resource record types.
+    pub rrtypes: Vec<String>,
+}
+
+/// Tracks active proxy redirects in memory without performing socket operations.
+#[derive(Debug, Default)]
+pub struct ProxyPortManager {
+    redirects: HashMap<(u16, u16), ProxyRedirect>,
+}
+
+impl ProxyPortManager {
+    /// Creates an empty proxy port manager.
+    #[must_use]
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Adds or replaces a redirect for an endpoint and port pair.
+    pub fn add_redirect(&mut self, redirect: ProxyRedirect) {
+        tracing::debug!(
+            endpoint_id = redirect.endpoint_id,
+            port = redirect.port,
+            protocol = %redirect.protocol,
+            "adding proxy redirect"
+        );
+        self.redirects
+            .insert((redirect.endpoint_id, redirect.port), redirect);
+    }
+
+    /// Removes a redirect for an endpoint and port pair.
+    pub fn remove_redirect(&mut self, endpoint_id: u16, port: u16) {
+        tracing::debug!(endpoint_id, port, "removing proxy redirect");
+        self.redirects.remove(&(endpoint_id, port));
+    }
+
+    /// Returns the redirect for an endpoint and port pair, if present.
+    #[must_use]
+    pub fn get_redirect(&self, endpoint_id: u16, port: u16) -> Option<&ProxyRedirect> {
+        self.redirects.get(&(endpoint_id, port))
+    }
+
+    /// Returns all redirects belonging to the given endpoint.
+    #[must_use]
+    pub fn redirects_for_endpoint(&self, endpoint_id: u16) -> Vec<&ProxyRedirect> {
+        self.redirects
+            .values()
+            .filter(|redirect| redirect.endpoint_id == endpoint_id)
+            .collect()
+    }
+
+    /// Returns the number of tracked redirects.
+    #[must_use]
+    pub fn count(&self) -> usize {
+        self.redirects.len()
+    }
+}
 
 /// Proxy operating mode.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -1190,5 +1428,60 @@ mod tests {
 
         assert_eq!(decoded.component, COMPONENT);
         assert!(decoded.healthy);
+    }
+
+    #[test]
+    fn test_l7_protocol_roundtrip() {
+        for proto in [
+            L7Protocol::HTTP,
+            L7Protocol::Kafka,
+            L7Protocol::DNS,
+            L7Protocol::GRPC,
+        ] {
+            let s = proto.to_string();
+            let back: L7Protocol = s.parse().unwrap();
+            assert_eq!(proto, back);
+        }
+    }
+
+    #[test]
+    fn test_l7_protocol_unknown_parse_error() {
+        assert!("ftp".parse::<L7Protocol>().is_err());
+    }
+
+    #[test]
+    fn test_proxy_port_manager() {
+        let mut mgr = ProxyPortManager::new();
+        mgr.add_redirect(ProxyRedirect::new(1, 8_080, L7Protocol::HTTP));
+        mgr.add_redirect(ProxyRedirect::new(1, 9_090, L7Protocol::GRPC));
+        mgr.add_redirect(ProxyRedirect::new(2, 8_080, L7Protocol::HTTP));
+        assert_eq!(mgr.count(), 3);
+        assert_eq!(mgr.redirects_for_endpoint(1).len(), 2);
+        mgr.remove_redirect(1, 8_080);
+        assert_eq!(mgr.count(), 2);
+        assert!(mgr.get_redirect(1, 8_080).is_none());
+    }
+
+    #[test]
+    fn test_access_log_serde() {
+        let entry = AccessLogEntry {
+            timestamp: 1_000_000,
+            verdict: AccessLogVerdict::Forwarded,
+            source: None,
+            destination: None,
+            protocol: L7Protocol::HTTP,
+            http: Some(HttpLogFields {
+                method: "GET".into(),
+                url: "/health".into(),
+                protocol: "HTTP/1.1".into(),
+                status_code: 200,
+                headers: vec![],
+            }),
+            kafka: None,
+            dns: None,
+        };
+        let json = serde_json::to_string(&entry).unwrap();
+        let back: AccessLogEntry = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.verdict, AccessLogVerdict::Forwarded);
     }
 }

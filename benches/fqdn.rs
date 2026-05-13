@@ -75,7 +75,8 @@ fn bench_fqdn_json_unmarshal_100(c: &mut Criterion) {
     let bytes = serde_json::to_vec(&snapshot).unwrap();
     c.bench_function("fqdn_json_unmarshal_100", |b| {
         b.iter(|| {
-            let decoded: HashMap<String, Vec<IpAddr>> = serde_json::from_slice(black_box(&bytes)).unwrap();
+            let decoded: HashMap<String, Vec<IpAddr>> =
+                serde_json::from_slice(black_box(&bytes)).unwrap();
             black_box(decoded)
         })
     });
@@ -93,7 +94,8 @@ fn bench_fqdn_json_unmarshal_1000(c: &mut Criterion) {
     let bytes = serde_json::to_vec(&snapshot).unwrap();
     c.bench_function("fqdn_json_unmarshal_1000", |b| {
         b.iter(|| {
-            let decoded: HashMap<String, Vec<IpAddr>> = serde_json::from_slice(black_box(&bytes)).unwrap();
+            let decoded: HashMap<String, Vec<IpAddr>> =
+                serde_json::from_slice(black_box(&bytes)).unwrap();
             black_box(decoded)
         })
     });

@@ -178,20 +178,12 @@ impl Manager {
 
     /// Get all policies
     pub fn get_policies(&self) -> Vec<PolicyConfig> {
-        self.policies
-            .read()
-            .values()
-            .cloned()
-            .collect()
+        self.policies.read().values().cloned().collect()
     }
 
     /// Get all endpoints
     pub fn get_endpoints(&self) -> Vec<EndpointMetadata> {
-        self.endpoints
-            .read()
-            .values()
-            .cloned()
-            .collect()
+        self.endpoints.read().values().cloned().collect()
     }
 
     /// Get all nodes
@@ -226,10 +218,7 @@ impl Manager {
 
         // Regenerate gateway configs if needed
         let events = self.events.read();
-        if events.is_k8s_sync_done()
-            || events.has_policy_events()
-            || events.has_node_events()
-        {
+        if events.is_k8s_sync_done() || events.has_policy_events() || events.has_node_events() {
             drop(events);
             self.regenerate_all_gateway_configs();
         } else {
@@ -252,7 +241,12 @@ impl Manager {
                 match endpoint_ip {
                     std::net::IpAddr::V4(source_ipv4) => {
                         if let ipnet::IpNet::V4(dest_cidr_v4) = dest_cidr {
-                            reconciler.add_ipv4_rule(source_ipv4, dest_cidr_v4, gwc.egress_ipv4, gateway_ip);
+                            reconciler.add_ipv4_rule(
+                                source_ipv4,
+                                dest_cidr_v4,
+                                gwc.egress_ipv4,
+                                gateway_ip,
+                            );
                         }
                     }
                     std::net::IpAddr::V6(source_ipv6) => {
@@ -282,7 +276,8 @@ impl Manager {
 
     /// Get reconciliation count
     pub fn get_reconciliation_count(&self) -> u64 {
-        self.reconciliation_count.load(std::sync::atomic::Ordering::Relaxed)
+        self.reconciliation_count
+            .load(std::sync::atomic::Ordering::Relaxed)
     }
 
     // Helper methods
@@ -311,7 +306,11 @@ impl Manager {
 
                         // If local node, derive gateway config from system
                         if node.is_local
-                            && let Err(e) = Self::derive_gateway_config(&mut gateway_config, policy_gw, policy.ipv6_needed)
+                            && let Err(e) = Self::derive_gateway_config(
+                                &mut gateway_config,
+                                policy_gw,
+                                policy.ipv6_needed,
+                            )
                         {
                             error!("Failed to derive gateway config: {}", e);
                         }

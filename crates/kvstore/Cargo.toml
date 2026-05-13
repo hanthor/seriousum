@@ -1,14 +1,14 @@
 [package]
-name = "seriousum-kvstore"
+name = "cilium-kvstore"
 version.workspace = true
 edition.workspace = true
 
 [dependencies]
-seriousum-core = { workspace = true }
-anyhow.workspace = true
-tokio = { workspace = true, features = ["sync"] }
+thiserror = "2"
+tracing = { workspace = true }
 serde = { workspace = true, features = ["derive"] }
-serde_json.workspace = true
+tokio = { workspace = true, features = ["sync"] }
+async-trait = { workspace = true }
 
 [lints]
 workspace = true

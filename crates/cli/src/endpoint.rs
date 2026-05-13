@@ -1,5 +1,5 @@
 //! Endpoint status models for Track U.
-//! 
+//!
 //! Provides endpoint status information and reporting.
 
 use serde::{Deserialize, Serialize};
@@ -31,10 +31,7 @@ impl EndpointStatus {
 
     /// Get a summary of this endpoint.
     pub fn summary(&self) -> String {
-        format!(
-            "{}/{} ({})",
-            self.namespace, self.pod_name, self.status
-        )
+        format!("{}/{} ({})", self.namespace, self.pod_name, self.status)
     }
 }
 

@@ -1,11 +1,16 @@
 //! HTTP request handlers for REST API endpoints.
 
 use crate::errors::{ApiError, ApiResult};
-use crate::types::{DaemonConfiguration, Endpoint, ClusterNodeStatus, StatusResponse, ComponentStatus, ConfigurationSpec, ClusterNodes, EndpointChangeRequest, EndpointConfigurationStatus, EndpointConfiguration, EndpointConfigurationSpec, LabelConfiguration};
+use crate::types::{
+    ClusterMeshStatus, ClusterNodeStatus, ClusterNodes, ConfigurationSpec, DaemonConfiguration,
+    Endpoint, EndpointChangeRequest, EndpointConfiguration, EndpointConfigurationSpec,
+    EndpointConfigurationStatus, EndpointList, IpamStatus, K8sStatus, LabelConfigurationSpec,
+    State as HealthState, StatusResponse,
+};
 use axum::{
+    Json,
     extract::{Path, Query, State},
     http::StatusCode,
-    Json,
 };
 use serde::Deserialize;
 use std::collections::HashMap;
@@ -20,16 +25,17 @@ use tracing::{debug, info};
 /// Shared state for handlers.
 #[derive(Clone)]
 pub struct HandlerState {
-    /// Current daemon configuration
+    /// Current daemon configuration.
     pub config: Arc<RwLock<DaemonConfiguration>>,
-    /// Registered endpoints
+    /// Registered endpoints.
     pub endpoints: Arc<RwLock<HashMap<u16, Endpoint>>>,
-    /// Cluster nodes
+    /// Cluster nodes.
     pub nodes: Arc<RwLock<Vec<ClusterNodeStatus>>>,
 }
 
 impl HandlerState {
     /// Create a new handler state.
+    #[must_use]
     pub fn new() -> Self {
         Self {
             config: Arc::new(RwLock::new(DaemonConfiguration::default())),
@@ -39,6 +45,7 @@ impl HandlerState {
     }
 
     /// Create a handler state with initial configuration.
+    #[must_use]
     pub fn with_config(config: DaemonConfiguration) -> Self {
         Self {
             config: Arc::new(RwLock::new(config)),
@@ -58,41 +65,42 @@ impl Default for HandlerState {
 // Health / Status handlers
 // ============================================================================
 
-/// Handler for GET /healthz
-pub async fn get_healthz(
-    State(state): State<HandlerState>,
-) -> ApiResult<Json<StatusResponse>> {
+/// Handler for `GET /healthz`.
+pub async fn get_healthz(State(state): State<HandlerState>) -> ApiResult<Json<StatusResponse>> {
     let config = state.config.read().await;
 
-    let mut response = StatusResponse::new("ok", "daemon is running");
+    let daemon_state = if config.ebpf_enabled {
+        HealthState::Ok
+    } else {
+        HealthState::Warning
+    };
+    let daemon_message = if config.ebpf_enabled {
+        "daemon is running"
+    } else {
+        "daemon is running with eBPF disabled"
+    };
 
-    // Check component statuses
-    response = response.with_component(
-        "daemon",
-        if config.ebpf_enabled {
-            ComponentStatus::healthy()
-        } else {
-            ComponentStatus::degraded("eBPF disabled")
-        },
-    );
+    let kubernetes = if config.kubernetes_enabled {
+        K8sStatus {
+            state: HealthState::Ok,
+            msg: None,
+            k8s_api_versions: vec![],
+        }
+    } else {
+        K8sStatus {
+            state: HealthState::Disabled,
+            msg: Some("Kubernetes integration disabled".to_string()),
+            k8s_api_versions: vec![],
+        }
+    };
 
-    response = response.with_component(
-        "kubernetes",
-        if config.kubernetes_enabled {
-            ComponentStatus::healthy()
-        } else {
-            ComponentStatus::degraded("Kubernetes integration disabled")
-        },
-    );
-
-    response = response.with_component(
-        "identity",
-        if config.identity_enabled {
-            ComponentStatus::healthy()
-        } else {
-            ComponentStatus::degraded("Identity management disabled")
-        },
-    );
+    let response = StatusResponse::new(daemon_state, daemon_message)
+        .with_kubernetes(kubernetes)
+        .with_cluster_mesh(ClusterMeshStatus {
+            num_global_services: 0,
+            state: Some(HealthState::Disabled),
+        })
+        .with_ipam(IpamStatus::default());
 
     info!("healthz check completed");
 
@@ -103,16 +111,14 @@ pub async fn get_healthz(
 // Configuration handlers
 // ============================================================================
 
-/// Handler for GET /config
-pub async fn get_config(
-    State(state): State<HandlerState>,
-) -> ApiResult<Json<DaemonConfiguration>> {
+/// Handler for `GET /config`.
+pub async fn get_config(State(state): State<HandlerState>) -> ApiResult<Json<DaemonConfiguration>> {
     let config = state.config.read().await;
     debug!("returning daemon configuration");
     Ok(Json(config.clone()))
 }
 
-/// Handler for PATCH /config
+/// Handler for `PATCH /config`.
 pub async fn patch_config(
     State(state): State<HandlerState>,
     Json(spec): Json<ConfigurationSpec>,
@@ -120,13 +126,13 @@ pub async fn patch_config(
     let mut config = state.config.write().await;
 
     spec.apply_to(&mut config);
-
-    config
-        .validate()
-        .map_err(ApiError::BadRequest)?;
+    config.validate().map_err(ApiError::BadRequest)?;
 
     debug!("daemon configuration updated");
-    info!("configuration patch applied: cluster={}, node={}", config.cluster_name, config.node_name);
+    info!(
+        "configuration patch applied: cluster={}, node={}",
+        config.cluster_name, config.node_name
+    );
 
     Ok((StatusCode::OK, Json(config.clone())))
 }
@@ -135,7 +141,7 @@ pub async fn patch_config(
 // Cluster handlers
 // ============================================================================
 
-/// Query parameters for listing endpoints
+/// Query parameters for listing endpoints.
 #[allow(dead_code)]
 #[derive(Debug, Deserialize)]
 pub struct ListQuery {
@@ -143,10 +149,8 @@ pub struct ListQuery {
     labels: Option<String>,
 }
 
-/// Handler for GET /cluster/nodes
-pub async fn get_cluster_nodes(
-    State(state): State<HandlerState>,
-) -> ApiResult<Json<ClusterNodes>> {
+/// Handler for `GET /cluster/nodes`.
+pub async fn get_cluster_nodes(State(state): State<HandlerState>) -> ApiResult<Json<ClusterNodes>> {
     let nodes = state.nodes.read().await;
     debug!("returning cluster node information");
     Ok(Json(ClusterNodes {
@@ -158,18 +162,18 @@ pub async fn get_cluster_nodes(
 // Endpoint handlers
 // ============================================================================
 
-/// Handler for GET /endpoint
+/// Handler for `GET /endpoint`.
 pub async fn list_endpoints(
     State(state): State<HandlerState>,
     Query(_params): Query<ListQuery>,
-) -> ApiResult<Json<Vec<Endpoint>>> {
+) -> ApiResult<Json<EndpointList>> {
     let endpoints = state.endpoints.read().await;
-    let list: Vec<Endpoint> = endpoints.values().cloned().collect();
+    let list: EndpointList = endpoints.values().cloned().collect();
     debug!("returning {} endpoints", list.len());
     Ok(Json(list))
 }
 
-/// Handler for GET /endpoint/{id}
+/// Handler for `GET /endpoint/{id}`.
 pub async fn get_endpoint(
     State(state): State<HandlerState>,
     Path(id): Path<u16>,
@@ -183,7 +187,7 @@ pub async fn get_endpoint(
         .ok_or_else(|| ApiError::NotFound(format!("endpoint {id} not found")))
 }
 
-/// Handler for PUT /endpoint/{id}
+/// Handler for `PUT /endpoint/{id}`.
 pub async fn create_endpoint(
     State(state): State<HandlerState>,
     Path(id): Path<u16>,
@@ -192,33 +196,18 @@ pub async fn create_endpoint(
     let mut endpoints = state.endpoints.write().await;
 
     if endpoints.contains_key(&id) {
-        return Err(ApiError::Conflict(format!(
-            "endpoint {id} already exists"
-        )));
+        return Err(ApiError::Conflict(format!("endpoint {id} already exists")));
     }
 
-    let mut endpoint = Endpoint::new(
-        id,
-        request.name.unwrap_or_else(|| format!("endpoint-{id}")),
-    );
+    let mut endpoint = Endpoint::new(i64::from(id));
 
-    if let Some(container_id) = request.container_id {
-        endpoint = endpoint.with_container_id(container_id);
+    if let Some(state) = request.state {
+        endpoint = endpoint.with_state(state);
     }
-    if let Some(pod_name) = request.pod_name
-        && let Some(pod_namespace) = request.pod_namespace {
-            endpoint = endpoint.with_pod(pod_name, pod_namespace);
-        }
-    if let Some(ipv4) = request.ipv4 {
-        endpoint = endpoint.with_ipv4(ipv4);
+    if let Some(addressing) = request.addressing {
+        endpoint = endpoint.with_addressing(addressing);
     }
-    if let Some(ipv6) = request.ipv6 {
-        endpoint = endpoint.with_ipv6(ipv6);
-    }
-
-    for (k, v) in request.labels {
-        endpoint = endpoint.with_label(k, v);
-    }
+    endpoint.labels = request.labels;
 
     endpoints.insert(id, endpoint.clone());
 
@@ -227,7 +216,7 @@ pub async fn create_endpoint(
     Ok((StatusCode::CREATED, Json(endpoint)))
 }
 
-/// Handler for DELETE /endpoint/{id}
+/// Handler for `DELETE /endpoint/{id}`.
 pub async fn delete_endpoint(
     State(state): State<HandlerState>,
     Path(id): Path<u16>,
@@ -243,7 +232,7 @@ pub async fn delete_endpoint(
     Ok(StatusCode::OK)
 }
 
-/// Handler for GET /endpoint/{id}/config
+/// Handler for `GET /endpoint/{id}/config`.
 pub async fn get_endpoint_config(
     State(state): State<HandlerState>,
     Path(id): Path<u16>,
@@ -262,7 +251,7 @@ pub async fn get_endpoint_config(
     }))
 }
 
-/// Handler for PATCH /endpoint/{id}/config
+/// Handler for `PATCH /endpoint/{id}/config`.
 pub async fn patch_endpoint_config(
     State(state): State<HandlerState>,
     Path(id): Path<u16>,
@@ -275,8 +264,8 @@ pub async fn patch_endpoint_config(
     }
 
     let mut config = EndpointConfiguration::default();
-    for (k, v) in spec.options {
-        config.options.insert(k, v);
+    for (key, value) in spec.options {
+        config.options.insert(key, value);
     }
 
     info!("endpoint {} configuration updated", id);
@@ -289,11 +278,11 @@ pub async fn patch_endpoint_config(
     ))
 }
 
-/// Handler for GET /endpoint/{id}/labels
+/// Handler for `GET /endpoint/{id}/labels`.
 pub async fn get_endpoint_labels(
     State(state): State<HandlerState>,
     Path(id): Path<u16>,
-) -> ApiResult<Json<LabelConfiguration>> {
+) -> ApiResult<Json<LabelConfigurationSpec>> {
     let endpoints = state.endpoints.read().await;
 
     let endpoint = endpoints
@@ -302,24 +291,24 @@ pub async fn get_endpoint_labels(
 
     debug!("returning labels for endpoint {}", id);
 
-    Ok(Json(LabelConfiguration {
-        labels: endpoint.labels.clone(),
+    Ok(Json(LabelConfigurationSpec {
+        user: endpoint.labels.clone(),
     }))
 }
 
-/// Handler for PATCH /endpoint/{id}/labels
+/// Handler for `PATCH /endpoint/{id}/labels`.
 pub async fn patch_endpoint_labels(
     State(state): State<HandlerState>,
     Path(id): Path<u16>,
-    Json(labels): Json<LabelConfiguration>,
-) -> ApiResult<(StatusCode, Json<LabelConfiguration>)> {
+    Json(labels): Json<LabelConfigurationSpec>,
+) -> ApiResult<(StatusCode, Json<LabelConfigurationSpec>)> {
     let mut endpoints = state.endpoints.write().await;
 
     let endpoint = endpoints
         .get_mut(&id)
         .ok_or_else(|| ApiError::NotFound(format!("endpoint {id} not found")))?;
 
-    endpoint.labels = labels.labels.clone();
+    endpoint.labels.clone_from(&labels.user);
 
     info!("endpoint {} labels updated", id);
 
@@ -329,11 +318,12 @@ pub async fn patch_endpoint_labels(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::types::{EndpointAddressing, EndpointState};
 
     #[test]
     fn handler_state_creates_default() {
         let state = HandlerState::new();
-        assert!(!state.endpoints.blocking_read().is_empty() || true); // Just check it exists
+        assert!(state.endpoints.blocking_read().is_empty());
     }
 
     #[tokio::test]
@@ -343,7 +333,14 @@ mod tests {
 
         assert!(result.is_ok());
         let response = result.unwrap().0;
-        assert_eq!(response.status, "ok");
+        assert_eq!(
+            response.cilium.as_ref().map(|status| status.state),
+            Some(HealthState::Ok)
+        );
+        assert_eq!(
+            response.kubernetes.as_ref().map(|status| status.state),
+            Some(HealthState::Ok)
+        );
     }
 
     #[tokio::test]
@@ -409,8 +406,11 @@ mod tests {
     async fn create_endpoint_succeeds() {
         let state = HandlerState::new();
         let request = EndpointChangeRequest {
-            name: Some("test-endpoint".to_string()),
-            ipv4: Some("10.0.0.1".to_string()),
+            state: Some(EndpointState::Ready),
+            addressing: Some(EndpointAddressing {
+                ipv4: Some("10.0.0.1".to_string()),
+                ..Default::default()
+            }),
             ..Default::default()
         };
 
@@ -420,21 +420,26 @@ mod tests {
         let (status, endpoint) = result.unwrap();
         assert_eq!(status, StatusCode::CREATED);
         assert_eq!(endpoint.0.id, 1);
-        assert_eq!(endpoint.0.name, "test-endpoint");
+        assert_eq!(endpoint.0.state, Some(EndpointState::Ready));
+        assert_eq!(
+            endpoint
+                .0
+                .addressing
+                .as_ref()
+                .and_then(|addressing| addressing.ipv4.as_deref()),
+            Some("10.0.0.1")
+        );
     }
 
     #[tokio::test]
     async fn create_endpoint_fails_if_exists() {
         let state = HandlerState::new();
         let request = EndpointChangeRequest {
-            name: Some("test-endpoint".to_string()),
+            state: Some(EndpointState::Ready),
             ..Default::default()
         };
 
-        // Create first time
         let _ = create_endpoint(State(state.clone()), Path(1u16), Json(request.clone())).await;
-
-        // Try to create again
         let result = create_endpoint(State(state), Path(1u16), Json(request)).await;
 
         assert!(result.is_err());
@@ -448,18 +453,20 @@ mod tests {
     async fn get_endpoint_returns_created_endpoint() {
         let state = HandlerState::new();
         let request = EndpointChangeRequest {
-            name: Some("test".to_string()),
+            state: Some(EndpointState::Ready),
             ..Default::default()
         };
 
-        create_endpoint(State(state.clone()), Path(1u16), Json(request)).await.ok();
+        create_endpoint(State(state.clone()), Path(1u16), Json(request))
+            .await
+            .ok();
 
         let result = get_endpoint(State(state), Path(1u16)).await;
 
         assert!(result.is_ok());
         let endpoint = result.unwrap().0;
         assert_eq!(endpoint.id, 1);
-        assert_eq!(endpoint.name, "test");
+        assert_eq!(endpoint.state, Some(EndpointState::Ready));
     }
 
     #[tokio::test]
@@ -478,18 +485,19 @@ mod tests {
     async fn delete_endpoint_succeeds() {
         let state = HandlerState::new();
         let request = EndpointChangeRequest {
-            name: Some("test".to_string()),
+            state: Some(EndpointState::Ready),
             ..Default::default()
         };
 
-        create_endpoint(State(state.clone()), Path(1u16), Json(request)).await.ok();
+        create_endpoint(State(state.clone()), Path(1u16), Json(request))
+            .await
+            .ok();
 
         let result = delete_endpoint(State(state.clone()), Path(1u16)).await;
 
         assert!(result.is_ok());
         assert_eq!(result.unwrap(), StatusCode::OK);
 
-        // Verify it's deleted
         let result = get_endpoint(State(state), Path(1u16)).await;
         assert!(result.is_err());
     }
@@ -506,11 +514,13 @@ mod tests {
     async fn get_endpoint_config_succeeds() {
         let state = HandlerState::new();
         let request = EndpointChangeRequest {
-            name: Some("test".to_string()),
+            state: Some(EndpointState::Ready),
             ..Default::default()
         };
 
-        create_endpoint(State(state.clone()), Path(1u16), Json(request)).await.ok();
+        create_endpoint(State(state.clone()), Path(1u16), Json(request))
+            .await
+            .ok();
 
         let result = get_endpoint_config(State(state), Path(1u16)).await;
 
@@ -520,42 +530,46 @@ mod tests {
     #[tokio::test]
     async fn get_endpoint_labels_succeeds() {
         let state = HandlerState::new();
-        let mut request = EndpointChangeRequest {
-            name: Some("test".to_string()),
+        let request = EndpointChangeRequest {
+            state: Some(EndpointState::Ready),
+            labels: vec!["app=backend".to_string()],
             ..Default::default()
         };
-        request.labels.insert("app".to_string(), "backend".to_string());
 
-        create_endpoint(State(state.clone()), Path(1u16), Json(request)).await.ok();
+        create_endpoint(State(state.clone()), Path(1u16), Json(request))
+            .await
+            .ok();
 
         let result = get_endpoint_labels(State(state), Path(1u16)).await;
 
         assert!(result.is_ok());
         let labels = result.unwrap().0;
-        assert_eq!(labels.labels.get("app").map(|s| s.as_str()), Some("backend"));
+        assert_eq!(labels.user.first().map(String::as_str), Some("app=backend"));
     }
 
     #[tokio::test]
     async fn patch_endpoint_labels_succeeds() {
         let state = HandlerState::new();
         let request = EndpointChangeRequest {
-            name: Some("test".to_string()),
+            state: Some(EndpointState::Ready),
             ..Default::default()
         };
 
-        create_endpoint(State(state.clone()), Path(1u16), Json(request)).await.ok();
+        create_endpoint(State(state.clone()), Path(1u16), Json(request))
+            .await
+            .ok();
 
-        let new_labels = LabelConfiguration::new()
-            .with_label("env", "prod")
-            .with_label("tier", "backend");
+        let new_labels = LabelConfigurationSpec {
+            user: vec!["env=prod".to_string(), "tier=backend".to_string()],
+        };
 
-        let result = patch_endpoint_labels(State(state.clone()), Path(1u16), Json(new_labels)).await;
+        let result =
+            patch_endpoint_labels(State(state.clone()), Path(1u16), Json(new_labels)).await;
 
         assert!(result.is_ok());
 
-        // Verify labels were updated
         let result = get_endpoint_labels(State(state), Path(1u16)).await;
         let labels = result.unwrap().0;
-        assert_eq!(labels.labels.len(), 2);
+        assert_eq!(labels.user.len(), 2);
     }
 }

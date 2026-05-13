@@ -3,8 +3,7 @@
 //! Coordinates peer management, flow observation, and serves the gRPC API.
 
 use crate::relay::{
-    defaults, observer::Observer, pool::PeerManager, pool::PoolConfig, queue::PriorityQueue,
-    Result,
+    Result, defaults, observer::Observer, pool::PeerManager, pool::PoolConfig, queue::PriorityQueue,
 };
 use std::sync::Arc;
 use std::time::Duration;

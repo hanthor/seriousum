@@ -2,8 +2,8 @@ use std::fmt::Write as FmtWrite;
 use std::path::PathBuf;
 
 use clap::{Parser, Subcommand, ValueEnum, ValueHint};
-use serde::Serialize;
-use seriousum_config::Config;
+use serde::{Deserialize, Serialize};
+use seriousum_config::RuntimeConfig;
 use seriousum_core::VERSION as CORE_VERSION;
 use thiserror::Error;
 
@@ -51,13 +51,33 @@ pub enum Error {
 /// CLI result type.
 pub type Result<T> = std::result::Result<T, Error>;
 
+/// Errors for pure CLI command/output helpers.
+#[derive(Debug, thiserror::Error)]
+pub enum CliError {
+    /// The requested output format is not recognized.
+    #[error("invalid output format: {0}")]
+    InvalidOutputFormat(String),
+    /// The agent API returned an error.
+    #[error("API error: {0}")]
+    ApiError(String),
+    /// The requested endpoint could not be found.
+    #[error("endpoint not found: {0}")]
+    EndpointNotFound(String),
+    /// JSON serialization or deserialization failed.
+    #[error("JSON serialization error: {0}")]
+    Json(#[from] serde_json::Error),
+}
+
 // =============================================================================
 // CLI command structure
 // =============================================================================
 
 /// Minimal CLI scaffold for the seriousum control plane.
 #[derive(Debug, Parser)]
-#[command(name = "seriousum-cli", about = "seriousum control-plane with Track U extensions")]
+#[command(
+    name = "seriousum-cli",
+    about = "seriousum control-plane with Track U extensions"
+)]
 pub struct Cli {
     /// Selected command.
     #[command(subcommand)]
@@ -336,17 +356,248 @@ pub enum FlowCommand {
     },
 }
 
-/// Supported output formats.
-#[derive(Debug, Copy, Clone, PartialEq, Eq, ValueEnum)]
+/// Output format for CLI commands.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize, ValueEnum)]
+#[serde(rename_all = "lowercase")]
 pub enum OutputFormat {
-    /// JSON output.
+    /// Columnar table output.
+    #[default]
+    Table,
+    /// Compact JSON output.
     Json,
-
+    /// Pretty-printed JSON output.
+    #[serde(rename = "json-pretty")]
+    #[value(name = "json-pretty", alias = "jsonpretty")]
+    JsonPretty,
+    /// YAML output.
+    Yaml,
     /// Markdown output.
     Markdown,
-
     /// Summary output (human-readable).
     Summary,
+}
+
+impl std::fmt::Display for OutputFormat {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Table => write!(f, "table"),
+            Self::Json => write!(f, "json"),
+            Self::JsonPretty => write!(f, "json-pretty"),
+            Self::Yaml => write!(f, "yaml"),
+            Self::Markdown => write!(f, "markdown"),
+            Self::Summary => write!(f, "summary"),
+        }
+    }
+}
+
+impl std::str::FromStr for OutputFormat {
+    type Err = CliError;
+
+    fn from_str(s: &str) -> std::result::Result<Self, Self::Err> {
+        match s.to_lowercase().as_str() {
+            "table" => Ok(Self::Table),
+            "json" => Ok(Self::Json),
+            "json-pretty" | "jsonpretty" => Ok(Self::JsonPretty),
+            "yaml" => Ok(Self::Yaml),
+            "markdown" => Ok(Self::Markdown),
+            "summary" => Ok(Self::Summary),
+            _ => Err(CliError::InvalidOutputFormat(s.into())),
+        }
+    }
+}
+
+/// Global CLI options shared across all commands.
+#[derive(Debug, Clone)]
+pub struct GlobalOptions {
+    /// cilium-agent API host, for example `localhost:9900`.
+    pub host: String,
+    /// Requested output format.
+    pub output: OutputFormat,
+    /// Enables verbose logging.
+    pub verbose: bool,
+    /// Request timeout in seconds.
+    pub timeout_secs: u64,
+}
+
+impl Default for GlobalOptions {
+    fn default() -> Self {
+        Self {
+            host: "localhost:9900".into(),
+            output: OutputFormat::Table,
+            verbose: false,
+            timeout_secs: 30,
+        }
+    }
+}
+
+/// Row in `cilium endpoint list` table output.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct EndpointRow {
+    /// Endpoint identifier.
+    pub id: u16,
+    /// Policy enablement summary such as `ingress+egress`.
+    pub policy_enabled: String,
+    /// Endpoint IPv4 address.
+    pub ipv4: String,
+    /// Endpoint IPv6 address.
+    pub ipv6: String,
+    /// Security identity assigned to the endpoint.
+    pub identity: u32,
+    /// Effective endpoint labels.
+    pub labels: Vec<String>,
+    /// Current endpoint state.
+    pub state: String,
+}
+
+/// Output of `cilium endpoint get <id>`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct EndpointDetails {
+    /// Endpoint identifier.
+    pub id: u16,
+    /// Current endpoint state.
+    pub state: String,
+    /// Security identity assigned to the endpoint.
+    pub identity: u32,
+    /// Endpoint IPv4 address if present.
+    pub ipv4: Option<String>,
+    /// Endpoint IPv6 address if present.
+    pub ipv6: Option<String>,
+    /// Effective endpoint labels.
+    pub labels: Vec<String>,
+    /// Summary of policy map decisions.
+    pub policy_map_state: PolicyMapSummary,
+}
+
+/// Aggregated counters for an endpoint policy map.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct PolicyMapSummary {
+    /// Number of allowed ingress entries.
+    pub ingress_allowed: u32,
+    /// Number of allowed egress entries.
+    pub egress_allowed: u32,
+    /// Number of denied ingress entries.
+    pub ingress_denied: u32,
+    /// Number of denied egress entries.
+    pub egress_denied: u32,
+}
+
+/// Output of `cilium policy get`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PolicyOutput {
+    /// Policy repository revision.
+    pub revision: i64,
+    /// JSON-encoded policy payload.
+    pub policy: String,
+}
+
+/// Row in `cilium policy selectors` output.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SelectorRow {
+    /// Selector expression.
+    pub selector: String,
+    /// Number of identities selected.
+    pub identity_count: u32,
+    /// Number of selector users.
+    pub users: u32,
+}
+
+/// Row in `cilium identity list` output.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct IdentityRow {
+    /// Numeric identity.
+    pub id: u32,
+    /// Labels attached to the identity.
+    pub labels: Vec<String>,
+}
+
+/// Row in `cilium service list` output.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ServiceRow {
+    /// Service identifier.
+    pub id: u16,
+    /// Frontend address such as `10.0.0.1:80/TCP`.
+    pub frontend: String,
+    /// Number of configured backends.
+    pub backend_count: u32,
+    /// Service type string.
+    pub service_type: String,
+}
+
+/// Single backend in `cilium service get <id>`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ServiceBackendRow {
+    /// Backend identifier.
+    pub id: u16,
+    /// Backend address.
+    pub addr: String,
+    /// Backend state.
+    pub state: String,
+    /// Backend weight.
+    pub weight: u16,
+}
+
+/// Simple columnar table formatter.
+pub struct TableFormatter {
+    headers: Vec<String>,
+    rows: Vec<Vec<String>>,
+}
+
+impl TableFormatter {
+    /// Creates a formatter with the provided headers.
+    pub fn new(headers: Vec<impl Into<String>>) -> Self {
+        Self {
+            headers: headers.into_iter().map(Into::into).collect(),
+            rows: vec![],
+        }
+    }
+
+    /// Adds a row to the table.
+    pub fn add_row(&mut self, row: Vec<impl Into<String>>) {
+        self.rows.push(row.into_iter().map(Into::into).collect());
+    }
+
+    /// Renders the table as an aligned string.
+    pub fn render(&self) -> String {
+        if self.headers.is_empty() {
+            return String::new();
+        }
+
+        let mut widths: Vec<usize> = self.headers.iter().map(std::string::String::len).collect();
+        for row in &self.rows {
+            for (i, cell) in row.iter().enumerate() {
+                if i < widths.len() {
+                    widths[i] = widths[i].max(cell.len());
+                }
+            }
+        }
+
+        let mut out = String::new();
+        for (i, header) in self.headers.iter().enumerate() {
+            if i > 0 {
+                out.push_str("  ");
+            }
+            let _ = write!(out, "{header:<width$}", width = widths[i]);
+        }
+        out.push('\n');
+
+        for row in &self.rows {
+            for (i, cell) in row.iter().enumerate() {
+                if i > 0 {
+                    out.push_str("  ");
+                }
+                let width = widths.get(i).copied().unwrap_or(0);
+                let _ = write!(out, "{cell:<width$}");
+            }
+            out.push('\n');
+        }
+
+        out
+    }
+
+    /// Returns the number of rows added to the formatter.
+    pub fn row_count(&self) -> usize {
+        self.rows.len()
+    }
 }
 
 // =============================================================================
@@ -364,8 +615,7 @@ where
     I: IntoIterator<Item = T>,
     T: Into<std::ffi::OsString> + Clone,
 {
-    let cli = Cli::try_parse_from(args)
-        .map_err(|error| Error::Config(error.to_string()))?;
+    let cli = Cli::try_parse_from(args).map_err(|error| Error::Config(error.to_string()))?;
     execute(cli.command)
 }
 
@@ -387,8 +637,8 @@ pub fn execute(command: Command) -> Result<String> {
 fn execute_config(command: ConfigCommand) -> Result<String> {
     match command {
         ConfigCommand::Check { path } => {
-            let config = Config::load(path.as_path())
-                .map_err(|e| Error::Config(format!("failed to load config: {}", e)))?;
+            let config = RuntimeConfig::load(path.as_path())
+                .map_err(|e| Error::Config(format!("failed to load config: {e}")))?;
             Ok(format!(
                 "config ok: {} ({})",
                 path.display(),
@@ -407,7 +657,7 @@ fn execute_operator(command: OperatorCommand) -> Result<String> {
                 "contract": "0.1.0"
             });
             serde_json::to_string_pretty(&report)
-                .map_err(|error| Error::Config(format!("json serialization error: {}", error)))
+                .map_err(|error| Error::Config(format!("json serialization error: {error}")))
         }
     }
 }
@@ -420,10 +670,11 @@ fn execute_features(command: FeaturesCommand) -> Result<String> {
         } => {
             let report = features_status_report();
             let rendered = match output {
-                OutputFormat::Json => serde_json::to_string_pretty(&report)
-                    .map_err(|error| Error::Config(format!("json error: {}", error)))?,
+                OutputFormat::Json | OutputFormat::JsonPretty | OutputFormat::Yaml => {
+                    serialize_output(&report, output)?
+                }
                 OutputFormat::Markdown => features_status_markdown(&report),
-                OutputFormat::Summary => features_status_summary(&report),
+                OutputFormat::Table | OutputFormat::Summary => features_status_summary(&report),
             };
 
             if let Some(path) = output_file {
@@ -438,7 +689,7 @@ fn execute_features(command: FeaturesCommand) -> Result<String> {
 fn execute_sysdump(output_filename: Option<PathBuf>) -> Result<String> {
     let report = sysdump_report(output_filename.clone());
     let rendered = serde_json::to_string_pretty(&report)
-        .map_err(|error| Error::Config(format!("json error: {}", error)))?;
+        .map_err(|error| Error::Config(format!("json error: {error}")))?;
 
     if let Some(path) = output_filename {
         write_text_file(&path, &rendered)?;
@@ -480,7 +731,11 @@ fn execute_connectivity(command: ConnectivityCommand) -> Result<String> {
                 destination,
                 protocol,
                 port,
-                if result.is_connected { "✓ Connected" } else { "✗ Disconnected" },
+                if result.is_connected {
+                    "✓ Connected"
+                } else {
+                    "✗ Disconnected"
+                },
                 result.latency_ms
             );
 
@@ -496,7 +751,7 @@ fn execute_connectivity(command: ConnectivityCommand) -> Result<String> {
                 .collect::<Vec<_>>()
                 .join("\n");
 
-            Ok(format!("Available connectivity tests:\n{}", formatted))
+            Ok(format!("Available connectivity tests:\n{formatted}"))
         }
     }
 }
@@ -527,10 +782,7 @@ fn execute_status(command: StatusCommand) -> Result<String> {
             Ok(rendered)
         }
 
-        StatusCommand::Services {
-            namespace,
-            output,
-        } => {
+        StatusCommand::Services { namespace, output } => {
             let collector = status::StatusCollector::new();
             let services = collector.collect_service_status(namespace)?;
 
@@ -542,7 +794,10 @@ fn execute_status(command: StatusCommand) -> Result<String> {
 
 fn execute_policy(command: PolicyCommand) -> Result<String> {
     match command {
-        PolicyCommand::Validate { policy_file, output } => {
+        PolicyCommand::Validate {
+            policy_file,
+            output,
+        } => {
             let validator = policy::PolicyValidator::new();
 
             let validation_result = if let Some(path) = policy_file {
@@ -566,7 +821,10 @@ fn execute_policy(command: PolicyCommand) -> Result<String> {
 
             let summary = format!(
                 "Policy check: {} -> {} ({}:{})\nAllowed: {}",
-                source_pod, dest_pod, protocol, port,
+                source_pod,
+                dest_pod,
+                protocol,
+                port,
                 if allowed { "✓ Yes" } else { "✗ No" }
             );
 
@@ -592,7 +850,8 @@ fn execute_flow(command: FlowCommand) -> Result<String> {
             output,
         } => {
             let analyzer = flow::FlowAnalyzer::new();
-            let flows = analyzer.get_recent_flows(limit, source_pod.as_deref(), dest_pod.as_deref())?;
+            let flows =
+                analyzer.get_recent_flows(limit, source_pod.as_deref(), dest_pod.as_deref())?;
 
             let rendered = format_flow_results(&flows, output)?;
             Ok(rendered)
@@ -606,10 +865,7 @@ fn execute_flow(command: FlowCommand) -> Result<String> {
             Ok(rendered)
         }
 
-        FlowCommand::Filter {
-            expression,
-            output,
-        } => {
+        FlowCommand::Filter { expression, output } => {
             let analyzer = flow::FlowAnalyzer::new();
             let flows = analyzer.filter_flows(&expression)?;
 
@@ -623,22 +879,120 @@ fn execute_flow(command: FlowCommand) -> Result<String> {
 // Formatting helpers
 // =============================================================================
 
+fn serialize_output<T: Serialize + ?Sized>(value: &T, output: OutputFormat) -> Result<String> {
+    match output {
+        OutputFormat::Json => serde_json::to_string(value)
+            .map_err(|error| Error::Config(format!("json error: {error}"))),
+        OutputFormat::JsonPretty => serde_json::to_string_pretty(value)
+            .map_err(|error| Error::Config(format!("json error: {error}"))),
+        OutputFormat::Yaml => {
+            let json = serde_json::to_value(value)
+                .map_err(|error| Error::Config(format!("json error: {error}")))?;
+            Ok(render_yaml_value_to_string(&json, 0))
+        }
+        _ => Err(Error::Config(format!(
+            "unsupported serialized output format: {output}"
+        ))),
+    }
+}
+
+fn render_yaml_value_to_string(value: &serde_json::Value, indent: usize) -> String {
+    let mut out = String::new();
+    render_yaml_value(&mut out, value, indent);
+    out
+}
+
+fn render_yaml_value(out: &mut String, value: &serde_json::Value, indent: usize) {
+    match value {
+        serde_json::Value::Null => out.push_str("null"),
+        serde_json::Value::Bool(value) => out.push_str(if *value { "true" } else { "false" }),
+        serde_json::Value::Number(value) => out.push_str(&value.to_string()),
+        serde_json::Value::String(value) => {
+            if let Ok(quoted) = serde_json::to_string(value) {
+                out.push_str(&quoted);
+            } else {
+                out.push('"');
+                out.push_str(value);
+                out.push('"');
+            }
+        }
+        serde_json::Value::Array(values) => {
+            if values.is_empty() {
+                out.push_str("[]");
+                return;
+            }
+
+            for (index, value) in values.iter().enumerate() {
+                if index > 0 {
+                    out.push('\n');
+                }
+                out.push_str(&" ".repeat(indent));
+                out.push_str("- ");
+                if yaml_is_scalar(value) {
+                    render_yaml_value(out, value, indent + 2);
+                } else {
+                    out.push('\n');
+                    render_yaml_value(out, value, indent + 2);
+                }
+            }
+        }
+        serde_json::Value::Object(values) => {
+            if values.is_empty() {
+                out.push_str("{}");
+                return;
+            }
+
+            for (index, (key, value)) in values.iter().enumerate() {
+                if index > 0 {
+                    out.push('\n');
+                }
+                out.push_str(&" ".repeat(indent));
+                out.push_str(key);
+                out.push(':');
+                if yaml_is_scalar(value) {
+                    out.push(' ');
+                    render_yaml_value(out, value, indent + 2);
+                } else {
+                    out.push('\n');
+                    render_yaml_value(out, value, indent + 2);
+                }
+            }
+        }
+    }
+}
+
+fn yaml_is_scalar(value: &serde_json::Value) -> bool {
+    matches!(
+        value,
+        serde_json::Value::Null
+            | serde_json::Value::Bool(_)
+            | serde_json::Value::Number(_)
+            | serde_json::Value::String(_)
+    )
+}
+
 fn format_connectivity_results(
     results: &[connectivity::ConnectivityTestResult],
     output: OutputFormat,
 ) -> Result<String> {
     match output {
-        OutputFormat::Json => serde_json::to_string_pretty(results)
-            .map_err(|e| Error::Config(format!("json error: {}", e))),
-        OutputFormat::Summary => {
+        OutputFormat::Json | OutputFormat::JsonPretty | OutputFormat::Yaml => {
+            serialize_output(results, output)
+        }
+        OutputFormat::Table | OutputFormat::Summary => {
             let mut s = String::from("Connectivity Test Results\n");
             s.push_str("===========================\n\n");
             for result in results {
-                s.push_str(&format!(
-                    "{}: {}\n",
+                let _ = writeln!(
+                    s,
+                    "{}: {}",
                     result.test_name,
-                    if result.passed { "✓ PASS" } else { "✗ FAIL" }
-                ));
+                    if result.passed {
+                        "✓ PASS"
+                    } else {
+                        "✗ FAIL"
+                    }
+                );
             }
             Ok(s)
         }
@@ -647,11 +1001,16 @@ fn format_connectivity_results(
             s.push_str("| Test | Status |\n");
             s.push_str("| --- | --- |\n");
             for result in results {
-                s.push_str(&format!(
-                    "| {} | {} |\n",
+                let _ = writeln!(
+                    s,
+                    "| {} | {} |",
                     result.test_name,
-                    if result.passed { "✓ PASS" } else { "✗ FAIL" }
-                ));
+                    if result.passed {
+                        "✓ PASS"
+                    } else {
+                        "✗ FAIL"
+                    }
+                );
             }
             Ok(s)
         }
@@ -660,9 +1019,10 @@ fn format_connectivity_results(
 
 fn format_status_result(status: &status::ClusterStatus, output: OutputFormat) -> Result<String> {
     match output {
-        OutputFormat::Json => serde_json::to_string_pretty(status)
-            .map_err(|e| Error::Config(format!("json error: {}", e))),
-        OutputFormat::Summary => Ok(format!(
+        OutputFormat::Json | OutputFormat::JsonPretty | OutputFormat::Yaml => {
+            serialize_output(status, output)
+        }
+        OutputFormat::Table | OutputFormat::Summary => Ok(format!(
             "Cluster Status\n==============\nNodes: {}\nEndpoints: {}\nHealthy: {}\n",
             status.node_count, status.endpoint_count, status.is_healthy
         )),
@@ -670,7 +1030,11 @@ fn format_status_result(status: &status::ClusterStatus, output: OutputFormat) ->
             "# Cluster Status\n\n- **Nodes**: {}\n- **Endpoints**: {}\n- **Status**: {}\n",
             status.node_count,
             status.endpoint_count,
-            if status.is_healthy { "✓ Healthy" } else { "✗ Unhealthy" }
+            if status.is_healthy {
+                "✓ Healthy"
+            } else {
+                "✗ Unhealthy"
+            }
         )),
     }
 }
@@ -680,16 +1044,14 @@ fn format_endpoint_results(
     output: OutputFormat,
 ) -> Result<String> {
     match output {
-        OutputFormat::Json => serde_json::to_string_pretty(endpoints)
-            .map_err(|e| Error::Config(format!("json error: {}", e))),
-        OutputFormat::Summary => {
+        OutputFormat::Json | OutputFormat::JsonPretty | OutputFormat::Yaml => {
+            serialize_output(endpoints, output)
+        }
+        OutputFormat::Table | OutputFormat::Summary => {
             let mut s = format!("Endpoints ({})\n", endpoints.len());
             s.push_str("================\n");
             for ep in endpoints {
-                s.push_str(&format!(
-                    "{}: {} - {}\n",
-                    ep.name, ep.pod_name, ep.status
-                ));
+                let _ = writeln!(s, "{}: {} - {}", ep.name, ep.pod_name, ep.status);
             }
             Ok(s)
         }
@@ -698,7 +1060,7 @@ fn format_endpoint_results(
             s.push_str("| Name | Pod | Status |\n");
             s.push_str("| --- | --- | --- |\n");
             for ep in endpoints {
-                s.push_str(&format!("| {} | {} | {} |\n", ep.name, ep.pod_name, ep.status));
+                let _ = writeln!(s, "| {} | {} | {} |", ep.name, ep.pod_name, ep.status);
             }
             Ok(s)
         }
@@ -710,16 +1072,18 @@ fn format_service_results(
     output: OutputFormat,
 ) -> Result<String> {
     match output {
-        OutputFormat::Json => serde_json::to_string_pretty(services)
-            .map_err(|e| Error::Config(format!("json error: {}", e))),
-        OutputFormat::Summary => {
+        OutputFormat::Json | OutputFormat::JsonPretty | OutputFormat::Yaml => {
+            serialize_output(services, output)
+        }
+        OutputFormat::Table | OutputFormat::Summary => {
             let mut s = format!("Services ({})\n", services.len());
             s.push_str("===============\n");
             for svc in services {
-                s.push_str(&format!(
-                    "{}: {} - {} backends\n",
+                let _ = writeln!(
+                    s,
+                    "{}: {} - {} backends",
                     svc.name, svc.service_type, svc.backend_count
-                ));
+                );
             }
             Ok(s)
         }
@@ -728,41 +1092,46 @@ fn format_service_results(
             s.push_str("| Name | Type | Backends |\n");
             s.push_str("| --- | --- | --- |\n");
             for svc in services {
-                s.push_str(&format!(
-                    "| {} | {} | {} |\n",
+                let _ = writeln!(
+                    s,
+                    "| {} | {} | {} |",
                     svc.name, svc.service_type, svc.backend_count
-                ));
+                );
             }
             Ok(s)
         }
     }
 }
 
-fn format_policy_result(result: &policy::PolicyValidationResult, output: OutputFormat) -> Result<String> {
+fn format_policy_result(
+    result: &policy::PolicyValidationResult,
+    output: OutputFormat,
+) -> Result<String> {
     match output {
-        OutputFormat::Json => serde_json::to_string_pretty(result)
-            .map_err(|e| Error::Config(format!("json error: {}", e))),
-        OutputFormat::Summary => {
+        OutputFormat::Json | OutputFormat::JsonPretty | OutputFormat::Yaml => {
+            serialize_output(result, output)
+        }
+        OutputFormat::Table | OutputFormat::Summary => {
             let mut s = String::from("Policy Validation\n");
             s.push_str("=================\n");
-            s.push_str(&format!("Valid: {}\n", result.is_valid));
-            s.push_str(&format!("Policies checked: {}\n", result.policies_checked));
+            let _ = writeln!(s, "Valid: {}", result.is_valid);
+            let _ = writeln!(s, "Policies checked: {}", result.policies_checked);
             if !result.errors.is_empty() {
                 s.push_str("\nErrors:\n");
                 for err in &result.errors {
-                    s.push_str(&format!("  - {}\n", err));
+                    let _ = writeln!(s, "  - {err}");
                 }
             }
             Ok(s)
         }
         OutputFormat::Markdown => {
             let mut s = String::from("# Policy Validation\n\n");
-            s.push_str(&format!("- **Valid**: {}\n", result.is_valid));
-            s.push_str(&format!("- **Policies Checked**: {}\n", result.policies_checked));
+            let _ = writeln!(s, "- **Valid**: {}", result.is_valid);
+            let _ = writeln!(s, "- **Policies Checked**: {}", result.policies_checked);
             if !result.errors.is_empty() {
                 s.push_str("\n## Errors\n\n");
                 for err in &result.errors {
-                    s.push_str(&format!("- {}\n", err));
+                    let _ = writeln!(s, "- {err}");
                 }
             }
             Ok(s)
@@ -772,16 +1141,14 @@ fn format_policy_result(result: &policy::PolicyValidationResult, output: OutputF
 
 fn format_policy_list(policies: &[policy::PolicyInfo], output: OutputFormat) -> Result<String> {
     match output {
-        OutputFormat::Json => serde_json::to_string_pretty(policies)
-            .map_err(|e| Error::Config(format!("json error: {}", e))),
-        OutputFormat::Summary => {
+        OutputFormat::Json | OutputFormat::JsonPretty | OutputFormat::Yaml => {
+            serialize_output(policies, output)
+        }
+        OutputFormat::Table | OutputFormat::Summary => {
             let mut s = format!("Policies ({})\n", policies.len());
             s.push_str("===============\n");
             for policy in policies {
-                s.push_str(&format!(
-                    "{}: {} rules\n",
-                    policy.name, policy.rule_count
-                ));
+                let _ = writeln!(s, "{}: {} rules", policy.name, policy.rule_count);
             }
             Ok(s)
         }
@@ -790,10 +1157,11 @@ fn format_policy_list(policies: &[policy::PolicyInfo], output: OutputFormat) -> 
             s.push_str("| Name | Namespace | Rules |\n");
             s.push_str("| --- | --- | --- |\n");
             for policy in policies {
-                s.push_str(&format!(
-                    "| {} | {} | {} |\n",
+                let _ = writeln!(
+                    s,
+                    "| {} | {} | {} |",
                     policy.name, policy.namespace, policy.rule_count
-                ));
+                );
             }
             Ok(s)
         }
@@ -802,16 +1170,18 @@ fn format_policy_list(policies: &[policy::PolicyInfo], output: OutputFormat) -> 
 
 fn format_flow_results(flows: &[flow::NetworkFlow], output: OutputFormat) -> Result<String> {
     match output {
-        OutputFormat::Json => serde_json::to_string_pretty(flows)
-            .map_err(|e| Error::Config(format!("json error: {}", e))),
-        OutputFormat::Summary => {
+        OutputFormat::Json | OutputFormat::JsonPretty | OutputFormat::Yaml => {
+            serialize_output(flows, output)
+        }
+        OutputFormat::Table | OutputFormat::Summary => {
             let mut s = format!("Network Flows ({})\n", flows.len());
             s.push_str("==================\n");
             for flow in flows {
-                s.push_str(&format!(
-                    "{} -> {} ({}:{}): {}\n",
+                let _ = writeln!(
+                    s,
+                    "{} -> {} ({}:{}): {}",
                     flow.source_pod, flow.dest_pod, flow.protocol, flow.dest_port, flow.status
-                ));
+                );
             }
             Ok(s)
         }
@@ -820,10 +1190,11 @@ fn format_flow_results(flows: &[flow::NetworkFlow], output: OutputFormat) -> Res
             s.push_str("| Source | Dest | Protocol | Port | Status |\n");
             s.push_str("| --- | --- | --- | --- | --- |\n");
             for flow in flows {
-                s.push_str(&format!(
-                    "| {} | {} | {} | {} | {} |\n",
+                let _ = writeln!(
+                    s,
+                    "| {} | {} | {} | {} | {} |",
                     flow.source_pod, flow.dest_pod, flow.protocol, flow.dest_port, flow.status
-                ));
+                );
             }
             Ok(s)
         }
@@ -832,21 +1203,22 @@ fn format_flow_results(flows: &[flow::NetworkFlow], output: OutputFormat) -> Res
 
 fn format_flow_stats(stats: &flow::FlowStatistics, output: OutputFormat) -> Result<String> {
     match output {
-        OutputFormat::Json => serde_json::to_string_pretty(stats)
-            .map_err(|e| Error::Config(format!("json error: {}", e))),
-        OutputFormat::Summary => {
+        OutputFormat::Json | OutputFormat::JsonPretty | OutputFormat::Yaml => {
+            serialize_output(stats, output)
+        }
+        OutputFormat::Table | OutputFormat::Summary => {
             let mut s = String::from("Flow Statistics\n");
             s.push_str("================\n");
-            s.push_str(&format!("Total flows: {}\n", stats.total_flows));
-            s.push_str(&format!("Allowed: {}\n", stats.allowed_flows));
-            s.push_str(&format!("Denied: {}\n", stats.denied_flows));
+            let _ = writeln!(s, "Total flows: {}", stats.total_flows);
+            let _ = writeln!(s, "Allowed: {}", stats.allowed_flows);
+            let _ = writeln!(s, "Denied: {}", stats.denied_flows);
             Ok(s)
         }
         OutputFormat::Markdown => {
             let mut s = String::from("# Flow Statistics\n\n");
-            s.push_str(&format!("- **Total Flows**: {}\n", stats.total_flows));
-            s.push_str(&format!("- **Allowed**: {}\n", stats.allowed_flows));
-            s.push_str(&format!("- **Denied**: {}\n", stats.denied_flows));
+            let _ = writeln!(s, "- **Total Flows**: {}", stats.total_flows);
+            let _ = writeln!(s, "- **Allowed**: {}", stats.allowed_flows);
+            let _ = writeln!(s, "- **Denied**: {}", stats.denied_flows);
             Ok(s)
         }
     }
@@ -872,7 +1244,7 @@ fn version_output() -> String {
     )
 }
 
-fn config_summary(config: &Config) -> String {
+fn config_summary(config: &RuntimeConfig) -> String {
     format!(
         "agent={}, node={}, cluster={}, mtu={}, ipv4={}, ipv6={}",
         config.agent.name,
@@ -956,12 +1328,17 @@ fn features_status_summary(report: &FeaturesStatusReport) -> String {
     let mut rendered = String::from("features status\n");
     rendered.push_str("================\n\n");
     for feature in &report.features {
-        rendered.push_str(&format!(
-            "{}: {} - {}\n",
+        let _ = writeln!(
+            rendered,
+            "{}: {} - {}",
             feature.name,
-            if feature.enabled { "enabled" } else { "disabled" },
+            if feature.enabled {
+                "enabled"
+            } else {
+                "disabled"
+            },
             feature.description,
-        ));
+        );
     }
     rendered
 }
@@ -995,6 +1372,7 @@ fn sysdump_report(output_filename: Option<PathBuf>) -> SysdumpReport {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use clap::Parser;
 
     fn temp_path(name: &str) -> PathBuf {
         let mut path = std::env::temp_dir();
@@ -1008,6 +1386,13 @@ mod tests {
         );
         path.push(nonce);
         path
+    }
+
+    #[test]
+    fn temp_path_includes_name() {
+        let path = temp_path("config");
+        let rendered = path.display().to_string();
+        assert!(rendered.contains("seriousum-cli-config-"));
     }
 
     // === Version command tests ===
@@ -1378,6 +1763,86 @@ mod tests {
         assert_eq!(OutputFormat::Json, OutputFormat::Json);
         assert_eq!(OutputFormat::Markdown, OutputFormat::Markdown);
         assert_eq!(OutputFormat::Summary, OutputFormat::Summary);
+    }
+
+    #[test]
+    fn test_output_format_roundtrip() {
+        assert_eq!(
+            <OutputFormat as std::str::FromStr>::from_str("json").unwrap(),
+            OutputFormat::Json
+        );
+        assert_eq!(
+            <OutputFormat as std::str::FromStr>::from_str("table").unwrap(),
+            OutputFormat::Table
+        );
+        assert_eq!(
+            <OutputFormat as std::str::FromStr>::from_str("yaml").unwrap(),
+            OutputFormat::Yaml
+        );
+        assert!(<OutputFormat as std::str::FromStr>::from_str("invalid").is_err());
+    }
+
+    #[test]
+    fn test_output_format_display() {
+        assert_eq!(OutputFormat::Json.to_string(), "json");
+        assert_eq!(OutputFormat::JsonPretty.to_string(), "json-pretty");
+    }
+
+    #[test]
+    fn test_table_formatter_basic() {
+        let mut tbl = TableFormatter::new(vec!["ID", "STATE", "IP"]);
+        tbl.add_row(vec!["1", "ready", "10.0.0.1"]);
+        tbl.add_row(vec!["2", "waiting", "10.0.0.2"]);
+        let output = tbl.render();
+        assert!(output.contains("ID"));
+        assert!(output.contains("STATE"));
+        assert!(output.contains("ready"));
+        assert_eq!(tbl.row_count(), 2);
+    }
+
+    #[test]
+    fn test_table_formatter_alignment() {
+        let mut tbl = TableFormatter::new(vec!["SHORT", "A LONGER HEADER"]);
+        tbl.add_row(vec!["x", "y"]);
+        let output = tbl.render();
+        assert!(output.lines().next().unwrap().contains("SHORT"));
+    }
+
+    #[test]
+    fn test_table_formatter_empty() {
+        let tbl = TableFormatter::new(Vec::<String>::new());
+        assert_eq!(tbl.render(), "");
+    }
+
+    #[test]
+    fn test_policy_map_summary_default() {
+        let summary = PolicyMapSummary::default();
+        assert_eq!(summary.ingress_allowed, 0);
+        assert_eq!(summary.egress_denied, 0);
+    }
+
+    #[test]
+    fn test_global_options_default() {
+        let opts = GlobalOptions::default();
+        assert_eq!(opts.host, "localhost:9900");
+        assert_eq!(opts.output, OutputFormat::Table);
+        assert_eq!(opts.timeout_secs, 30);
+    }
+
+    #[test]
+    fn test_endpoint_row_serde() {
+        let row = EndpointRow {
+            id: 42,
+            policy_enabled: "ingress+egress".into(),
+            ipv4: "10.0.0.1".into(),
+            ipv6: String::new(),
+            identity: 100,
+            labels: vec!["k8s:app=nginx".into()],
+            state: "ready".into(),
+        };
+        let json = serde_json::to_string(&row).unwrap();
+        let row2: EndpointRow = serde_json::from_str(&json).unwrap();
+        assert_eq!(row2.id, 42);
     }
 
     // === Helper function tests ===

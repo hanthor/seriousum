@@ -4,13 +4,12 @@
 //! regeneration, policy updates, and cleanup.
 
 use crate::lifecycle::{
-    EndpointLifecycle, EndpointMetadata, EndpointState, RegenerationMetadata,
-    RegenerationReason,
+    EndpointLifecycle, EndpointMetadata, EndpointState, RegenerationMetadata, RegenerationReason,
 };
 use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::RwLock;
-use tracing::{debug, error, info, warn};
+use tracing::{debug, info};
 
 /// Endpoint manager error type.
 #[derive(Debug, Clone)]
@@ -24,10 +23,10 @@ pub enum ManagerError {
 impl std::fmt::Display for ManagerError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::EndpointNotFound(id) => write!(f, "endpoint not found: {}", id),
-            Self::EndpointAlreadyExists(id) => write!(f, "endpoint already exists: {}", id),
-            Self::InvalidStateTransition(msg) => write!(f, "invalid state transition: {}", msg),
-            Self::RegenerationFailed(msg) => write!(f, "regeneration failed: {}", msg),
+            Self::EndpointNotFound(id) => write!(f, "endpoint not found: {id}"),
+            Self::EndpointAlreadyExists(id) => write!(f, "endpoint already exists: {id}"),
+            Self::InvalidStateTransition(msg) => write!(f, "invalid state transition: {msg}"),
+            Self::RegenerationFailed(msg) => write!(f, "regeneration failed: {msg}"),
         }
     }
 }
@@ -127,9 +126,7 @@ impl EndpointManager {
     /// Delete an endpoint.
     pub async fn delete(&self, id: u16) -> ManagerResult<ManagedEndpoint> {
         let mut eps = self.endpoints.write().await;
-        let ep = eps
-            .remove(&id)
-            .ok_or(ManagerError::EndpointNotFound(id))?;
+        let ep = eps.remove(&id).ok_or(ManagerError::EndpointNotFound(id))?;
 
         let mut stats = self.stats.write().await;
         stats.total_deleted += 1;
@@ -141,13 +138,11 @@ impl EndpointManager {
     /// Mark endpoint as waiting for identity.
     pub async fn mark_waiting_for_identity(&self, id: u16) -> ManagerResult<()> {
         let mut eps = self.endpoints.write().await;
-        let ep = eps
-            .get_mut(&id)
-            .ok_or(ManagerError::EndpointNotFound(id))?;
+        let ep = eps.get_mut(&id).ok_or(ManagerError::EndpointNotFound(id))?;
 
         ep.lifecycle
             .transition(EndpointState::WaitingForIdentity)
-            .map_err(|e| ManagerError::InvalidStateTransition(e))?;
+            .map_err(ManagerError::InvalidStateTransition)?;
 
         debug!("Endpoint {} now waiting for identity", id);
         Ok(())
@@ -156,15 +151,13 @@ impl EndpointManager {
     /// Mark endpoint as ready.
     pub async fn mark_ready(&self, id: u16) -> ManagerResult<()> {
         let mut eps = self.endpoints.write().await;
-        let ep = eps
-            .get_mut(&id)
-            .ok_or(ManagerError::EndpointNotFound(id))?;
+        let ep = eps.get_mut(&id).ok_or(ManagerError::EndpointNotFound(id))?;
 
         // Skip to ready if in waiting-for-identity state
         if ep.lifecycle.state() == EndpointState::WaitingForIdentity {
             ep.lifecycle
                 .transition(EndpointState::Ready)
-                .map_err(|e| ManagerError::InvalidStateTransition(e))?;
+                .map_err(ManagerError::InvalidStateTransition)?;
 
             let mut stats = self.stats.write().await;
             stats.currently_ready = stats.currently_ready.saturating_add(1);
@@ -183,14 +176,12 @@ impl EndpointManager {
         message: Option<String>,
     ) -> ManagerResult<()> {
         let mut eps = self.endpoints.write().await;
-        let ep = eps
-            .get_mut(&id)
-            .ok_or(ManagerError::EndpointNotFound(id))?;
+        let ep = eps.get_mut(&id).ok_or(ManagerError::EndpointNotFound(id))?;
 
         // Transition to regenerating
         ep.lifecycle
             .regeneration_started()
-            .map_err(|e| ManagerError::InvalidStateTransition(e))?;
+            .map_err(ManagerError::InvalidStateTransition)?;
 
         let mut stats = self.stats.write().await;
         stats.currently_regenerating = stats.currently_regenerating.saturating_add(1);
@@ -205,7 +196,7 @@ impl EndpointManager {
 
         ep.lifecycle
             .regeneration_complete(metadata)
-            .map_err(|e| ManagerError::InvalidStateTransition(e))?;
+            .map_err(ManagerError::InvalidStateTransition)?;
 
         stats.total_regenerations += 1;
         stats.currently_regenerating = stats.currently_regenerating.saturating_sub(1);
@@ -342,7 +333,6 @@ mod tests {
 
         let meta1 = EndpointMetadata::new(0, "cont1", "pod-1", "default");
         let meta2 = EndpointMetadata::new(1, "cont2", "pod-2", "default");
-        
 
         mgr.create(meta1).await.unwrap();
         mgr.create(meta2).await.unwrap();
@@ -350,14 +340,8 @@ mod tests {
         mgr.mark_waiting_for_identity(0).await.unwrap();
         mgr.mark_ready(0).await.unwrap();
 
-        assert_eq!(
-            mgr.count_by_state(EndpointState::Ready).await,
-            1
-        );
-        assert_eq!(
-            mgr.count_by_state(EndpointState::Creating).await,
-            1
-        );
+        assert_eq!(mgr.count_by_state(EndpointState::Ready).await, 1);
+        assert_eq!(mgr.count_by_state(EndpointState::Creating).await, 1);
     }
 
     #[tokio::test]
@@ -366,7 +350,6 @@ mod tests {
 
         let meta1 = EndpointMetadata::new(0, "cont1", "pod-1", "default");
         let meta2 = EndpointMetadata::new(1, "cont2", "pod-2", "default");
-        
 
         mgr.create(meta1).await.unwrap();
         mgr.create(meta2).await.unwrap();

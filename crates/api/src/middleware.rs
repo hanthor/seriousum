@@ -1,10 +1,6 @@
 //! Middleware for authentication and other cross-cutting concerns.
 
-use axum::{
-    extract::Request,
-    middleware::Next,
-    response::Response,
-};
+use axum::{extract::Request, middleware::Next, response::Response};
 use std::sync::Arc;
 use tracing::debug;
 
@@ -52,18 +48,13 @@ impl AuthProvider for NoOpAuth {
 
 /// Extract bearer token from Authorization header.
 pub fn extract_bearer_token(auth_header: &str) -> Option<String> {
-    if auth_header.starts_with("Bearer ") {
-        Some(auth_header[7..].to_string())
-    } else {
-        None
-    }
+    auth_header
+        .strip_prefix("Bearer ")
+        .map(std::string::ToString::to_string)
 }
 
 /// Middleware for authentication.
-pub async fn auth_middleware(
-    request: Request,
-    next: Next,
-) -> Result<Response, String> {
+pub async fn auth_middleware(request: Request, next: Next) -> Result<Response, String> {
     // Get authorization header
     let auth_header = request
         .headers()
@@ -71,7 +62,10 @@ pub async fn auth_middleware(
         .and_then(|h| h.to_str().ok())
         .unwrap_or("");
 
-    debug!("auth middleware: header present: {}", !auth_header.is_empty());
+    debug!(
+        "auth middleware: header present: {}",
+        !auth_header.is_empty()
+    );
 
     // For now, just pass through. In a real implementation, we'd validate the token here.
     Ok(next.run(request).await)

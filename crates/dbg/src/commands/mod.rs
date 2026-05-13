@@ -20,9 +20,9 @@ pub mod policy;
 
 // Re-export key command implementations
 pub use bpf::*;
-pub use service::*;
 pub use endpoint::*;
 pub use policy::*;
+pub use service::*;
 
 /// List BPF maps available on the system
 pub fn list_bpf_maps() -> Result<Vec<String>> {

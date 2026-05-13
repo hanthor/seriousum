@@ -9,7 +9,7 @@ use std::net::IpAddr;
 use crate::endpoint::EndpointMetadata;
 use crate::error::{Error, Result};
 use crate::gateway::GatewayConfig;
-use crate::types::{EndpointID, Labels, LabelSelector, PolicyID};
+use crate::types::{EndpointID, LabelSelector, Labels, PolicyID};
 
 /// Policy gateway configuration
 #[derive(Debug, Clone)]
@@ -264,11 +264,10 @@ mod tests {
             "192.168.1.1".to_string(),
         );
 
-        let selector = LabelSelector::new()
-            .with_match_label("app", "web");
+        let selector = LabelSelector::new().with_match_label("app", "web");
 
-        let policy = PolicyConfig::new(PolicyID::new("test", "default"))
-            .add_endpoint_selector(selector);
+        let policy =
+            PolicyConfig::new(PolicyID::new("test", "default")).add_endpoint_selector(selector);
 
         assert!(policy.matches_endpoint(&endpoint));
     }
@@ -278,11 +277,10 @@ mod tests {
         let mut node_labels = HashMap::new();
         node_labels.insert("node-type".to_string(), "gateway".to_string());
 
-        let selector = LabelSelector::new()
-            .with_match_label("node-type", "gateway");
+        let selector = LabelSelector::new().with_match_label("node-type", "gateway");
 
-        let policy = PolicyConfig::new(PolicyID::new("test", "default"))
-            .add_node_selector(selector);
+        let policy =
+            PolicyConfig::new(PolicyID::new("test", "default")).add_node_selector(selector);
 
         assert!(policy.matches_node_labels(&node_labels));
     }

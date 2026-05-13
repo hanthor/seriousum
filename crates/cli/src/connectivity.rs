@@ -1,11 +1,11 @@
 //! Connectivity testing framework for Track U.
-//! 
+//!
 //! Provides connectivity test execution, test suites, and connectivity checking
 //! between endpoints.
 
+use crate::Result;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
-use crate::Result;
 
 /// Result of a single connectivity test.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -139,13 +139,13 @@ impl ConnectivityTestSuite {
         let mut results = Vec::new();
 
         for (name, test_info) in &self.tests {
-            if let Some(f) = filter {
-                if !name.contains(f) {
-                    continue;
-                }
+            if let Some(f) = filter
+                && !name.contains(f)
+            {
+                continue;
             }
 
-            let result = self.run_single_test(name, test_info);
+            let result = Self::run_single_test(name, test_info);
             results.push(result);
         }
 
@@ -153,19 +153,14 @@ impl ConnectivityTestSuite {
     }
 
     /// Run a single test.
-    fn run_single_test(
-        &self,
-        name: &str,
-        _test_info: &ConnectivityTestInfo,
-    ) -> ConnectivityTestResult {
+    fn run_single_test(name: &str, _test_info: &ConnectivityTestInfo) -> ConnectivityTestResult {
         // Simulate test execution based on test name
         let (passed, error_message, latency_ms) = match name {
-            "basic-connectivity" => (true, None, 5),
+            "basic-connectivity" | "pod-to-host" => (true, None, 5),
             "ingress-allow" => (true, None, 3),
             "egress-allow" => (true, None, 4),
             "dns-resolution" => (true, None, 2),
             "host-to-pod" => (true, None, 6),
-            "pod-to-host" => (true, None, 5),
             "pod-to-external" => (true, None, 8),
             "external-to-pod" => (true, None, 7),
             _ => (false, Some("unknown test".to_string()), 0),
@@ -245,7 +240,7 @@ mod tests {
     fn test_connectivity_test_suite_list_tests() {
         let suite = ConnectivityTestSuite::new();
         let tests = suite.list_available_tests();
-        
+
         assert!(!tests.is_empty());
         assert!(tests.iter().any(|t| t.name == "basic-connectivity"));
         assert!(tests.iter().any(|t| t.name == "ingress-allow"));
@@ -256,7 +251,7 @@ mod tests {
     fn test_connectivity_test_suite_run_all_tests() {
         let suite = ConnectivityTestSuite::new();
         let results = suite.run_tests(None).expect("run tests");
-        
+
         assert!(!results.is_empty());
         assert!(results.iter().all(|r| r.passed));
     }
@@ -264,8 +259,10 @@ mod tests {
     #[test]
     fn test_connectivity_test_suite_run_filtered_tests() {
         let suite = ConnectivityTestSuite::new();
-        let results = suite.run_tests(Some("ingress")).expect("run filtered tests");
-        
+        let results = suite
+            .run_tests(Some("ingress"))
+            .expect("run filtered tests");
+
         assert!(!results.is_empty());
         assert!(results.iter().all(|r| r.test_name.contains("ingress")));
     }
@@ -273,8 +270,10 @@ mod tests {
     #[test]
     fn test_connectivity_test_suite_run_nonmatching_filter() {
         let suite = ConnectivityTestSuite::new();
-        let results = suite.run_tests(Some("nonexistent")).expect("run nonmatching filter");
-        
+        let results = suite
+            .run_tests(Some("nonexistent"))
+            .expect("run nonmatching filter");
+
         assert!(results.is_empty());
     }
 
@@ -338,7 +337,7 @@ mod tests {
     fn test_connectivity_test_info_category_variants() {
         let suite = ConnectivityTestSuite::new();
         let tests = suite.list_available_tests();
-        
+
         let categories: Vec<_> = tests.iter().map(|t| t.category.as_str()).collect();
         assert!(categories.contains(&"basic"));
         assert!(categories.contains(&"ingress"));

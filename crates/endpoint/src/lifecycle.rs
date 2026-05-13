@@ -6,8 +6,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::net::IpAddr;
 use std::time::{SystemTime, UNIX_EPOCH};
-use tokio::sync::RwLock;
-use tracing::{debug, info, warn};
+use tracing::debug;
 
 /// Endpoint lifecycle state transitions.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -280,18 +279,25 @@ impl EndpointLifecycle {
                 EndpointState::Ready | EndpointState::WaitingToRegenerate | EndpointState::Invalid
             ),
             EndpointState::WaitingToRegenerate => {
-                matches!(new_state, EndpointState::Regenerating | EndpointState::Disconnecting)
+                matches!(
+                    new_state,
+                    EndpointState::Regenerating | EndpointState::Disconnecting
+                )
             }
             EndpointState::Regenerating => {
                 matches!(
                     new_state,
-                    EndpointState::Ready | EndpointState::WaitingToRegenerate | EndpointState::Disconnecting
+                    EndpointState::Ready
+                        | EndpointState::WaitingToRegenerate
+                        | EndpointState::Disconnecting
                 )
             }
             EndpointState::Ready => {
                 matches!(
                     new_state,
-                    EndpointState::WaitingToRegenerate | EndpointState::Regenerating | EndpointState::Disconnecting
+                    EndpointState::WaitingToRegenerate
+                        | EndpointState::Regenerating
+                        | EndpointState::Disconnecting
                 )
             }
             EndpointState::Disconnecting => matches!(new_state, EndpointState::Disconnected),
@@ -313,10 +319,7 @@ impl EndpointLifecycle {
             .unwrap_or_default()
             .as_secs();
 
-        debug!(
-            "Endpoint state transition: {} → {}",
-            self.state, new_state
-        );
+        debug!("Endpoint state transition: {} → {}", self.state, new_state);
         self.state = new_state;
         self.last_state_change = timestamp;
 
@@ -340,10 +343,7 @@ impl EndpointLifecycle {
     }
 
     /// Mark regeneration as complete.
-    pub fn regeneration_complete(
-        &mut self,
-        metadata: RegenerationMetadata,
-    ) -> Result<(), String> {
+    pub fn regeneration_complete(&mut self, metadata: RegenerationMetadata) -> Result<(), String> {
         self.regeneration_count = self.regeneration_count.saturating_add(1);
         self.last_regeneration = Some(metadata);
         self.transition(EndpointState::Ready)
@@ -430,16 +430,20 @@ mod tests {
     #[test]
     fn test_lifecycle_valid_transition_creating_to_waiting() {
         let mut lifecycle = EndpointLifecycle::new();
-        assert!(lifecycle
-            .transition(EndpointState::WaitingForIdentity)
-            .is_ok());
+        assert!(
+            lifecycle
+                .transition(EndpointState::WaitingForIdentity)
+                .is_ok()
+        );
         assert_eq!(lifecycle.state(), EndpointState::WaitingForIdentity);
     }
 
     #[test]
     fn test_lifecycle_valid_transition_waiting_to_ready() {
         let mut lifecycle = EndpointLifecycle::new();
-        lifecycle.transition(EndpointState::WaitingForIdentity).unwrap();
+        lifecycle
+            .transition(EndpointState::WaitingForIdentity)
+            .unwrap();
         assert!(lifecycle.transition(EndpointState::Ready).is_ok());
         assert_eq!(lifecycle.state(), EndpointState::Ready);
     }
@@ -463,7 +467,9 @@ mod tests {
     #[test]
     fn test_lifecycle_regeneration_complete() {
         let mut lifecycle = EndpointLifecycle::new();
-        lifecycle.transition(EndpointState::WaitingForIdentity).unwrap();
+        lifecycle
+            .transition(EndpointState::WaitingForIdentity)
+            .unwrap();
         lifecycle.transition(EndpointState::Ready).unwrap();
         lifecycle.regeneration_started().unwrap();
 
@@ -478,7 +484,9 @@ mod tests {
     #[test]
     fn test_lifecycle_stats() {
         let mut lifecycle = EndpointLifecycle::new();
-        lifecycle.transition(EndpointState::WaitingForIdentity).unwrap();
+        lifecycle
+            .transition(EndpointState::WaitingForIdentity)
+            .unwrap();
         lifecycle.transition(EndpointState::Ready).unwrap();
 
         let stats = lifecycle.stats();
@@ -490,7 +498,10 @@ mod tests {
 
     #[test]
     fn test_regeneration_reason_display() {
-        assert_eq!(RegenerationReason::PolicyUpdate.to_string(), "policy-update");
+        assert_eq!(
+            RegenerationReason::PolicyUpdate.to_string(),
+            "policy-update"
+        );
         assert_eq!(RegenerationReason::Manual.to_string(), "manual");
     }
 

@@ -9,13 +9,13 @@ use std::time::Duration;
 use tokio::sync::RwLock;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Status {
+pub enum ControllerStatus {
     Running,
     Failed { failures: u32 },
     Stopped,
 }
 
-impl fmt::Display for Status {
+impl fmt::Display for ControllerStatus {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Running => f.write_str("running"),
@@ -25,14 +25,17 @@ impl fmt::Display for Status {
     }
 }
 
+/// Backward-compatible alias for the shared controller status.
+pub type Status = ControllerStatus;
+
 #[derive(Debug, Clone)]
-pub struct Config {
+pub struct ControllerConfig {
     pub group: String,
     pub name: String,
     pub rate_limit: Option<Duration>,
 }
 
-impl Config {
+impl ControllerConfig {
     pub fn new(name: impl Into<String>) -> Self {
         Self {
             group: String::new(),
@@ -53,18 +56,21 @@ impl Config {
 pub type WorkerFn =
     Box<dyn FnMut() -> Pin<Box<dyn Future<Output = anyhow::Result<()>> + Send>> + Send>;
 
+/// Backward-compatible alias for the shared controller config.
+pub type Config = ControllerConfig;
+
 #[derive(Clone)]
 pub struct Controller {
-    pub config: Arc<Config>,
-    pub status: Arc<RwLock<Status>>,
+    pub config: Arc<ControllerConfig>,
+    pub status: Arc<RwLock<ControllerStatus>>,
     worker: Arc<RwLock<Option<WorkerFn>>>,
 }
 
 impl Controller {
-    pub fn new(config: Config) -> Self {
+    pub fn new(config: ControllerConfig) -> Self {
         Self {
             config: Arc::new(config),
-            status: Arc::new(RwLock::new(Status::Stopped)),
+            status: Arc::new(RwLock::new(ControllerStatus::Stopped)),
             worker: Arc::new(RwLock::new(None)),
         }
     }
@@ -78,7 +84,7 @@ impl Controller {
     }
 
     pub async fn run_once(&self) -> anyhow::Result<()> {
-        *self.status.write().await = Status::Running;
+        *self.status.write().await = ControllerStatus::Running;
         let mut guard = self.worker.write().await;
         if let Some(worker) = guard.as_mut() {
             worker().await?;
@@ -87,7 +93,7 @@ impl Controller {
     }
 
     pub async fn stop(&self) {
-        *self.status.write().await = Status::Stopped;
+        *self.status.write().await = ControllerStatus::Stopped;
     }
 }
 
@@ -97,11 +103,11 @@ mod tests {
 
     #[tokio::test]
     async fn controller_basic() {
-        let controller = Controller::new(Config::new("x"));
+        let controller = Controller::new(ControllerConfig::new("x"));
         controller.set_worker(|| async { Ok(()) }).await;
         controller.run_once().await.unwrap();
-        assert_eq!(*controller.status.read().await, Status::Running);
+        assert_eq!(*controller.status.read().await, ControllerStatus::Running);
         controller.stop().await;
-        assert_eq!(*controller.status.read().await, Status::Stopped);
+        assert_eq!(*controller.status.read().await, ControllerStatus::Stopped);
     }
 }

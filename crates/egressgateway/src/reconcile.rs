@@ -37,7 +37,10 @@ pub struct BpfPolicyValueV4 {
 impl BpfPolicyValueV4 {
     /// Create new BPF policy value
     pub fn new(egress_ip: Ipv4Addr, gateway_ip: Ipv4Addr) -> Self {
-        Self { egress_ip, gateway_ip }
+        Self {
+            egress_ip,
+            gateway_ip,
+        }
     }
 
     /// Check if value matches expected values

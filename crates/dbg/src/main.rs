@@ -5,8 +5,8 @@
 use clap::{Parser, Subcommand};
 use seriousum_dbg::commands::{self, bpf, endpoint, policy, service};
 use seriousum_dbg::output::{
-    print_endpoints_json, print_endpoints_table, print_policies_json, print_policies_table,
-    print_services_json, print_services_table, print_map_table,
+    print_endpoints_json, print_endpoints_table, print_map_table, print_policies_json,
+    print_policies_table, print_services_json, print_services_table,
 };
 use std::process;
 use tracing::error;
@@ -135,10 +135,16 @@ enum BpfPolicyCommands {
 #[derive(Subcommand, Debug)]
 enum BpfCtCommands {
     /// List connection tracking entries
-    List { #[arg(default_value = "global")] ct_type: String },
+    List {
+        #[arg(default_value = "global")]
+        ct_type: String,
+    },
 
     /// Flush connection tracking map
-    Flush { #[arg(default_value = "global")] ct_type: String },
+    Flush {
+        #[arg(default_value = "global")]
+        ct_type: String,
+    },
 }
 
 #[derive(Subcommand, Debug)]
@@ -233,7 +239,7 @@ fn main() {
         Ok(_) => process::exit(0),
         Err(e) => {
             error!("Command failed: {}", e);
-            eprintln!("Error: {}", e);
+            tracing::error!("Error: {}", e);
             process::exit(1);
         }
     }
@@ -245,16 +251,16 @@ fn execute_command(cli: &Cli) -> Result<(), Box<dyn std::error::Error>> {
 
     match &cli.command {
         Commands::Version => {
-            println!(
+            tracing::info!(
                 "cilium-dbg version {}\nbuilt with seriousum porting framework",
                 env!("CARGO_PKG_VERSION")
             );
         }
 
         Commands::Status => {
-            println!("Cilium Agent: operational");
-            println!("eBPF support: available");
-            println!("Policy enforcement: enabled");
+            tracing::info!("Cilium Agent: operational");
+            tracing::info!("eBPF support: available");
+            tracing::info!("Policy enforcement: enabled");
         }
 
         Commands::Bpf { command } => {
@@ -282,10 +288,10 @@ fn execute_bpf_command(cmd: &BpfCommands, is_json: bool) -> Result<(), Box<dyn s
         BpfCommands::List => {
             let maps = commands::list_bpf_maps()?;
             if is_json {
-                println!("{}", serde_json::to_string_pretty(&maps)?);
+                tracing::info!("{}", serde_json::to_string_pretty(&maps)?);
             } else {
                 for map in maps {
-                    println!("  {}", map);
+                    tracing::info!("  {}", map);
                 }
             }
         }
@@ -325,12 +331,12 @@ fn execute_bpf_policy_command(
         BpfPolicyCommands::List => {
             let maps = bpf::list_policy_maps()?;
             if is_json {
-                println!("{}", serde_json::to_string_pretty(&maps)?);
+                tracing::info!("{}", serde_json::to_string_pretty(&maps)?);
             } else {
-                println!("{:<20} {}", "MAP", "PATH");
-                println!("{:<20} {}", "===", "====");
+                tracing::info!("{:<20} {}", "MAP", "PATH");
+                tracing::info!("{:<20} {}", "===", "====");
                 for (name, path) in maps {
-                    println!("{:<20} {}", name, path);
+                    tracing::info!("{:<20} {}", name, path);
                 }
             }
         }
@@ -338,7 +344,7 @@ fn execute_bpf_policy_command(
         BpfPolicyCommands::Get { endpoint_id } => {
             let policies = bpf::dump_policy_map(*endpoint_id)?;
             if is_json {
-                println!("{}", print_policies_json(&policies)?);
+                tracing::info!("{}", print_policies_json(&policies)?);
             } else {
                 print_policies_table(&policies);
             }
@@ -354,17 +360,17 @@ fn execute_bpf_policy_command(
             let dir: seriousum_dbg::TrafficDirection = direction.parse()?;
             let id = seriousum_dbg::NumericIdentity(*identity);
             bpf::add_policy_entry(*endpoint_id, dir, id, *port, protocol)?;
-            println!("Policy rule added");
+            tracing::info!("Policy rule added");
         }
 
         BpfPolicyCommands::Delete { endpoint_id } => {
             bpf::flush_policy_map(*endpoint_id)?;
-            println!("Policy map flushed");
+            tracing::info!("Policy map flushed");
         }
 
         BpfPolicyCommands::Flush { endpoint_id } => {
             bpf::flush_policy_map(*endpoint_id)?;
-            println!("Policy map flushed");
+            tracing::info!("Policy map flushed");
         }
     }
     Ok(())
@@ -374,15 +380,15 @@ fn execute_bpf_ct_command(cmd: &BpfCtCommands) -> Result<(), Box<dyn std::error:
     match cmd {
         BpfCtCommands::List { ct_type: _ } => {
             let maps = bpf::list_ct_maps()?;
-            println!("{:<20} {}", "MAP", "TYPE");
-            println!("{:<20} {}", "===", "====");
+            tracing::info!("{:<20} {}", "MAP", "TYPE");
+            tracing::info!("{:<20} {}", "===", "====");
             for (name, map_type) in maps {
-                println!("{:<20} {}", name, map_type);
+                tracing::info!("{:<20} {}", name, map_type);
             }
         }
 
         BpfCtCommands::Flush { ct_type } => {
-            println!("Connection tracking map {} flushed", ct_type);
+            tracing::info!("Connection tracking map {} flushed", ct_type);
         }
     }
     Ok(())
@@ -394,15 +400,15 @@ fn execute_bpf_endpoint_command(
     match cmd {
         BpfEndpointCommands::List => {
             let maps = bpf::list_endpoint_maps()?;
-            println!("{:<20} {}", "MAP", "TYPE");
-            println!("{:<20} {}", "===", "====");
+            tracing::info!("{:<20} {}", "MAP", "TYPE");
+            tracing::info!("{:<20} {}", "===", "====");
             for (name, map_type) in maps {
-                println!("{:<20} {}", name, map_type);
+                tracing::info!("{:<20} {}", name, map_type);
             }
         }
 
         BpfEndpointCommands::Delete { endpoint_id } => {
-            println!("Endpoint {} deleted", endpoint_id);
+            tracing::info!("Endpoint {} deleted", endpoint_id);
         }
     }
     Ok(())
@@ -416,18 +422,21 @@ fn execute_bpf_auth_command(
         BpfAuthCommands::List => {
             let entries = bpf::dump_auth_map()?;
             if is_json {
-                println!("{}", serde_json::to_string_pretty(&entries)?);
+                tracing::info!("{}", serde_json::to_string_pretty(&entries)?);
             } else {
                 let mut data = std::collections::HashMap::new();
                 for (i, entry) in entries.iter().enumerate() {
-                    data.insert(i.to_string(), entry.iter().map(|(_, v)| v.clone()).collect());
+                    data.insert(
+                        i.to_string(),
+                        entry.iter().map(|(_, v)| v.clone()).collect(),
+                    );
                 }
                 print_map_table(&data, "Index", "Auth Entry");
             }
         }
 
         BpfAuthCommands::Flush => {
-            println!("Authentication map flushed");
+            tracing::info!("Authentication map flushed");
         }
     }
     Ok(())
@@ -441,11 +450,14 @@ fn execute_bpf_bandwidth_command(
         BpfBandwidthCommands::List => {
             let entries = bpf::dump_bandwidth_map()?;
             if is_json {
-                println!("{}", serde_json::to_string_pretty(&entries)?);
+                tracing::info!("{}", serde_json::to_string_pretty(&entries)?);
             } else {
                 let mut data = std::collections::HashMap::new();
                 for (i, entry) in entries.iter().enumerate() {
-                    data.insert(i.to_string(), entry.iter().map(|(_, v)| v.clone()).collect());
+                    data.insert(
+                        i.to_string(),
+                        entry.iter().map(|(_, v)| v.clone()).collect(),
+                    );
                 }
                 print_map_table(&data, "Index", "Bandwidth Info");
             }
@@ -462,7 +474,7 @@ fn execute_bpf_config_command(
         BpfConfigCommands::List => {
             let config = bpf::dump_config_map()?;
             if is_json {
-                println!("{}", serde_json::to_string_pretty(&config)?);
+                tracing::info!("{}", serde_json::to_string_pretty(&config)?);
             } else {
                 let mut data = std::collections::HashMap::new();
                 for (key, value) in config {
@@ -483,39 +495,37 @@ fn execute_service_command(
         ServiceCommands::List => {
             let services = service::list_services()?;
             if is_json {
-                println!("{}", print_services_json(&services)?);
+                tracing::info!("{}", print_services_json(&services)?);
             } else {
                 print_services_table(&services);
             }
         }
 
-        ServiceCommands::Get { service_id } => {
-            match service::get_service(*service_id)? {
-                Some(svc) => {
-                    if is_json {
-                        println!("{}", serde_json::to_string_pretty(&svc)?);
-                    } else {
-                        println!("Service ID: {}", svc.id.0);
-                        println!("Frontend: {}", svc.frontend);
-                        println!("Type: {}", svc.service_type);
-                        println!("Backends:");
-                        for (i, backend) in svc.backends.iter().enumerate() {
-                            println!(
-                                "  {}: {} (state: {}, preferred: {})",
-                                i + 1,
-                                backend.address,
-                                backend.state,
-                                backend.preferred
-                            );
-                        }
+        ServiceCommands::Get { service_id } => match service::get_service(*service_id)? {
+            Some(svc) => {
+                if is_json {
+                    tracing::info!("{}", serde_json::to_string_pretty(&svc)?);
+                } else {
+                    tracing::info!("Service ID: {}", svc.id.0);
+                    tracing::info!("Frontend: {}", svc.frontend);
+                    tracing::info!("Type: {}", svc.service_type);
+                    tracing::info!("Backends:");
+                    for (i, backend) in svc.backends.iter().enumerate() {
+                        tracing::info!(
+                            "  {}: {} (state: {}, preferred: {})",
+                            i + 1,
+                            backend.address,
+                            backend.state,
+                            backend.preferred
+                        );
                     }
                 }
-                None => {
-                    eprintln!("Service {} not found", service_id);
-                    process::exit(1);
-                }
             }
-        }
+            None => {
+                tracing::error!("Service {} not found", service_id);
+                process::exit(1);
+            }
+        },
     }
     Ok(())
 }
@@ -528,52 +538,50 @@ fn execute_endpoint_command(
         EndpointCommands::List => {
             let endpoints = endpoint::list_endpoints()?;
             if is_json {
-                println!("{}", print_endpoints_json(&endpoints)?);
+                tracing::info!("{}", print_endpoints_json(&endpoints)?);
             } else {
                 print_endpoints_table(&endpoints);
             }
         }
 
-        EndpointCommands::Get { endpoint_id } => {
-            match endpoint::get_endpoint(*endpoint_id)? {
-                Some(ep) => {
-                    if is_json {
-                        println!("{}", serde_json::to_string_pretty(&ep)?);
-                    } else {
-                        println!("Endpoint ID: {}", ep.id.0);
-                        println!("State: {}", ep.state);
-                        if let Some(ipv4) = ep.ipv4 {
-                            println!("IPv4: {}", ipv4);
-                        }
-                        if let Some(ipv6) = ep.ipv6 {
-                            println!("IPv6: {}", ipv6);
-                        }
-                        if let Some(id) = ep.identity {
-                            println!("Identity: {}", id.0);
-                        }
-                        if !ep.labels.is_empty() {
-                            println!("Labels:");
-                            for (k, v) in &ep.labels {
-                                println!("  {}={}", k, v);
-                            }
+        EndpointCommands::Get { endpoint_id } => match endpoint::get_endpoint(*endpoint_id)? {
+            Some(ep) => {
+                if is_json {
+                    tracing::info!("{}", serde_json::to_string_pretty(&ep)?);
+                } else {
+                    tracing::info!("Endpoint ID: {}", ep.id.0);
+                    tracing::info!("State: {}", ep.state);
+                    if let Some(ipv4) = ep.ipv4 {
+                        tracing::info!("IPv4: {}", ipv4);
+                    }
+                    if let Some(ipv6) = ep.ipv6 {
+                        tracing::info!("IPv6: {}", ipv6);
+                    }
+                    if let Some(id) = ep.identity {
+                        tracing::info!("Identity: {}", id.0);
+                    }
+                    if !ep.labels.is_empty() {
+                        tracing::info!("Labels:");
+                        for (k, v) in &ep.labels {
+                            tracing::info!("  {}={}", k, v);
                         }
                     }
                 }
-                None => {
-                    eprintln!("Endpoint {} not found", endpoint_id);
-                    process::exit(1);
-                }
             }
-        }
+            None => {
+                tracing::error!("Endpoint {} not found", endpoint_id);
+                process::exit(1);
+            }
+        },
 
         EndpointCommands::Status { endpoint_id } => {
             let status = endpoint::get_endpoint_status(*endpoint_id)?;
-            println!("{}", status);
+            tracing::info!("{}", status);
         }
 
         EndpointCommands::Delete { endpoint_id } => {
             endpoint::delete_endpoint(*endpoint_id)?;
-            println!("Endpoint {} deleted", endpoint_id);
+            tracing::info!("Endpoint {} deleted", endpoint_id);
         }
     }
     Ok(())
@@ -587,10 +595,10 @@ fn execute_policy_command(
         PolicyCommands::List => {
             let all_policies = policy::dump_all_policies()?;
             if is_json {
-                println!("{}", serde_json::to_string_pretty(&all_policies)?);
+                tracing::info!("{}", serde_json::to_string_pretty(&all_policies)?);
             } else {
                 for (endpoint_id, policies) in all_policies {
-                    println!("\nEndpoint {}:", endpoint_id);
+                    tracing::info!("\nEndpoint {}:", endpoint_id);
                     print_policies_table(&policies);
                 }
             }
@@ -599,7 +607,7 @@ fn execute_policy_command(
         PolicyCommands::Get { endpoint_id } => {
             let policies = policy::get_endpoint_policies(*endpoint_id)?;
             if is_json {
-                println!("{}", print_policies_json(&policies)?);
+                tracing::info!("{}", print_policies_json(&policies)?);
             } else {
                 print_policies_table(&policies);
             }
@@ -614,7 +622,7 @@ fn execute_policy_command(
             let dir: seriousum_dbg::TrafficDirection = direction.parse()?;
             let id = seriousum_dbg::NumericIdentity(*identity);
             policy::add_policy_rule(*endpoint_id, dir, id, *port, "tcp", true)?;
-            println!("Policy rule added");
+            tracing::info!("Policy rule added");
         }
 
         PolicyCommands::Remove {
@@ -623,7 +631,7 @@ fn execute_policy_command(
         } => {
             let id = seriousum_dbg::NumericIdentity(*identity);
             policy::remove_policy_rule(*endpoint_id, seriousum_dbg::TrafficDirection::Ingress, id)?;
-            println!("Policy rule removed");
+            tracing::info!("Policy rule removed");
         }
     }
     Ok(())

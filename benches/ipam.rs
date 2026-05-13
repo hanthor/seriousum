@@ -19,15 +19,19 @@ fn bench_ipam_allocate(c: &mut Criterion) {
 
     for pool_size in [64usize, 256, 1024, 4096] {
         group.throughput(Throughput::Elements(1));
-        group.bench_with_input(BenchmarkId::new("pool_size", pool_size), &pool_size, |b, &pool_size| {
-            b.iter(|| {
-                let rt = tokio::runtime::Runtime::new().unwrap();
-                rt.block_on(async {
-                    let ipam = make_manager(pool_size);
-                    black_box(ipam.allocate_ip().await.unwrap())
+        group.bench_with_input(
+            BenchmarkId::new("pool_size", pool_size),
+            &pool_size,
+            |b, &pool_size| {
+                b.iter(|| {
+                    let rt = tokio::runtime::Runtime::new().unwrap();
+                    rt.block_on(async {
+                        let ipam = make_manager(pool_size);
+                        black_box(ipam.allocate_ip().await.unwrap())
+                    })
                 })
-            })
-        });
+            },
+        );
     }
 
     group.finish();

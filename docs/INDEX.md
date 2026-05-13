@@ -2,7 +2,7 @@
 
 Current, maintained documentation for Seriousum.
 
-This directory is intentionally limited to docs that are still current. Historical planning/spec material has been moved to `docs/archive/`.
+This directory is intentionally limited to docs that are still current.
 
 ---
 
@@ -47,16 +47,7 @@ A doc stays in `docs/` only if it is one of:
 - a current parity/evidence artifact
 - a generated evidence artifact
 
-Planning docs, implementation specs, release-time snapshots, and superseded strategies belong in `docs/archive/`.
-
----
-
-## Archived material
-
-Historical docs are in:
-- `docs/archive/`
-
-These are preserved for context, but they are not the current source of truth.
+Planning docs, implementation specs, release-time snapshots, and superseded strategies are removed from the active documentation set.
 
 ---
 

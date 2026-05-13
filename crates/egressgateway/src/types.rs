@@ -3,8 +3,8 @@
 
 //! Core types for egress gateway
 
-use std::net::{Ipv4Addr, Ipv6Addr};
 use std::collections::HashMap;
+use std::net::{Ipv4Addr, Ipv6Addr};
 
 /// Special IPv4 addresses used as sentinel values in BPF policy maps
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -361,13 +361,11 @@ mod tests {
         labels.insert("app".to_string(), "web".to_string());
         labels.insert("tier".to_string(), "frontend".to_string());
 
-        let selector = LabelSelector::new()
-            .with_match_label("app", "web");
+        let selector = LabelSelector::new().with_match_label("app", "web");
 
         assert!(selector.matches(&labels));
 
-        let selector2 = LabelSelector::new()
-            .with_match_label("app", "db");
+        let selector2 = LabelSelector::new().with_match_label("app", "db");
 
         assert!(!selector2.matches(&labels));
     }

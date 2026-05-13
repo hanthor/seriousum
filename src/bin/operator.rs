@@ -4,6 +4,6 @@
 // cargo run (from crates/operator/)
 
 fn main() -> anyhow::Result<()> {
-    eprintln!("Please run: cargo run --bin seriousum-operator from workspace root");
+    tracing::error!("Please run: cargo run --bin seriousum-operator from workspace root");
     Ok(())
 }

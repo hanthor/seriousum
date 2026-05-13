@@ -5,26 +5,21 @@
 //! - JSON output with serde_json
 //! - Compact/text output
 
-use crate::{ConnectionTrackingEntry, Endpoint, PolicyEntry, Service, ServiceBackend};
+use crate::{ConnectionTrackingEntry, Endpoint, PolicyEntry, Service};
 use serde_json::json;
 use std::collections::HashMap;
-use std::io::Write;
+use tracing::info;
 
 /// Output format for command results
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum OutputFormat {
     /// Human-readable table format
+    #[default]
     Table,
     /// JSON format
     Json,
     /// Compact text format
     Text,
-}
-
-impl Default for OutputFormat {
-    fn default() -> Self {
-        OutputFormat::Table
-    }
 }
 
 /// Table printer with header and rows
@@ -50,7 +45,7 @@ impl TablePrinter {
     /// Print the table to stdout
     pub fn print(&self) {
         if self.rows.is_empty() {
-            println!("No entries found");
+            info!("No entries found");
             return;
         }
 
@@ -72,13 +67,13 @@ impl TablePrinter {
         for (i, header) in self.headers.iter().enumerate() {
             print!("{:<width$}  ", header, width = widths[i]);
         }
-        println!();
+        info!("");
 
         // Print separator
         for (i, _) in self.headers.iter().enumerate() {
             print!("{:<width$}  ", "=".repeat(widths[i]), width = widths[i]);
         }
-        println!();
+        info!("");
 
         // Print rows
         for row in &self.rows {
@@ -87,7 +82,7 @@ impl TablePrinter {
                     print!("{:<width$}  ", cell, width = widths[i]);
                 }
             }
-            println!();
+            info!("");
         }
     }
 
@@ -256,7 +251,7 @@ pub fn print_ct_entries_json(entries: &[ConnectionTrackingEntry]) -> serde_json:
 /// Print a map as a key-value table
 pub fn print_map_table(data: &HashMap<String, Vec<String>>, key_title: &str, value_title: &str) {
     if data.is_empty() {
-        println!("No entries found");
+        info!("No entries found");
         return;
     }
 
