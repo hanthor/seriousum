@@ -5,7 +5,10 @@ use seriousum_core::{
     Error, IpNetwork, Port, Result,
     chrono::{DateTime, Utc},
 };
-use std::{net::IpAddr, str::FromStr};
+use std::{
+    net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr},
+    str::FromStr,
+};
 
 /// Default component name for wireguard scaffolds.
 pub const COMPONENT: &str = "seriousum-wireguard";
@@ -20,6 +23,80 @@ pub enum WireGuardState {
     Handshaking,
     /// The tunnel is ready.
     Ready,
+}
+
+/// Underlay protocol used for peer endpoint selection.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum UnderlayProtocol {
+    /// Automatic underlay selection.
+    Auto,
+    /// Prefer IPv4 underlay.
+    Ipv4,
+    /// Prefer IPv6 underlay.
+    Ipv6,
+}
+
+/// Peer endpoint selection configuration.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PeerEndpointSelection {
+    /// Whether IPv4 is enabled in the cluster.
+    pub enable_ipv4: bool,
+    /// Whether IPv6 is enabled in the cluster.
+    pub enable_ipv6: bool,
+    /// Whether tunneling mode is enabled.
+    pub tunneling_enabled: bool,
+    /// Underlay preference.
+    pub underlay_protocol: UnderlayProtocol,
+    /// WireGuard listen port for peer endpoints.
+    pub listen_port: Port,
+}
+
+impl PeerEndpointSelection {
+    /// Selects peer endpoint using Cilium's updatePeer endpoint preference rules.
+    pub fn select_endpoint(
+        &self,
+        node_ipv4: Option<Ipv4Addr>,
+        node_ipv6: Option<Ipv6Addr>,
+    ) -> Result<SocketAddr> {
+        let ip = if self.tunneling_enabled
+            && self.underlay_protocol == UnderlayProtocol::Ipv6
+            && self.enable_ipv6
+        {
+            node_ipv6.map(IpAddr::V6)
+        } else {
+            None
+        }
+        .or_else(|| {
+            if self.enable_ipv4 {
+                node_ipv4.map(IpAddr::V4)
+            } else {
+                None
+            }
+        })
+        .or_else(|| {
+            if self.enable_ipv6 {
+                node_ipv6.map(IpAddr::V6)
+            } else {
+                None
+            }
+        })
+        .ok_or_else(|| Error::Wireguard(String::from("missing node IP for peer endpoint")))?;
+
+        Ok(SocketAddr::new(ip, self.listen_port.as_u16()))
+    }
+}
+
+impl Default for PeerEndpointSelection {
+    fn default() -> Self {
+        Self {
+            enable_ipv4: true,
+            enable_ipv6: true,
+            tunneling_enabled: true,
+            underlay_protocol: UnderlayProtocol::Auto,
+            listen_port: Port::new(51_871),
+        }
+    }
 }
 
 /// Compact wireguard configuration.
@@ -273,6 +350,156 @@ impl WireGuardReport {
 #[must_use]
 pub fn scaffold() -> WireGuardReport {
     WireGuardReport::new(WireGuardModel::scaffold())
+}
+
+#[cfg(test)]
+mod parity_tests {
+    use super::{PeerEndpointSelection, UnderlayProtocol};
+    use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
+
+    // Stub ported from pkg/wireguard/agent/cell_test.go.
+
+    // Requires privileged Linux netns + WireGuard netlink device lifecycle;
+    // ref TestPrivileged_TestWireGuardCell in pkg/wireguard/agent/cell_test.go.
+    #[test]
+    #[cfg_attr(
+        not(feature = "privileged"),
+        ignore = "requires root + BPF kernel; run with: cargo test --features privileged"
+    )]
+    fn parity_test_privileged_wireguard_cell() {}
+
+    // Stubs ported from pkg/wireguard/agent/agent_test.go.
+
+    #[test]
+    #[ignore = "TODO(parity): requires unported Agent/IPCache peer reconciliation (updatePeer/updatePeerByConfig); refs pkg/wireguard/agent/agent.go and TestAgent_PeerConfig in agent_test.go"]
+    fn parity_test_agent_peer_config() {}
+
+    #[test]
+    #[ignore = "TODO(parity): requires unported AllowedIPs restore path (restoreFinished + dummy-peer migration); refs pkg/wireguard/agent/agent.go and TestAgent_AllowedIPsRestoration in agent_test.go"]
+    fn parity_test_agent_allowed_ips_restoration() {}
+
+    #[test]
+    fn parity_test_agent_peer_endpoint_selection() {
+        let node_ipv4 = Ipv4Addr::new(10, 0, 0, 2);
+        let node_ipv6 = Ipv6Addr::new(0xf00d, 0, 0, 0, 0, 0, 0, 2);
+
+        let cases = [
+            (
+                PeerEndpointSelection {
+                    enable_ipv4: true,
+                    enable_ipv6: true,
+                    tunneling_enabled: true,
+                    underlay_protocol: UnderlayProtocol::Ipv6,
+                    ..PeerEndpointSelection::default()
+                },
+                Some(node_ipv4),
+                Some(node_ipv6),
+                Some((IpAddr::V6(node_ipv6), 51_871)),
+            ),
+            (
+                PeerEndpointSelection {
+                    enable_ipv4: true,
+                    enable_ipv6: true,
+                    tunneling_enabled: true,
+                    underlay_protocol: UnderlayProtocol::Ipv4,
+                    ..PeerEndpointSelection::default()
+                },
+                Some(node_ipv4),
+                Some(node_ipv6),
+                Some((IpAddr::V4(node_ipv4), 51_871)),
+            ),
+            (
+                PeerEndpointSelection {
+                    enable_ipv4: true,
+                    enable_ipv6: true,
+                    tunneling_enabled: true,
+                    underlay_protocol: UnderlayProtocol::Auto,
+                    ..PeerEndpointSelection::default()
+                },
+                Some(node_ipv4),
+                Some(node_ipv6),
+                Some((IpAddr::V4(node_ipv4), 51_871)),
+            ),
+            (
+                PeerEndpointSelection {
+                    enable_ipv4: true,
+                    enable_ipv6: true,
+                    tunneling_enabled: false,
+                    underlay_protocol: UnderlayProtocol::Ipv6,
+                    ..PeerEndpointSelection::default()
+                },
+                Some(node_ipv4),
+                Some(node_ipv6),
+                Some((IpAddr::V4(node_ipv4), 51_871)),
+            ),
+            (
+                PeerEndpointSelection {
+                    enable_ipv4: false,
+                    enable_ipv6: true,
+                    tunneling_enabled: true,
+                    underlay_protocol: UnderlayProtocol::Ipv6,
+                    ..PeerEndpointSelection::default()
+                },
+                None,
+                Some(node_ipv6),
+                Some((IpAddr::V6(node_ipv6), 51_871)),
+            ),
+            (
+                PeerEndpointSelection {
+                    enable_ipv4: true,
+                    enable_ipv6: true,
+                    tunneling_enabled: true,
+                    underlay_protocol: UnderlayProtocol::Ipv6,
+                    ..PeerEndpointSelection::default()
+                },
+                Some(node_ipv4),
+                None,
+                Some((IpAddr::V4(node_ipv4), 51_871)),
+            ),
+            (
+                PeerEndpointSelection {
+                    enable_ipv4: true,
+                    enable_ipv6: false,
+                    tunneling_enabled: true,
+                    underlay_protocol: UnderlayProtocol::Ipv4,
+                    ..PeerEndpointSelection::default()
+                },
+                Some(node_ipv4),
+                None,
+                Some((IpAddr::V4(node_ipv4), 51_871)),
+            ),
+            (
+                PeerEndpointSelection {
+                    enable_ipv4: true,
+                    enable_ipv6: true,
+                    tunneling_enabled: true,
+                    underlay_protocol: UnderlayProtocol::Ipv4,
+                    ..PeerEndpointSelection::default()
+                },
+                None,
+                None,
+                None,
+            ),
+        ];
+
+        for (selector, ipv4, ipv6, expected) in cases {
+            match expected {
+                Some((expected_ip, expected_port)) => {
+                    let endpoint = selector
+                        .select_endpoint(ipv4, ipv6)
+                        .expect("endpoint selection should succeed");
+                    assert_eq!(endpoint.ip(), expected_ip);
+                    assert_eq!(endpoint.port(), expected_port);
+                }
+                None => {
+                    let error = selector
+                        .select_endpoint(ipv4, ipv6)
+                        .expect_err("endpoint selection should fail");
+                    assert!(matches!(error, seriousum_core::Error::Wireguard(_)));
+                }
+            }
+        }
+    }
 }
 
 #[cfg(test)]

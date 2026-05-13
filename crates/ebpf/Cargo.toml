@@ -3,6 +3,9 @@ name = "seriousum-ebpf"
 version.workspace = true
 edition.workspace = true
 
+[features]
+privileged = []
+
 [dependencies]
 thiserror = "2"
 dashmap = "6"

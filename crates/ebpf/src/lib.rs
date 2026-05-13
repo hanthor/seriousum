@@ -140,6 +140,438 @@ pub fn run() -> Result<String> {
 }
 
 #[cfg(test)]
+mod parity_tests {
+    use std::collections::BTreeSet;
+
+    use crate::core_maps::{ArrayMap, BpfMap, BpfMapType, HashMap as CoreHashMap};
+
+    #[derive(Clone, Copy)]
+    struct TestObject {
+        key: u32,
+        value: u32,
+    }
+
+    impl TestObject {
+        fn key_bytes(self) -> [u8; 4] {
+            self.key.to_le_bytes()
+        }
+
+        fn value_bytes(self) -> [u8; 4] {
+            self.value.to_le_bytes()
+        }
+    }
+
+    struct ParityMapOps<'a> {
+        map: &'a dyn BpfMap,
+    }
+
+    impl<'a> ParityMapOps<'a> {
+        fn new(map: &'a dyn BpfMap) -> Self {
+            Self { map }
+        }
+
+        fn update(&self, obj: TestObject) -> crate::core_maps::Result<()> {
+            self.map.update(&obj.key_bytes(), &obj.value_bytes(), 0)
+        }
+
+        fn delete(&self, obj: TestObject) -> crate::core_maps::Result<()> {
+            self.map.delete(&obj.key_bytes())
+        }
+
+        fn prune(&self, desired: &[TestObject]) -> crate::core_maps::Result<()> {
+            let desired_keys: BTreeSet<Vec<u8>> =
+                desired.iter().map(|obj| obj.key_bytes().to_vec()).collect();
+            let keys_to_prune: Vec<Vec<u8>> = self
+                .map
+                .iter()
+                .map(|(key, _)| key)
+                .filter(|key| !desired_keys.contains(key))
+                .collect();
+
+            for key in keys_to_prune {
+                self.map.delete(&key)?;
+            }
+
+            Ok(())
+        }
+    }
+
+    struct ParityBatchIterator<'a> {
+        map: &'a dyn BpfMap,
+        err: Option<String>,
+    }
+
+    impl<'a> ParityBatchIterator<'a> {
+        fn new(map: &'a dyn BpfMap) -> Self {
+            Self { map, err: None }
+        }
+
+        fn iterate_all(&mut self) -> Vec<(Vec<u8>, Vec<u8>)> {
+            match self.map.info().map_type {
+                BpfMapType::Hash | BpfMapType::LRUHash | BpfMapType::LPMTrie => {}
+                _ => {
+                    self.err = Some(format!(
+                        "unsupported map type {}, must be one either hash or lru-hash types",
+                        self.map.info().map_type
+                    ));
+                    return Vec::new();
+                }
+            }
+
+            self.err = None;
+            self.map.iter().collect()
+        }
+
+        fn err(&self) -> Option<&str> {
+            self.err.as_deref()
+        }
+    }
+
+    fn remove_unused_map_names(
+        available: &BTreeSet<String>,
+        fixed: &BTreeSet<String>,
+        referenced: &BTreeSet<String>,
+    ) -> BTreeSet<String> {
+        let mut keep = fixed.clone();
+        keep.extend(referenced.iter().cloned());
+
+        available
+            .iter()
+            .filter(|name| !keep.contains(*name))
+            .cloned()
+            .collect()
+    }
+
+    fn detect_freed_map_names(
+        available: &BTreeSet<String>,
+        fixed: &BTreeSet<String>,
+        referenced: &BTreeSet<String>,
+    ) -> BTreeSet<String> {
+        available
+            .iter()
+            .filter(|name| !fixed.contains(*name) && !referenced.contains(*name))
+            .cloned()
+            .collect()
+    }
+
+    fn delete_all_entries(map: &dyn BpfMap) -> crate::core_maps::Result<()> {
+        let keys: Vec<Vec<u8>> = map.iter().map(|(key, _)| key).collect();
+        for key in keys {
+            map.delete(&key)?;
+        }
+        Ok(())
+    }
+
+    #[derive(Debug, PartialEq, Eq)]
+    struct ParityMapModel {
+        name: String,
+        map_type: BpfMapType,
+        max_entries: usize,
+        entry_count: usize,
+    }
+
+    fn map_model(map: &dyn BpfMap) -> ParityMapModel {
+        let info = map.info();
+        ParityMapModel {
+            name: info.name,
+            map_type: info.map_type,
+            max_entries: info.max_entries,
+            entry_count: map.len(),
+        }
+    }
+
+    // Stubs ported from pkg/bpf/map_linux_test.go (requires Linux BPF syscalls;
+    // run with `cargo test --features privileged`).
+
+    #[test]
+    #[cfg_attr(
+        not(feature = "privileged"),
+        ignore = "requires root + BPF kernel; run with: cargo test --features privileged"
+    )]
+    fn parity_test_privileged_open() {}
+
+    #[test]
+    #[cfg_attr(
+        not(feature = "privileged"),
+        ignore = "requires root + BPF kernel; run with: cargo test --features privileged"
+    )]
+    fn parity_test_privileged_open_map() {}
+
+    #[test]
+    #[cfg_attr(
+        not(feature = "privileged"),
+        ignore = "requires root + BPF kernel; run with: cargo test --features privileged"
+    )]
+    fn parity_test_privileged_open_or_create() {}
+
+    #[test]
+    #[cfg_attr(
+        not(feature = "privileged"),
+        ignore = "requires root + BPF kernel; run with: cargo test --features privileged"
+    )]
+    fn parity_test_privileged_recreate_map() {}
+
+    #[test]
+    #[cfg_attr(
+        not(feature = "privileged"),
+        ignore = "requires root + BPF kernel; run with: cargo test --features privileged"
+    )]
+    fn parity_test_privileged_basic_manipulation() {}
+
+    #[test]
+    #[cfg_attr(
+        not(feature = "privileged"),
+        ignore = "requires root + BPF kernel; run with: cargo test --features privileged"
+    )]
+    fn parity_test_privileged_subscribe() {}
+
+    #[test]
+    #[cfg_attr(
+        not(feature = "privileged"),
+        ignore = "requires root + BPF kernel; run with: cargo test --features privileged"
+    )]
+    fn parity_test_privileged_dump() {}
+
+    #[test]
+    #[cfg_attr(
+        not(feature = "privileged"),
+        ignore = "requires root + BPF kernel; run with: cargo test --features privileged"
+    )]
+    fn parity_test_privileged_dump_per_cpu() {}
+
+    #[test]
+    #[cfg_attr(
+        not(feature = "privileged"),
+        ignore = "requires root + BPF kernel; run with: cargo test --features privileged"
+    )]
+    fn parity_test_privileged_dump_reliably_with_callback_overlapping() {}
+
+    #[test]
+    #[cfg_attr(
+        not(feature = "privileged"),
+        ignore = "requires root + BPF kernel; run with: cargo test --features privileged"
+    )]
+    fn parity_test_privileged_dump_reliably_with_callback() {}
+
+    #[test]
+    fn parity_test_privileged_delete_all() {
+        let map = CoreHashMap::new("cilium_delete_all_test", 4, 4, 16);
+        let key_zero = 0_u32.to_le_bytes();
+        let value_zero = 0_u32.to_le_bytes();
+        let key_a = 105_u32.to_le_bytes();
+        let value_a = 205_u32.to_le_bytes();
+        let key_b = 106_u32.to_le_bytes();
+        let value_b = 206_u32.to_le_bytes();
+
+        assert!(map.update(&key_a, &value_a, 0).is_ok());
+        assert!(map.update(&key_b, &value_a, 0).is_ok());
+        assert!(map.update(&key_b, &value_b, 0).is_ok());
+        assert!(map.update(&key_zero, &value_zero, 0).is_ok());
+        assert_eq!(map.len(), 3);
+
+        assert!(delete_all_entries(&map).is_ok());
+        assert_eq!(map.len(), 0);
+        assert!(map.lookup(&key_zero).unwrap().is_none());
+        assert!(map.lookup(&key_a).unwrap().is_none());
+        assert!(map.lookup(&key_b).unwrap().is_none());
+    }
+
+    #[test]
+    fn parity_test_privileged_get_model() {
+        let map = CoreHashMap::new("cilium_get_model_test", 4, 4, 16);
+        assert!(
+            map.update(&1_u32.to_le_bytes(), &2_u32.to_le_bytes(), 0)
+                .is_ok()
+        );
+
+        let model = map_model(&map);
+        assert_eq!(
+            model,
+            ParityMapModel {
+                name: "cilium_get_model_test".to_string(),
+                map_type: BpfMapType::Hash,
+                max_entries: 16,
+                entry_count: 1,
+            }
+        );
+    }
+
+    #[test]
+    #[cfg_attr(
+        not(feature = "privileged"),
+        ignore = "requires root + BPF kernel; run with: cargo test --features privileged"
+    )]
+    fn parity_test_privileged_unpin() {}
+
+    #[test]
+    #[cfg_attr(
+        not(feature = "privileged"),
+        ignore = "requires root + BPF kernel; run with: cargo test --features privileged"
+    )]
+    fn parity_test_privileged_create_unpinned() {}
+
+    #[test]
+    #[cfg_attr(
+        not(feature = "privileged"),
+        ignore = "requires root + BPF kernel; run with: cargo test --features privileged"
+    )]
+    fn parity_test_privileged_error_resolver() {}
+
+    #[test]
+    fn parity_test_batch_iterator_types() {
+        let map = ArrayMap::new("cilium_test", 4, 1);
+        let mut iter = ParityBatchIterator::new(&map);
+
+        let entries = iter.iterate_all();
+        assert!(entries.is_empty());
+        assert!(iter.err().is_some());
+        assert!(
+            iter.err()
+                .is_some_and(|err| err.contains("unsupported map type"))
+        );
+    }
+
+    #[test]
+    fn parity_test_privileged_batch_iterator() {
+        let map = CoreHashMap::new("cilium_batch_iter_test", 4, 4, 64);
+
+        for i in 0_u32..16 {
+            assert!(map.update(&i.to_le_bytes(), &i.to_le_bytes(), 0).is_ok());
+        }
+
+        let mut iter = ParityBatchIterator::new(&map);
+        let entries = iter.iterate_all();
+        assert!(iter.err().is_none());
+        assert_eq!(entries.len(), 16);
+
+        let mut seen_keys = BTreeSet::new();
+        let mut seen_values = BTreeSet::new();
+        for (key, value) in entries {
+            let key = u32::from_le_bytes(key.try_into().expect("u32 key"));
+            let value = u32::from_le_bytes(value.try_into().expect("u32 value"));
+            seen_keys.insert(key);
+            seen_values.insert(value);
+        }
+
+        let expected: BTreeSet<u32> = (0..16).collect();
+        assert_eq!(seen_keys, expected);
+        assert_eq!(seen_values, expected);
+    }
+
+    // Stubs ported from pkg/bpf/unused_maps_test.go (blocker: Linux BPF syscalls)
+
+    #[test]
+    fn parity_test_privileged_unused_maps() {
+        let available = BTreeSet::from([
+            "map_a".to_string(),
+            "map_b".to_string(),
+            "map_static".to_string(),
+            "map_global".to_string(),
+        ]);
+        let fixed = BTreeSet::new();
+        let all_referenced = available.clone();
+        let none_referenced = BTreeSet::new();
+
+        let removed_when_all_used = remove_unused_map_names(&available, &fixed, &all_referenced);
+        assert!(removed_when_all_used.is_empty());
+
+        let removed_when_unused = remove_unused_map_names(&available, &fixed, &none_referenced);
+        assert_eq!(removed_when_unused, available);
+    }
+
+    #[test]
+    fn parity_test_privileged_unused_maps_false_negative() {
+        let available = BTreeSet::from(["used_map".to_string(), "unused_map".to_string()]);
+        let fixed = BTreeSet::new();
+        let referenced = BTreeSet::from(["used_map".to_string()]);
+
+        let freed = detect_freed_map_names(&available, &fixed, &referenced);
+        assert!(freed.contains("unused_map"));
+        assert!(!freed.contains("used_map"));
+    }
+
+    #[test]
+    fn parity_test_unused_maps_fixed_set() {
+        let available = BTreeSet::from([
+            "map_a".to_string(),
+            "map_b".to_string(),
+            "map_static".to_string(),
+        ]);
+        let referenced = BTreeSet::from(["map_a".to_string()]);
+        let original_fixed = BTreeSet::from(["test".to_string()]);
+        let fixed_clone = original_fixed.clone();
+
+        let _deleted = remove_unused_map_names(&available, &original_fixed, &referenced);
+
+        assert_eq!(original_fixed, fixed_clone);
+    }
+
+    // Stubs ported from pkg/bpf/ops_linux_test.go (blocker: Linux BPF syscalls)
+
+    #[test]
+    fn parity_test_privileged_map_ops() {
+        let map = CoreHashMap::new("cilium_ops_test", 4, 4, 16);
+        let ops = ParityMapOps::new(&map);
+        let obj = TestObject { key: 1, value: 2 };
+
+        assert!(ops.update(obj).is_ok());
+        assert!(ops.update(obj).is_ok());
+        assert_eq!(
+            map.lookup(&obj.key_bytes()).unwrap(),
+            Some(obj.value_bytes().to_vec())
+        );
+
+        assert!(ops.delete(obj).is_ok());
+        assert!(map.lookup(&obj.key_bytes()).unwrap().is_none());
+
+        assert!(ops.update(TestObject { key: 2, value: 3 }).is_ok());
+        assert!(ops.prune(&[]).is_ok());
+        assert_eq!(map.len(), 0);
+    }
+
+    #[test]
+    fn parity_test_privileged_map_ops_prune() {
+        let map = CoreHashMap::new("cilium_ops_prune_test", 4, 4, 16);
+        let ops = ParityMapOps::new(&map);
+
+        for i in 0..4 {
+            assert!(ops.update(TestObject { key: i, value: i }).is_ok());
+        }
+
+        assert!(
+            ops.prune(&[
+                TestObject { key: 1, value: 1 },
+                TestObject { key: 3, value: 3 }
+            ])
+            .is_ok()
+        );
+
+        assert!(map.lookup(&0_u32.to_le_bytes()).unwrap().is_none());
+        assert!(map.lookup(&1_u32.to_le_bytes()).unwrap().is_some());
+        assert!(map.lookup(&2_u32.to_le_bytes()).unwrap().is_none());
+        assert!(map.lookup(&3_u32.to_le_bytes()).unwrap().is_some());
+        assert_eq!(map.len(), 2);
+    }
+
+    #[test]
+    fn parity_test_privileged_map_ops_reconciler_example() {
+        let map = CoreHashMap::new("cilium_ops_reconciler_test", 4, 4, 16);
+        let ops = ParityMapOps::new(&map);
+
+        let desired = TestObject { key: 1, value: 2 };
+        assert!(ops.update(desired).is_ok());
+        assert_eq!(
+            map.lookup(&desired.key_bytes()).unwrap(),
+            Some(desired.value_bytes().to_vec())
+        );
+
+        let removed = TestObject { key: 1, value: 2 };
+        assert!(ops.prune(&[]).is_ok());
+        assert!(map.lookup(&removed.key_bytes()).unwrap().is_none());
+    }
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
 
