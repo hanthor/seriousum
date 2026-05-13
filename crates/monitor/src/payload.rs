@@ -89,15 +89,12 @@ impl Payload {
     /// Encodes the payload into a native-endian length-prefixed binary envelope.
     #[must_use]
     pub fn encode(&self) -> Vec<u8> {
-        let body_len = match u32::try_from(PAYLOAD_FIXED_BODY_LEN + self.data.len()) {
-            Ok(value) => value,
-            Err(_) => {
-                tracing::debug!(
-                    data_len = self.data.len(),
-                    "monitor payload too large to encode"
-                );
-                return Vec::new();
-            }
+        let Ok(body_len) = u32::try_from(PAYLOAD_FIXED_BODY_LEN + self.data.len()) else {
+            tracing::debug!(
+                data_len = self.data.len(),
+                "monitor payload too large to encode"
+            );
+            return Vec::new();
         };
 
         let mut encoded = Vec::with_capacity(PAYLOAD_LENGTH_PREFIX_LEN + body_len as usize);

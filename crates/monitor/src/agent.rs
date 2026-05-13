@@ -37,7 +37,7 @@ impl AgentMonitor {
     }
 
     /// Sends an event to every currently registered consumer.
-    pub fn send_event(&self, payload: Payload) {
+    pub fn send_event(&self, payload: &Payload) {
         let consumers = self.consumers.blocking_read().clone();
         tracing::debug!(
             consumers = consumers.len(),
@@ -45,7 +45,7 @@ impl AgentMonitor {
             "dispatching monitor payload"
         );
         for consumer in consumers {
-            consumer.notify(&payload);
+            consumer.notify(payload);
         }
     }
 
@@ -83,13 +83,13 @@ mod tests {
         monitor.register_consumer(consumer);
         assert_eq!(monitor.consumer_count(), 1);
 
-        monitor.send_event(Payload::new_event(vec![1, 2, 3], 0));
+        monitor.send_event(&Payload::new_event(vec![1, 2, 3], 0));
         assert_eq!(counter.load(Ordering::Relaxed), 1);
 
         monitor.unregister_all();
         assert_eq!(monitor.consumer_count(), 0);
 
-        monitor.send_event(Payload::new_lost(4, 1));
+        monitor.send_event(&Payload::new_lost(4, 1));
         assert_eq!(counter.load(Ordering::Relaxed), 1);
     }
 }

@@ -11,6 +11,7 @@ anyhow.workspace = true
 clap = { workspace = true, features = ["derive"] }
 tokio.workspace = true
 tracing.workspace = true
+tracing-subscriber.workspace = true
 seriousum_cli = { path = "crates/cli", package = "seriousum-cli" }
 seriousum_daemon = { path = "crates/daemon", package = "cilium-daemon" }
 seriousum_hubble = { path = "crates/hubble", package = "seriousum-hubble" }

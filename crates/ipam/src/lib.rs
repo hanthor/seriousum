@@ -243,8 +243,8 @@ impl AllocationResult {
     }
 
     /// Sets the first CIDR from a list of directly reachable CIDRs.
-    pub fn with_cidrs(mut self, cidrs: Vec<IpNet>) -> Self {
-        self.cidr = cidrs.first().cloned();
+    pub fn with_cidrs(mut self, cidrs: &[IpNet]) -> Self {
+        self.cidr = cidrs.first().copied();
         self
     }
 
@@ -293,7 +293,7 @@ fn ip_in_cidr(cidr: &IpNet, ip: IpAddr) -> bool {
 
 fn ip_to_integer(ip: IpAddr) -> u128 {
     match ip {
-        IpAddr::V4(addr) => u32::from(addr) as u128,
+        IpAddr::V4(addr) => u128::from(u32::from(addr)),
         IpAddr::V6(addr) => u128::from_be_bytes(addr.octets()),
     }
 }
@@ -309,10 +309,10 @@ fn integer_to_ip(value: u128, is_ipv4: bool) -> IpAddr {
 fn usable_ip_bounds(cidr: &IpNet) -> (u128, u128, bool) {
     match cidr {
         IpNet::V4(net) => {
-            let network = u32::from(net.network()) as u128;
+            let network = u128::from(u32::from(net.network()));
             let host_bits = 32_u32.saturating_sub(u32::from(net.prefix_len()));
             let size_minus_one = if host_bits == 32 {
-                u32::MAX as u128
+                u128::from(u32::MAX)
             } else {
                 (1_u128 << host_bits) - 1
             };
@@ -503,7 +503,7 @@ impl CIDRPoolAllocator {
             .pool
             .iter()
             .find(|cidr| !self.allocated.contains(cidr))
-            .cloned()?;
+            .copied()?;
         self.allocated.insert(next);
         Some(next)
     }
@@ -630,12 +630,18 @@ impl NodeIPAM {
 
     /// Returns the total remaining capacity across all pools.
     pub fn total_available(&self) -> usize {
-        self.pools.values().map(|pool| pool.count_available()).sum()
+        self.pools
+            .values()
+            .map(CIDRAllocator::count_available)
+            .sum()
     }
 
     /// Returns the total number of allocated IPs across all pools.
     pub fn total_allocated(&self) -> usize {
-        self.pools.values().map(|pool| pool.count_allocated()).sum()
+        self.pools
+            .values()
+            .map(CIDRAllocator::count_allocated)
+            .sum()
     }
 }
 
@@ -1385,9 +1391,9 @@ mod tests {
         ipam.add_ipv6_pool(pool.clone(), cidr_v6).await.unwrap();
         let (ipv4, ipv6) = ipam.allocate_next("pod-1", pool.clone()).await.unwrap();
         assert!(ipv4.is_some());
-        assert_eq!(ipv4.unwrap().ip.is_ipv4(), true);
+        assert!(ipv4.unwrap().ip.is_ipv4());
         assert!(ipv6.is_some());
-        assert_eq!(ipv6.unwrap().ip.is_ipv6(), true);
+        assert!(ipv6.unwrap().ip.is_ipv6());
     }
 
     #[tokio::test]
@@ -1466,7 +1472,7 @@ mod tests {
         let cidrs = vec!["10.0.0.0/24".parse().unwrap()];
         let gateway: IpAddr = "10.0.0.1".parse().unwrap();
         let result = AllocationResult::new(ip, pool)
-            .with_cidrs(cidrs)
+            .with_cidrs(&cidrs)
             .with_gateway(gateway)
             .with_skip_masquerade(true);
         assert_eq!(result.ip, ip);

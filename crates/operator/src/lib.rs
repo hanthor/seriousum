@@ -1004,8 +1004,8 @@ mod tests {
 
         for i in 0..3 {
             let core_ep = endpoint::CoreCiliumEndpoint {
-                name: format!("ep{}", i),
-                pod_name: format!("pod{}", i),
+                name: format!("ep{i}"),
+                pod_name: format!("pod{i}"),
                 identity: identity::NumericIdentity(256 + i as u32),
                 addressing: endpoint::EndpointAddressing {
                     ipv4: Some(format!("10.0.0.{}", i + 1).parse().unwrap()),
@@ -1387,8 +1387,8 @@ mod tests {
 
         for i in 0..10 {
             let core_ep = endpoint::CoreCiliumEndpoint {
-                name: format!("core-ep-{}", i),
-                pod_name: format!("pod-batch-{}", i),
+                name: format!("core-ep-{i}"),
+                pod_name: format!("pod-batch-{i}"),
                 identity: identity::NumericIdentity(3000 + i as u32),
                 addressing: endpoint::EndpointAddressing {
                     ipv4: Some(format!("172.16.0.{}", i + 1).parse().unwrap()),
@@ -1426,7 +1426,7 @@ mod tests {
                 selector: policy::EndpointSelector {
                     match_labels: HashMap::new(),
                 },
-                protocol: Some(format!("PROTO-{}", i)),
+                protocol: Some(format!("PROTO-{i}")),
                 ports: Some(vec![80 + i as u16]),
             };
             policy.add_ingress_rule(ingress_rule);

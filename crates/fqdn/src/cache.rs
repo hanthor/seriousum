@@ -21,7 +21,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 fn unix_secs(t: SystemTime) -> i64 {
     t.duration_since(UNIX_EPOCH)
-        .map(|d| d.as_secs() as i64)
+        .map(|d| i64::try_from(d.as_secs()).unwrap_or(i64::MAX))
         .unwrap_or(0)
 }
 
@@ -173,10 +173,7 @@ impl Inner {
     ///
     /// Returns `(updated, upserted)`.
     fn update_ip(&mut self, ip: IpAddr, entry: &CacheEntry) -> (bool, bool) {
-        let ip_entries = self
-            .forward
-            .entry(entry.name.clone())
-            .or_insert_with(HashMap::new);
+        let ip_entries = self.forward.entry(entry.name.clone()).or_default();
 
         let old = ip_entries.get(&ip);
         let exists = old.is_some();
@@ -189,7 +186,7 @@ impl Inner {
         if should_replace {
             ip_entries.insert(ip, entry.clone());
             // Upsert in reverse map
-            let name_entries = self.reverse.entry(ip).or_insert_with(HashMap::new);
+            let name_entries = self.reverse.entry(ip).or_default();
             name_entries.insert(entry.name.clone(), entry.clone());
             // Register in cleanup index
             self.add_to_cleanup(entry);
@@ -207,7 +204,7 @@ impl Inner {
         }
         self.cleanup
             .entry(exp)
-            .or_insert_with(Vec::new)
+            .or_default()
             .push(entry.name.clone());
     }
 
@@ -225,12 +222,11 @@ impl Inner {
             }
         }
         // Check over-limit.
-        if self.per_host_limit > 0 {
-            if let Some(ip_map) = self.forward.get(&entry.name) {
-                if ip_map.len() > self.per_host_limit {
-                    self.over_limit.insert(entry.name.clone());
-                }
-            }
+        if self.per_host_limit > 0
+            && let Some(ip_map) = self.forward.get(&entry.name)
+            && ip_map.len() > self.per_host_limit
+        {
+            self.over_limit.insert(entry.name.clone());
         }
         UpdateStatus { updated, upserted }
     }
@@ -330,9 +326,8 @@ impl Inner {
     fn force_expire_by_names(&mut self, expire_before: i64, names: &[&str]) -> Vec<String> {
         let mut affected = Vec::new();
         for &name in names {
-            let entries = match self.forward.get_mut(name) {
-                Some(e) => e,
-                None => continue,
+            let Some(entries) = self.forward.get_mut(name) else {
+                continue;
             };
             let to_drop: Vec<IpAddr> = entries
                 .iter()
@@ -374,9 +369,8 @@ impl Inner {
         &mut self,
         expires: i64,
     ) -> (Vec<String>, Vec<(IpAddr, String, i64)>) {
-        let lc = match self.last_cleanup {
-            None => return (vec![], vec![]),
-            Some(v) => v,
+        let Some(lc) = self.last_cleanup else {
+            return (vec![], vec![]);
         };
 
         // Collect names from the cleanup buckets up to (but not including) expires.
@@ -422,10 +416,10 @@ impl Inner {
             } else {
                 false
             };
-            if let Some(ip_map) = self.forward.get(&name) {
-                if ip_map.is_empty() {
-                    self.forward.remove(&name);
-                }
+            if let Some(ip_map) = self.forward.get(&name)
+                && ip_map.is_empty()
+            {
+                self.forward.remove(&name);
             }
             if removed {
                 affected.push(name);
@@ -457,12 +451,11 @@ impl Inner {
         let names: Vec<String> = self.over_limit.drain().collect();
 
         for name in names {
-            let ip_map = match self.forward.get_mut(&name) {
-                Some(m) => m,
-                None => continue,
+            let Some(ip_map) = self.forward.get_mut(&name) else {
+                continue;
             };
-            let overlimit = ip_map.len() as isize - self.per_host_limit as isize;
-            if overlimit <= 0 {
+            let overlimit = ip_map.len().saturating_sub(self.per_host_limit);
+            if overlimit == 0 {
                 continue;
             }
             // Sort by expiration time ascending (oldest first → remove first).
@@ -472,7 +465,7 @@ impl Inner {
                 .collect();
             entries.sort_by_key(|(_, exp)| *exp);
 
-            for (ip, exp_time) in entries.into_iter().take(overlimit as usize) {
+            for (ip, exp_time) in entries.into_iter().take(overlimit) {
                 ip_map.remove(&ip);
                 if let Some(nm) = self.reverse.get_mut(&ip) {
                     nm.remove(&name);
@@ -522,7 +515,11 @@ impl Inner {
         let mut result = Vec::new();
         for ip_map in self.forward.values() {
             for entry in ip_map.values() {
-                let mut ip_strs: Vec<String> = entry.ips.iter().map(|ip| ip.to_string()).collect();
+                let mut ip_strs: Vec<String> = entry
+                    .ips
+                    .iter()
+                    .map(std::string::ToString::to_string)
+                    .collect();
                 ip_strs.sort();
                 let key = (entry.name.clone(), ip_strs, entry.expiration_time);
                 if seen.insert(key) {
@@ -847,7 +844,7 @@ impl DnsCache {
             .unwrap()
             .cleanup
             .entry(secs)
-            .or_insert_with(Vec::new)
+            .or_default()
             .push(name.to_string());
     }
 
@@ -999,7 +996,8 @@ impl DnsZombieMappings {
         } else {
             let zombie = DnsZombieMapping {
                 names: {
-                    let mut v: Vec<String> = names.iter().map(|s| s.to_string()).collect();
+                    let mut v: Vec<String> =
+                        names.iter().map(std::string::ToString::to_string).collect();
                     v.dedup();
                     v
                 },
@@ -1165,7 +1163,7 @@ impl DnsZombieMappings {
             let dead_start = dead.len();
             let mut possible_alive: Vec<IpAddr> = Vec::new();
 
-            for (_name, alive_ips_for_name) in &alive_names {
+            for alive_ips_for_name in alive_names.values() {
                 if alive_ips_for_name.len() <= self.per_host_limit {
                     // Already handled above.
                     continue;
@@ -1189,13 +1187,12 @@ impl DnsZombieMappings {
             // Remove from possible_alive anything that ended up in dead[dead_start..].
             let dead_ips: HashSet<IpAddr> = dead[dead_start..].iter().map(|z| z.ip).collect();
             for ip in possible_alive {
-                if !dead_ips.contains(&ip) {
-                    if let Some(z) = self.mappings.get(&ip) {
-                        // Avoid duplicating entries already in alive.
-                        if !alive.iter().any(|a| a.ip == ip) {
-                            alive.push(z.clone());
-                        }
-                    }
+                if !dead_ips.contains(&ip)
+                    && let Some(z) = self.mappings.get(&ip)
+                    && !alive.iter().any(|a| a.ip == ip)
+                {
+                    // Avoid duplicating entries already in alive.
+                    alive.push(z.clone());
                 }
             }
         }
@@ -1307,6 +1304,7 @@ impl DnsZombieMappings {
     /// Returns clones of alive zombies whose IP passes `prefix_matcher`.
     ///
     /// Ported from Go's `(*DNSZombieMappings).DumpAlive`.
+    #[allow(clippy::needless_pass_by_value)]
     pub fn dump_alive<F>(&self, prefix_matcher: Option<F>) -> Vec<DnsZombieMapping>
     where
         F: Fn(IpAddr) -> bool,
@@ -1319,10 +1317,10 @@ impl DnsZombieMappings {
             if !alive {
                 continue;
             }
-            if let Some(ref matcher) = prefix_matcher {
-                if !matcher(zombie.ip) {
-                    continue;
-                }
+            if let Some(ref matcher) = prefix_matcher
+                && !matcher(zombie.ip)
+            {
+                continue;
             }
             result.push(zombie.clone());
         }
@@ -1356,7 +1354,7 @@ impl DnsZombieMappings {
 /// Sort key (ascending): AliveAt → DeletePendingAt → names.len().
 ///
 /// Ported from Go's `sortZombieMappingSlice`.
-pub fn sort_zombie_mapping_slice(zombies: &mut Vec<DnsZombieMapping>) {
+pub fn sort_zombie_mapping_slice(zombies: &mut [DnsZombieMapping]) {
     zombies.sort_by(|a, b| {
         match a.alive_at.cmp(&b.alive_at) {
             std::cmp::Ordering::Equal => {}
@@ -1403,7 +1401,7 @@ mod tests {
         let cache = DnsCache::new(0);
         let ip: IpAddr = "192.0.2.1".parse().unwrap();
 
-        cache.update("example.com", &vec![ip], 300).unwrap();
+        cache.update("example.com", &[ip], 300).unwrap();
 
         let names = cache.reverse_lookup(ip).unwrap();
         assert_eq!(names, vec!["example.com"]);
@@ -1425,7 +1423,7 @@ mod tests {
         // In the new model, inserts beyond the limit just mark over_limit; they
         // don't fail. This test verifies the over_limit tracking instead.
         let cache = DnsCache::with_limits(0, 1);
-        let ips = vec![
+        let ips = [
             "192.0.2.1".parse::<IpAddr>().unwrap(),
             "192.0.2.2".parse::<IpAddr>().unwrap(),
         ];
@@ -1440,10 +1438,10 @@ mod tests {
         let cache = DnsCache::new(0);
 
         cache
-            .update("example.com", &vec!["192.0.2.1".parse().unwrap()], 300)
+            .update("example.com", &["192.0.2.1".parse().unwrap()], 300)
             .unwrap();
         cache
-            .update("example.org", &vec!["192.0.2.2".parse().unwrap()], 300)
+            .update("example.org", &["192.0.2.2".parse().unwrap()], 300)
             .unwrap();
 
         let snapshot = cache.snapshot();
@@ -1455,7 +1453,7 @@ mod tests {
         let cache = DnsCache::new(0);
 
         cache
-            .update("example.com", &vec!["192.0.2.1".parse().unwrap()], 300)
+            .update("example.com", &["192.0.2.1".parse().unwrap()], 300)
             .unwrap();
         assert!(!cache.is_empty());
 
@@ -1473,12 +1471,16 @@ mod parity_tests {
     //! Parity tests ported from `cilium/pkg/fqdn/cache_test.go`.
 
     use super::*;
+    use std::collections::hash_map::DefaultHasher;
+    use std::hash::{Hash, Hasher};
 
     fn now_secs() -> i64 {
         SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap()
-            .as_secs() as i64
+            .as_secs()
+            .try_into()
+            .unwrap_or(i64::MAX)
     }
 
     // ------------------------------------------------------------------
@@ -1519,8 +1521,7 @@ mod parity_tests {
             assert_eq!(
                 ips.len(),
                 expected_len,
-                "Incorrect number of IPs at t+{seconds_past_now}: got {:?}",
-                ips
+                "Incorrect number of IPs at t+{seconds_past_now}: got {ips:?}",
             );
             // Sort IPs and verify.
             ips.sort();
@@ -1559,7 +1560,7 @@ mod parity_tests {
         for name in &["test1.com", "test2.com", "test3.com"] {
             let ips = cache.lookup_at(name, now);
             assert_eq!(
-                ips.as_ref().map(|v| v.len()),
+                ips.as_ref().map(Vec::len),
                 Some(2),
                 "Expected 2 IPs for {name}, got {ips:?}"
             );
@@ -1572,7 +1573,7 @@ mod parity_tests {
         assert!(cache.lookup_at("test1.com", now).is_none());
         for name in &["test2.com", "test3.com"] {
             assert_eq!(
-                cache.lookup_at(name, now).as_ref().map(|v| v.len()),
+                cache.lookup_at(name, now).as_ref().map(Vec::len),
                 Some(2),
                 "Expected 2 IPs for {name} after partial expire"
             );
@@ -1599,10 +1600,10 @@ mod parity_tests {
             .unwrap();
 
         let res = cache.lookup_at("test.com", now);
-        assert_eq!(res.as_ref().map(|v| v.len()), Some(1));
+        assert_eq!(res.as_ref().map(Vec::len), Some(1));
 
         let res = cache.lookup_at("test.com", now + 3);
-        assert_eq!(res.as_ref().map(|v| v.len()), Some(1));
+        assert_eq!(res.as_ref().map(Vec::len), Some(1));
 
         let res = cache.lookup_at("test.com", now + 70);
         assert!(res.is_none(), "Expected entry to be expired at now+70");
@@ -1618,11 +1619,11 @@ mod parity_tests {
             .unwrap();
 
         let res = cache.lookup_at("test.com", now);
-        assert_eq!(res.as_ref().map(|v| v.len()), Some(1));
+        assert_eq!(res.as_ref().map(Vec::len), Some(1));
 
         let res = cache.lookup_at("test.com", now + 10);
         assert_eq!(
-            res.as_ref().map(|v| v.len()),
+            res.as_ref().map(Vec::len),
             Some(1),
             "Expected entry still visible at TTL boundary"
         );
@@ -1654,10 +1655,13 @@ mod parity_tests {
             let mut got_names = zombie.names.clone();
             let mut exp_names: Vec<&str> = expected_names.1.to_vec();
             got_names.sort();
-            exp_names.sort();
+            exp_names.sort_unstable();
             assert_eq!(
                 got_names,
-                exp_names.iter().map(|s| s.to_string()).collect::<Vec<_>>(),
+                exp_names
+                    .iter()
+                    .map(std::string::ToString::to_string)
+                    .collect::<Vec<_>>(),
                 "Names mismatch for IP {ip_str}",
             );
         }
@@ -1676,8 +1680,8 @@ mod parity_tests {
         zombies.upsert(now, "3.3.3.3".parse().unwrap(), &["pizza.com"]);
 
         // First CT GC: advances clock.
-        let now2 = now + Duration::from_secs(300);
-        let next = now2 + Duration::from_secs(300);
+        let now2 = now + Duration::from_mins(5);
+        let next = now2 + Duration::from_mins(5);
         zombies.set_ctgc_time(now2, next);
 
         // Mark 1.1.1.2 alive — its sibling 1.1.1.1 (same name) should stay alive too.
@@ -1726,8 +1730,8 @@ mod parity_tests {
         );
 
         // First CT GC run — still alive (need 2 cycles).
-        let now2 = now + Duration::from_secs(300);
-        let next = now2 + Duration::from_secs(300);
+        let now2 = now + Duration::from_mins(5);
+        let next = now2 + Duration::from_mins(5);
         zombies.set_ctgc_time(now2, next);
         let (alive, dead) = zombies.gc();
         assert!(dead.is_empty());
@@ -1740,8 +1744,8 @@ mod parity_tests {
         );
 
         // Second CT GC — mark 2.2.2.2 alive; 1.1.1.1 dies.
-        let now3 = now2 + Duration::from_secs(300);
-        let next2 = now3 + Duration::from_secs(300);
+        let now3 = now2 + Duration::from_mins(5);
+        let next2 = now3 + Duration::from_mins(5);
         zombies.mark_alive(now3 + Duration::from_secs(1), "2.2.2.2".parse().unwrap());
         zombies.set_ctgc_time(now3, next2);
 
@@ -1769,11 +1773,11 @@ mod parity_tests {
         );
 
         // Cause all but 2.2.2.2 to die.
-        let now4 = now3 + Duration::from_secs(300);
-        let next3 = now4 + Duration::from_secs(300);
+        let now4 = now3 + Duration::from_mins(5);
+        let next3 = now4 + Duration::from_mins(5);
         zombies.set_ctgc_time(now4, next3);
-        let now5 = now4 + Duration::from_secs(300);
-        let next4 = now5 + Duration::from_secs(300);
+        let now5 = now4 + Duration::from_mins(5);
+        let next4 = now5 + Duration::from_mins(5);
         zombies.mark_alive(now5 + Duration::from_secs(1), "2.2.2.2".parse().unwrap());
         zombies.set_ctgc_time(now5, next4);
         let (alive, dead) = zombies.gc();
@@ -1840,7 +1844,7 @@ mod parity_tests {
             let ip: IpAddr = format!("1.1.1.{i}").parse().unwrap();
             zombies.mark_alive(after_now, ip);
         }
-        zombies.set_ctgc_time(after_now, after_now + Duration::from_secs(300));
+        zombies.set_ctgc_time(after_now, after_now + Duration::from_mins(5));
 
         let (alive, dead) = zombies.gc();
         assert_zombies_contain(&dead, &[("1.1.1.4", &["test.com"])]);
@@ -2111,7 +2115,7 @@ mod parity_tests {
 
         // First CT GC — still need 2 cycles, so all still alive.
         let now2 = now + Duration::from_secs(1);
-        let next = now2 + Duration::from_secs(300);
+        let next = now2 + Duration::from_mins(5);
         zombies.set_ctgc_time(now2, next);
         let alive = zombies.dump_alive::<fn(IpAddr) -> bool>(None);
         assert_zombies_contain(
@@ -2124,8 +2128,8 @@ mod parity_tests {
         );
 
         // Second CT GC — mark 1.1.1.1 and 2.2.2.2 alive; 3.3.3.3 dies.
-        let now3 = now2 + Duration::from_secs(300);
-        let next2 = now3 + Duration::from_secs(300);
+        let now3 = now2 + Duration::from_mins(5);
+        let next2 = now3 + Duration::from_mins(5);
         zombies.mark_alive(now3, "1.1.1.1".parse().unwrap());
         zombies.mark_alive(now3, "2.2.2.2".parse().unwrap());
         zombies.set_ctgc_time(now3, next2);
@@ -2153,7 +2157,7 @@ mod parity_tests {
                 let octs = v4.octets();
                 octs[0] == 1 && octs[1] == 1 && octs[2] == 1
             }
-            _ => false,
+            IpAddr::V6(_) => false,
         }));
         assert_zombies_contain(&alive, &[("1.1.1.1", &["test.com"])]);
 
@@ -2164,7 +2168,7 @@ mod parity_tests {
                 let octs = v4.octets();
                 octs[0] == 1 && octs[1] == 1 && octs[2] == 1
             }
-            _ => false,
+            IpAddr::V6(_) => false,
         }));
         assert_zombies_contain(
             &alive,
@@ -2177,7 +2181,7 @@ mod parity_tests {
                 let octs = v4.octets();
                 octs[0] == 4 && octs[1] == 4
             }
-            _ => false,
+            IpAddr::V6(_) => false,
         }));
         assert!(alive.is_empty());
     }
@@ -2201,7 +2205,8 @@ mod parity_tests {
         let now_secs_val = unix_secs(now);
         for (i, ip) in ips.iter().enumerate() {
             // Entries with lower last-octet expire earlier.
-            let lookup_time = now_secs_val - (ips.len() - i) as i64;
+            let entry_offset = i64::try_from(ips.len() - i).unwrap_or(i64::MAX);
+            let lookup_time = now_secs_val - entry_offset;
             cache
                 .update_at(
                     name,
@@ -2216,7 +2221,8 @@ mod parity_tests {
         {
             let mut g = cache.inner.lock().unwrap();
             if g.last_cleanup.is_none() {
-                g.last_cleanup = Some(now_secs_val - (ips.len() as i64 + 1));
+                let cleanup_offset = i64::try_from(ips.len()).unwrap_or(i64::MAX);
+                g.last_cleanup = Some(now_secs_val - cleanup_offset.saturating_add(1));
             }
         }
 
@@ -2300,14 +2306,14 @@ mod parity_tests {
             cache
                 .update_at(some_domain, &[keepalive_lookup], dns_ttl, tock_secs)
                 .unwrap();
-            let gc_time = tock + Duration::from_secs((2 * dns_ttl + 1) as u64);
+            let gc_time = tock + Duration::from_secs(u64::from(2 * dns_ttl + 1));
             simulate_fqdn_gc(gc_time, z);
             let ct_time = gc_time + Duration::from_secs(1);
             simulate_ct_gc(ct_time, &[], z);
         };
 
         let now = SystemTime::now();
-        let a_long_time_ago = now - Duration::from_secs(36000);
+        let a_long_time_ago = now - Duration::from_hours(10);
         let seven_seconds_ago = now - Duration::from_secs(7);
 
         // A long time ago, we looked up the domain.
@@ -2374,16 +2380,16 @@ mod parity_tests {
     #[test]
     fn test_sort_zombie_mapping_slice() {
         let moments = [
-            UNIX_EPOCH + Duration::from_secs(978307261), // 2001-01-01
-            UNIX_EPOCH + Duration::from_secs(1012615322), // 2002-02-02
-            UNIX_EPOCH + Duration::from_secs(1046660583), // 2003-03-03
+            UNIX_EPOCH + Duration::from_secs(978_307_261), // 2001-01-01
+            UNIX_EPOCH + Duration::from_secs(1_012_615_322), // 2002-02-02
+            UNIX_EPOCH + Duration::from_secs(1_046_660_583), // 2003-03-03
         ];
 
         // Helper to make a zombie.
         let make_zombie =
             |alive_at: SystemTime, delete_pending_at: SystemTime, names: Vec<&str>| {
                 DnsZombieMapping {
-                    names: names.iter().map(|s| s.to_string()).collect(),
+                    names: names.iter().map(std::string::ToString::to_string).collect(),
                     ip: "0.0.0.0".parse().unwrap(),
                     alive_at,
                     delete_pending_at,
@@ -2398,28 +2404,30 @@ mod parity_tests {
                 for j in (i + 1)..sl {
                     let a = &zombies[i];
                     let b = &zombies[j];
-                    if a.alive_at < b.alive_at {
-                        continue;
-                    } else if a.alive_at > b.alive_at {
-                        panic!(
+                    if a.alive_at != b.alive_at {
+                        assert!(
+                            a.alive_at < b.alive_at,
                             "order wrong: AliveAt: {:?} is after {:?}",
-                            a.alive_at, b.alive_at
+                            a.alive_at,
+                            b.alive_at
                         );
-                    }
-                    if a.delete_pending_at < b.delete_pending_at {
                         continue;
-                    } else if a.delete_pending_at > b.delete_pending_at {
-                        panic!(
+                    }
+                    if a.delete_pending_at != b.delete_pending_at {
+                        assert!(
+                            a.delete_pending_at < b.delete_pending_at,
                             "order wrong: DeletePendingAt: {:?} is after {:?}",
-                            a.delete_pending_at, b.delete_pending_at
+                            a.delete_pending_at,
+                            b.delete_pending_at
                         );
+                        continue;
                     }
-                    if a.names.len() > b.names.len() {
-                        panic!(
-                            "order wrong: len(names): {:?} longer than {:?}",
-                            a.names, b.names
-                        );
-                    }
+                    assert!(
+                        a.names.len() <= b.names.len(),
+                        "order wrong: len(names): {:?} longer than {:?}",
+                        a.names,
+                        b.names
+                    );
                 }
             }
         };
@@ -2466,8 +2474,6 @@ mod parity_tests {
         }
 
         // Run 5 random shuffle + sort tests.
-        use std::collections::hash_map::DefaultHasher;
-        use std::hash::{Hash, Hasher};
         for seed in 0u64..5 {
             let mut ts = all_mappings.clone();
             // Simple deterministic shuffle using seed.

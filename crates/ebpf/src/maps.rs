@@ -436,8 +436,8 @@ mod tests {
 
     #[test]
     fn test_service_map_entry_creation() {
-        let entry = ServiceMapEntry::new(0x0a000001, 80, 6); // 10.0.0.1:80/TCP
-        assert_eq!(entry.vip, 0x0a000001);
+        let entry = ServiceMapEntry::new(0x0a00_0001, 80, 6); // 10.0.0.1:80/TCP
+        assert_eq!(entry.vip, 0x0a00_0001);
         assert_eq!(entry.port, 80);
         assert_eq!(entry.protocol, 6);
         assert_eq!(entry.backend_count, 0);
@@ -445,8 +445,8 @@ mod tests {
 
     #[test]
     fn test_backend_entry_creation() {
-        let entry = BackendEntry::new(0x0a000002, 8080, 6);
-        assert_eq!(entry.ip, 0x0a000002);
+        let entry = BackendEntry::new(0x0a00_0002, 8080, 6);
+        assert_eq!(entry.ip, 0x0a00_0002);
         assert_eq!(entry.port, 8080);
         assert_eq!(entry.protocol, 6);
         assert!(entry.is_healthy());
@@ -454,26 +454,26 @@ mod tests {
 
     #[test]
     fn test_backend_entry_unhealthy() {
-        let entry = BackendEntry::new(0x0a000002, 8080, 6).with_state(1);
+        let entry = BackendEntry::new(0x0a00_0002, 8080, 6).with_state(1);
         assert!(!entry.is_healthy());
     }
 
     #[test]
     fn test_service_map_add() {
         let mut map = ServiceMap::new();
-        let entry = ServiceMapEntry::new(0x0a000001, 80, 6);
+        let entry = ServiceMapEntry::new(0x0a00_0001, 80, 6);
 
         map.add_service(1, entry).unwrap();
         assert_eq!(map.service_count(), 1);
 
         let retrieved = map.get_service(1).unwrap().unwrap();
-        assert_eq!(retrieved.vip, 0x0a000001);
+        assert_eq!(retrieved.vip, 0x0a00_0001);
     }
 
     #[test]
     fn test_service_map_duplicate_add_fails() {
         let mut map = ServiceMap::new();
-        let entry = ServiceMapEntry::new(0x0a000001, 80, 6);
+        let entry = ServiceMapEntry::new(0x0a00_0001, 80, 6);
 
         map.add_service(1, entry).unwrap();
         let result = map.add_service(1, entry);
@@ -483,7 +483,7 @@ mod tests {
     #[test]
     fn test_service_map_update() {
         let mut map = ServiceMap::new();
-        let mut entry = ServiceMapEntry::new(0x0a000001, 80, 6);
+        let mut entry = ServiceMapEntry::new(0x0a00_0001, 80, 6);
         map.add_service(1, entry).unwrap();
 
         entry.backend_count = 5;
@@ -496,7 +496,7 @@ mod tests {
     #[test]
     fn test_service_map_delete() {
         let mut map = ServiceMap::new();
-        let entry = ServiceMapEntry::new(0x0a000001, 80, 6);
+        let entry = ServiceMapEntry::new(0x0a00_0001, 80, 6);
         map.add_service(1, entry).unwrap();
 
         map.delete_service(1).unwrap();
@@ -509,7 +509,7 @@ mod tests {
     #[test]
     fn test_backend_map_add() {
         let mut map = BackendMap::new();
-        let entry = BackendEntry::new(0x0a000002, 8080, 6);
+        let entry = BackendEntry::new(0x0a00_0002, 8080, 6);
 
         map.add_backend(0, entry).unwrap();
         assert_eq!(map.backend_count(), 1);
@@ -518,9 +518,9 @@ mod tests {
     #[test]
     fn test_backend_map_healthy_count() {
         let mut map = BackendMap::new();
-        map.add_backend(0, BackendEntry::new(0x0a000002, 8080, 6))
+        map.add_backend(0, BackendEntry::new(0x0a00_0002, 8080, 6))
             .unwrap();
-        map.add_backend(1, BackendEntry::new(0x0a000003, 8080, 6).with_state(1))
+        map.add_backend(1, BackendEntry::new(0x0a00_0003, 8080, 6).with_state(1))
             .unwrap();
 
         assert_eq!(map.count_healthy(), 1);
@@ -529,7 +529,7 @@ mod tests {
     #[test]
     fn test_affinity_map_set_get() {
         let mut map = AffinityMap::new();
-        let key = ClientKey::new(0xc0a80001, 12345, 1, 6);
+        let key = ClientKey::new(0xc0a8_0001, 12345, 1, 6);
 
         map.set_affinity(key, 0).unwrap();
         let result = map.get_affinity(key).unwrap();
@@ -539,7 +539,7 @@ mod tests {
     #[test]
     fn test_affinity_map_delete() {
         let mut map = AffinityMap::new();
-        let key = ClientKey::new(0xc0a80001, 12345, 1, 6);
+        let key = ClientKey::new(0xc0a8_0001, 12345, 1, 6);
 
         map.set_affinity(key, 0).unwrap();
         map.delete_affinity(key).unwrap();
@@ -565,9 +565,10 @@ mod tests {
     #[test]
     fn test_service_map_iterate() {
         let mut map = ServiceMap::new();
-        for i in 0..3 {
-            let entry = ServiceMapEntry::new(0x0a000001 + i, 80 + i as u16, 6);
-            map.add_service(i as u32, entry).unwrap();
+        for i in 0_u16..3 {
+            let service_id = u32::from(i);
+            let entry = ServiceMapEntry::new(0x0a00_0001 + service_id, 80 + i, 6);
+            map.add_service(service_id, entry).unwrap();
         }
 
         let entries = map.iterate_services();
@@ -577,9 +578,9 @@ mod tests {
     #[test]
     fn test_backend_map_get_backends_for_service() {
         let mut map = BackendMap::new();
-        for i in 0..5 {
-            let entry = BackendEntry::new(0x0a000002 + i as u32, 8080, 6);
-            map.add_backend(i as u32, entry).unwrap();
+        for i in 0_u32..5 {
+            let entry = BackendEntry::new(0x0a00_0002 + i, 8080, 6);
+            map.add_backend(i, entry).unwrap();
         }
 
         let backends = map.get_backends_for_service(1, 0, 5).unwrap();

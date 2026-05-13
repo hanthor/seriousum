@@ -540,6 +540,8 @@ mod parity_impl {
     pub fn vlan_filter_macro(
         vlans_by_ifindex: &BTreeMap<u32, Vec<u16>>,
     ) -> std::result::Result<String, String> {
+        use std::fmt::Write as _;
+
         let mut normalized = BTreeMap::<u32, Vec<u16>>::new();
         let mut vlan_count = 0usize;
         for (ifindex, vlans) in vlans_by_ifindex {
@@ -563,10 +565,10 @@ mod parity_impl {
 
         let mut out = String::from("switch (ifindex) { \\\n");
         for (ifindex, vlans) in normalized {
-            out.push_str(&format!("case {ifindex}: \\\n"));
+            let _ = writeln!(out, "case {ifindex}: \\");
             out.push_str("switch (vlan_id) { \\\n");
             for vlan in vlans {
-                out.push_str(&format!("case {vlan}: \\\n"));
+                let _ = writeln!(out, "case {vlan}: \\");
             }
             out.push_str("return true; \\\n");
             out.push_str("} \\\n");
@@ -577,6 +579,7 @@ mod parity_impl {
         Ok(out)
     }
 
+    #[allow(clippy::struct_excessive_bools)]
     #[derive(Debug, Clone, Copy, Default)]
     pub struct NodeDefineConfig {
         pub monitor_interval_secs: u64,
@@ -590,15 +593,15 @@ mod parity_impl {
     }
 
     pub fn render_node_defines(cfg: NodeDefineConfig) -> String {
+        use std::fmt::Write as _;
+
         let mut out = String::new();
-        out.push_str(&format!(
-            "define CT_REPORT_INTERVAL {}\n",
+        let _ = writeln!(
+            out,
+            "define CT_REPORT_INTERVAL {}",
             cfg.monitor_interval_secs
-        ));
-        out.push_str(&format!(
-            "define CT_REPORT_FLAGS 0x{:04x}\n",
-            cfg.monitor_flags
-        ));
+        );
+        let _ = writeln!(out, "define CT_REPORT_FLAGS 0x{:04x}", cfg.monitor_flags);
 
         if cfg.enable_host_firewall {
             out.push_str("define ENABLE_HOST_FIREWALL 1\n");

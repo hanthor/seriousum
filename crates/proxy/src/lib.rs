@@ -565,6 +565,7 @@ impl std::fmt::Display for ProxyListenerType {
 }
 
 /// In-memory proxy port state matching Go proxyports allocator transitions.
+#[allow(clippy::struct_excessive_bools)]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ProxyPortEntry {
     /// Listener type.
@@ -1257,9 +1258,9 @@ mod parity_tests {
 
     #[test]
     fn parity_test_restored_port() {
-        let mut allocator = ProxyPortAllocator::new(10_000, 20_000);
         const PP_NAME: &str = "cilium-http-egress";
         const RESTORED_PORT: u16 = 14_321;
+        let mut allocator = ProxyPortAllocator::new(10_000, 20_000);
 
         allocator.ensure_proxy_port(PP_NAME, ProxyListenerType::Http, false);
         allocator

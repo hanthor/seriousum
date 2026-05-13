@@ -1,59 +1,45 @@
-//! Benchmark: load-balancer backend selection.
+//! Benchmark: load-balancer core value operations.
 
-use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
+use criterion::{BenchmarkId, Criterion, Throughput, black_box, criterion_group, criterion_main};
 use seriousum_loadbalancer::{
-    Backend, Frontend, L3n4Addr, L4Protocol, LoadBalancer, MaglevHash, Service, ServiceName,
-    SvcType,
+    Backend, BackendID, BackendState, L3n4Addr, L3n4AddrID, L4Type, SVC, ServiceID, ServiceName,
+    diff_backends,
 };
-use std::hint::black_box;
 use std::net::{IpAddr, Ipv4Addr};
 
-fn make_backends(n: usize) -> Vec<String> {
-    (0..n)
-        .map(|i| format!("10.0.{}.{}:8080", i / 256, i % 256))
-        .collect()
+fn make_backend(id: u32) -> Backend {
+    Backend::with_state(
+        BackendID(id + 1),
+        L3n4Addr::new(
+            IpAddr::V4(Ipv4Addr::new(10, 0, (id / 250) as u8, (id % 250 + 1) as u8)),
+            8080,
+            L4Type::TCP,
+        ),
+        BackendState::Active,
+    )
 }
 
-fn bench_maglev(c: &mut Criterion) {
-    let mut group = c.benchmark_group("lb_consistent_hash");
+fn make_backends(n: usize) -> Vec<Backend> {
+    (0..n).map(|i| make_backend(i as u32)).collect()
+}
+
+fn bench_diff_backends(c: &mut Criterion) {
+    let mut group = c.benchmark_group("lb_diff_backends");
 
     for n in [1usize, 8, 64, 512, 4096] {
-        group.throughput(Throughput::Elements(1));
-        let maglev = MaglevHash::new(make_backends(n)).unwrap();
-        let key = format!("192.168.1.100:{n}");
+        group.throughput(Throughput::Elements(n as u64));
+        let desired = make_backends(n);
+        let mut actual = desired.clone();
+        if let Some(last) = actual.last_mut() {
+            last.transition_to(BackendState::Quarantined).unwrap();
+        }
 
         group.bench_with_input(BenchmarkId::new("backends", n), &n, |b, _| {
-            b.iter(|| black_box(maglev.select(black_box(key.as_bytes())).unwrap()))
+            b.iter(|| black_box(diff_backends(black_box(&desired), black_box(&actual))))
         });
     }
 
     group.finish();
-}
-
-fn bench_round_robin_baseline(c: &mut Criterion) {
-    let mut group = c.benchmark_group("lb_round_robin");
-
-    for n in [1usize, 8, 64, 512, 4096] {
-        group.throughput(Throughput::Elements(1));
-        let backends = make_backends(n);
-        let index = std::sync::atomic::AtomicUsize::new(0);
-
-        group.bench_with_input(BenchmarkId::new("backends", n), &n, |b, _| {
-            b.iter(|| {
-                let i = index.fetch_add(1, std::sync::atomic::Ordering::Relaxed) % backends.len();
-                black_box(&backends[i])
-            })
-        });
-    }
-
-    group.finish();
-}
-
-fn bench_maglev_build(c: &mut Criterion) {
-    let backends = make_backends(1000);
-    c.bench_function("lb_maglev_build_1000", |b| {
-        b.iter(|| black_box(MaglevHash::new(black_box(backends.clone())).unwrap()))
-    });
 }
 
 fn bench_service_name_new(c: &mut Criterion) {
@@ -73,103 +59,49 @@ fn bench_l3n4addr_display_ipv4(c: &mut Criterion) {
     let addr = L3n4Addr::new(
         IpAddr::V4(Ipv4Addr::new(192, 168, 123, 210)),
         8080,
-        L4Protocol::TCP,
+        L4Type::TCP,
     );
     c.bench_function("lb_l3n4addr_display_ipv4", |b| {
         b.iter(|| black_box(addr.to_string()))
     });
 }
 
-fn bench_upsert_service_1(c: &mut Criterion) {
-    c.bench_function("lb_upsert_service_1", |b| {
-        b.iter(|| {
-            let lb = LoadBalancer::new();
-            let name = ServiceName::new("test", "svc-1");
-            let frontend = Frontend::new(
-                L3n4Addr::new(
-                    IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)),
-                    8080,
-                    L4Protocol::TCP,
-                ),
-                SvcType::ClusterIp,
-                name.clone(),
-            );
-            let service = Service::new(name).with_frontends(vec![frontend]);
-            black_box(lb.upsert_service(service).unwrap());
-        })
+fn make_service_with_backends(n: usize) -> SVC {
+    let mut service = SVC::new(L3n4AddrID::new(
+        L3n4Addr::new(IpAddr::V4(Ipv4Addr::new(10, 96, 0, 1)), 80, L4Type::TCP),
+        ServiceID(100),
+    ));
+    service.name = Some(ServiceName::new("default", "benchmark"));
+    service.backends = make_backends(n);
+    service
+}
+
+fn bench_active_backends(c: &mut Criterion) {
+    let service = make_service_with_backends(1000);
+    c.bench_function("lb_active_backends_1000", |b| {
+        b.iter(|| black_box(service.active_backends()))
     });
 }
 
-fn bench_upsert_service_100(c: &mut Criterion) {
-    c.bench_function("lb_upsert_service_100", |b| {
+fn bench_update_backend_state(c: &mut Criterion) {
+    let service = make_service_with_backends(1000);
+    c.bench_function("lb_update_backend_state", |b| {
         b.iter(|| {
-            let lb = LoadBalancer::new();
-            for i in 0..100 {
-                let name = ServiceName::new("test", format!("svc-{i}"));
-                let frontend = Frontend::new(
-                    L3n4Addr::new(
-                        IpAddr::V4(Ipv4Addr::new(10, 0, 0, (i % 250 + 1) as u8)),
-                        8080,
-                        L4Protocol::TCP,
-                    ),
-                    SvcType::ClusterIp,
-                    name.clone(),
-                );
-                let service = Service::new(name).with_frontends(vec![frontend]);
-                black_box(lb.upsert_service(service).unwrap());
-            }
-        })
-    });
-}
-
-fn bench_update_backends_100(c: &mut Criterion) {
-    let lb = LoadBalancer::new();
-    let service_name = ServiceName::new("test", "svc");
-    let frontend = Frontend::new(
-        L3n4Addr::new(
-            IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)),
-            8080,
-            L4Protocol::TCP,
-        ),
-        SvcType::ClusterIp,
-        service_name.clone(),
-    );
-    lb.upsert_service(Service::new(service_name.clone()).with_frontends(vec![frontend]))
-        .unwrap();
-
-    let backends: Vec<_> = (0..100)
-        .map(|i| {
-            Backend::new(
-                service_name.clone(),
-                L3n4Addr::new(
-                    IpAddr::V4(Ipv4Addr::new(10, 1, 0, (i % 250 + 1) as u8)),
-                    8080,
-                    L4Protocol::TCP,
-                ),
-            )
-        })
-        .collect();
-
-    c.bench_function("lb_update_backends_100", |b| {
-        b.iter(|| {
-            black_box(
-                lb.update_backends(&service_name, black_box(backends.clone()))
-                    .unwrap(),
-            )
+            let mut svc = service.clone();
+            svc.update_backend_state(BackendID(1000), BackendState::Maintenance)
+                .unwrap();
+            black_box(svc)
         })
     });
 }
 
 criterion_group!(
     lb_benches,
-    bench_round_robin_baseline,
-    bench_maglev,
-    bench_maglev_build,
+    bench_diff_backends,
     bench_service_name_new,
     bench_service_name_display,
     bench_l3n4addr_display_ipv4,
-    bench_upsert_service_1,
-    bench_upsert_service_100,
-    bench_update_backends_100,
+    bench_active_backends,
+    bench_update_backend_state,
 );
 criterion_main!(lb_benches);

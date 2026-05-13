@@ -370,9 +370,9 @@ mod tests {
 
     #[test]
     fn test_prefix_to_mask_v4() {
-        assert_eq!(prefix_to_mask_v4(0), Ipv4Addr::new(0, 0, 0, 0));
+        assert_eq!(prefix_to_mask_v4(0), Ipv4Addr::UNSPECIFIED);
         assert_eq!(prefix_to_mask_v4(24), Ipv4Addr::new(255, 255, 255, 0));
-        assert_eq!(prefix_to_mask_v4(32), Ipv4Addr::new(255, 255, 255, 255));
+        assert_eq!(prefix_to_mask_v4(32), Ipv4Addr::BROADCAST);
     }
 
     #[test]

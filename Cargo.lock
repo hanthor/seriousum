@@ -372,6 +372,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "async-trait",
+ "cilium-k8s",
  "cilium-kvstore",
  "clap",
  "dashmap",
@@ -384,6 +385,7 @@ dependencies = [
  "seriousum-crypto",
  "thiserror 2.0.18",
  "tokio",
+ "tokio-util",
  "tracing",
  "tracing-subscriber",
 ]
@@ -413,6 +415,9 @@ dependencies = [
 name = "cilium-k8s"
 version = "0.1.0"
 dependencies = [
+ "futures",
+ "k8s-openapi",
+ "kube",
  "serde",
  "thiserror 2.0.18",
  "tokio",
@@ -2183,6 +2188,7 @@ dependencies = [
  "seriousum-operator",
  "tokio",
  "tracing",
+ "tracing-subscriber",
 ]
 
 [[package]]
@@ -2793,6 +2799,7 @@ dependencies = [
  "bytes",
  "futures-core",
  "futures-sink",
+ "futures-util",
  "pin-project-lite",
  "slab",
  "tokio",

@@ -50,8 +50,8 @@ mod tests {
     fn exponential_backoff_defaults() {
         let backoff = ExponentialBackoff::default();
         assert_eq!(backoff.min, Duration::from_secs(1));
-        assert_eq!(backoff.max, Duration::from_secs(60));
-        assert_eq!(backoff.factor, 2.0);
+        assert_eq!(backoff.max, Duration::from_mins(1));
+        assert!((backoff.factor - 2.0).abs() < f64::EPSILON);
     }
 
     #[test]

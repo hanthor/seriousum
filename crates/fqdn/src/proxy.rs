@@ -256,9 +256,11 @@ mod tests {
 
     #[test]
     fn dns_proxy_config_custom() {
-        let mut config = DnsProxyConfig::default();
-        config.listen_port = 5353;
-        config.min_cache_ttl = 120;
+        let config = DnsProxyConfig {
+            listen_port: 5353,
+            min_cache_ttl: 120,
+            ..DnsProxyConfig::default()
+        };
 
         let proxy = DnsProxy::with_config(config);
 

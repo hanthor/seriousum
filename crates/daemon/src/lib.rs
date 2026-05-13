@@ -1,7 +1,10 @@
 //! Pure daemon configuration and lifecycle models.
 //!
 //! This crate ports the pure data model pieces from Cilium's daemon package
-//! without wiring external systems such as Kubernetes, kvstore, or datapath IO.
+//! and includes a minimal runtime loop for long-running agent startup.
+
+pub mod health;
+pub mod runtime;
 
 use std::net::{Ipv4Addr, Ipv6Addr};
 use std::path::{Path, PathBuf};
@@ -15,6 +18,9 @@ use tokio::sync::RwLock;
 use tracing::{debug, warn};
 
 use seriousum_config::RuntimeConfig;
+
+pub use health::{HealthStatus, ReadinessState, SharedHealth, new_health, set_ready, set_stopping};
+pub use runtime::{DaemonRuntime, ShutdownSignal};
 
 /// Errors returned by pure daemon configuration and lifecycle helpers.
 #[derive(Debug, Error)]
@@ -32,6 +38,10 @@ pub enum DaemonError {
 
 /// Result type used by daemon helpers.
 pub type Result<T> = std::result::Result<T, DaemonError>;
+
+fn default_true() -> bool {
+    true
+}
 
 /// Encapsulation mode for pod-to-pod traffic.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
@@ -140,6 +150,9 @@ pub struct DaemonConfig {
     pub node_port_mode: NodePortMode,
     /// Whether Hubble is enabled.
     pub enable_hubble: bool,
+    /// Whether Kubernetes watchers should be started by the runtime.
+    #[serde(default = "default_true")]
+    pub enable_k8s_integration: bool,
     /// Address used by the Hubble server.
     pub hubble_listen_address: String,
     /// Size of the Hubble flow buffer.
@@ -179,6 +192,7 @@ impl Default for DaemonConfig {
             enable_external_ips: true,
             node_port_mode: NodePortMode::Hybrid,
             enable_hubble: false,
+            enable_k8s_integration: true,
             hubble_listen_address: "localhost:4244".into(),
             hubble_flow_buffer_size: 4_096,
             datapath_mode: DatapathMode::Veth,
@@ -347,36 +361,37 @@ pub fn load_config(path: Option<PathBuf>) -> anyhow::Result<RuntimeConfig> {
 /// Initializes tracing for daemon binaries.
 pub fn init_tracing() {
     let _ = tracing_subscriber::fmt()
-        .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
+        .with_env_filter(
+            tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| "info".into()),
+        )
         .try_init();
 }
 
-/// Executes the daemon binary entrypoint without external subsystem IO.
-pub async fn execute(cli: Cli) -> anyhow::Result<()> {
-    init_tracing();
-
-    let config = load_config(cli.config)?;
+/// Maps runtime configuration into the daemon runtime configuration model.
+pub fn daemon_config_from_runtime_config(config: &RuntimeConfig) -> anyhow::Result<DaemonConfig> {
     let cluster_id = u8::try_from(config.agent.cluster_id)
         .map_err(|_| anyhow::anyhow!("cluster id {} exceeds u8 range", config.agent.cluster_id))?;
 
-    let daemon = Daemon::new(
-        DaemonConfig {
-            ipv4_enabled: config.agent.enable_ipv4,
-            ipv6_enabled: config.agent.enable_ipv6,
-            cluster_name: config.agent.cluster_name.clone(),
-            cluster_id,
-            ..DaemonConfig::default()
-        },
-        config.agent.node_name.clone(),
-    );
+    Ok(DaemonConfig {
+        ipv4_enabled: config.agent.enable_ipv4,
+        ipv6_enabled: config.agent.enable_ipv6,
+        cluster_name: config.agent.cluster_name.clone(),
+        cluster_id,
+        ..DaemonConfig::default()
+    })
+}
 
-    daemon.set_phase(DaemonPhase::Running).await;
-    debug!(
-        cluster_name = %daemon.config().cluster_name,
-        node_name = %config.agent.node_name,
-        ready = daemon.is_ready().await,
-        "initialized in-memory daemon state"
-    );
+/// Executes the daemon binary entrypoint as a long-running runtime loop.
+pub async fn execute(cli: Cli) -> anyhow::Result<()> {
+    init_tracing();
+
+    let runtime_config = load_config(cli.config)?;
+    let config = daemon_config_from_runtime_config(&runtime_config)?;
+    let runtime = DaemonRuntime::new(config);
+    runtime
+        .run()
+        .await
+        .map_err(|error| anyhow::anyhow!("{error}"))?;
 
     Ok(())
 }
@@ -504,6 +519,7 @@ mod tests {
         let cfg = DaemonConfig::default();
         assert!(cfg.ipv4_enabled);
         assert!(!cfg.ipv6_enabled);
+        assert!(cfg.enable_k8s_integration);
         assert_eq!(cfg.tunnel_mode, TunnelMode::Vxlan);
         assert_eq!(cfg.cluster_name, "default");
     }
@@ -548,6 +564,14 @@ mod tests {
         let back: DaemonConfig = serde_json::from_str(&json).expect("deserialize");
         assert_eq!(cfg.cluster_name, back.cluster_name);
         assert_eq!(cfg.ipv4_enabled, back.ipv4_enabled);
+        assert_eq!(cfg.enable_k8s_integration, back.enable_k8s_integration);
+    }
+
+    #[test]
+    fn test_config_serde_defaults_enable_k8s_integration() {
+        let cfg: DaemonConfig = serde_json::from_str("{}")
+            .expect("deserialize config with missing k8s integration field");
+        assert!(cfg.enable_k8s_integration);
     }
 
     #[test]

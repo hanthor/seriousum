@@ -131,7 +131,7 @@ impl DNSCache {
         self.entries
             .get(name)
             .and_then(DNSCacheEntry::valid_ips)
-            .map(|ips| ips.to_vec())
+            .map(<[IpAddr]>::to_vec)
             .unwrap_or_default()
     }
 
@@ -175,10 +175,10 @@ impl FQDNSelector {
     pub fn resolve_ips(&self, cache: &DNSCache) -> Vec<IpAddr> {
         let mut ips = HashSet::new();
         for (name, entry) in &cache.entries {
-            if self.matches(name) {
-                if let Some(valid_ips) = entry.valid_ips() {
-                    ips.extend(valid_ips.iter().copied());
-                }
+            if self.matches(name)
+                && let Some(valid_ips) = entry.valid_ips()
+            {
+                ips.extend(valid_ips.iter().copied());
             }
         }
 
@@ -272,7 +272,7 @@ mod tests {
         let entry = DNSCacheEntry::new(
             name.clone(),
             vec!["10.0.0.1".parse().unwrap()],
-            Duration::from_secs(300),
+            Duration::from_mins(5),
         );
         cache.update(entry);
         assert_eq!(
@@ -289,12 +289,12 @@ mod tests {
         cache.update(DNSCacheEntry::new(
             FQDN::new("api.example.com"),
             vec!["1.2.3.4".parse().unwrap()],
-            Duration::from_secs(300),
+            Duration::from_mins(5),
         ));
         cache.update(DNSCacheEntry::new(
             FQDN::new("other.net"),
             vec!["5.6.7.8".parse().unwrap()],
-            Duration::from_secs(300),
+            Duration::from_mins(5),
         ));
         let sel = FQDNSelector::new(vec![DNSPattern::parse("*.example.com")]);
         let ips = sel.resolve_ips(&cache);
@@ -308,7 +308,7 @@ mod tests {
         nm.update_dns(DNSCacheEntry::new(
             FQDN::new("redis.svc.local"),
             vec!["10.0.0.5".parse().unwrap()],
-            Duration::from_secs(60),
+            Duration::from_mins(1),
         ));
         assert_eq!(nm.selector_count(), 1);
         let sel = FQDNSelector::new(vec![DNSPattern::parse("*.svc.local")]);

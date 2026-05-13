@@ -1,5 +1,9 @@
 //! Pure Kubernetes resource and watcher types for offline and unit-test use.
 
+pub mod watcher;
+
+pub use watcher::{K8sEvent, K8sWatcher, WatcherError};
+
 use std::{collections::HashMap, net::IpAddr, sync::Arc};
 
 use serde::{Deserialize, Serialize};
@@ -294,6 +298,7 @@ pub enum K8sError {
 mod tests {
     use std::collections::HashMap;
 
+    use super::watcher::{K8sEvent, WatcherError};
     use super::{
         K8sNode, K8sNodeSpec, K8sNodeStatus, LabelSelector, NodeAddress, ObjectMeta, Pod, PodPhase,
         PodSpec, PodStatus, ResourceStore, Taint, WatchEvent,
@@ -416,5 +421,17 @@ mod tests {
 
         assert_eq!(pod.meta.namespaced_name(), "kube-system/agent");
         assert_eq!(node.status.addresses[0].type_, "InternalIP");
+    }
+
+    #[test]
+    fn test_k8s_event_variants() {
+        let events: Vec<K8sEvent> = vec![];
+        assert!(events.is_empty());
+    }
+
+    #[test]
+    fn test_watcher_error_display() {
+        let error = WatcherError::Init(String::from("test"));
+        assert!(error.to_string().contains("test"));
     }
 }

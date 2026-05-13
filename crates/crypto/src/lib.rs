@@ -974,7 +974,7 @@ mod tests {
     #[test]
     fn test_symmetric_key_debug_redacted() {
         let key = SymmetricKey::new([0; 32]);
-        let dbg = format!("{:?}", key);
+        let dbg = format!("{key:?}");
         assert!(dbg.contains("REDACTED"));
         assert!(!dbg.contains("00"));
     }
@@ -991,13 +991,14 @@ mod tests {
         assert!(mtls.is_mtls());
     }
 
+    #[allow(clippy::duration_suboptimal_units)]
     #[test]
     fn test_cert_info_wildcard_match() {
         let cert = CertInfo {
             subject: "CN=*.example.com".into(),
             issuer: "CN=CA".into(),
-            not_before: SystemTime::now() - Duration::from_secs(3600),
-            not_after: SystemTime::now() + Duration::from_secs(86400),
+            not_before: SystemTime::now() - Duration::from_secs(60 * 60),
+            not_after: SystemTime::now() + Duration::from_secs(60 * 60 * 24),
             serial: "01".into(),
             is_ca: false,
             dns_names: vec!["*.example.com".into()],
@@ -2363,7 +2364,7 @@ mod tests {
         }
     }
 
-    const INITIAL_CA_CERT: &[u8] = br#"-----BEGIN CERTIFICATE-----
+    const INITIAL_CA_CERT: &[u8] = br"-----BEGIN CERTIFICATE-----
 MIIDJzCCAg+gAwIBAgIQMUvUDie0mikTSp2IsrB4YjANBgkqhkiG9w0BAQsFADAe
 MRwwGgYDVQQDExNodWJibGUtY2EuY2lsaXVtLmlvMB4XDTIwMTAwMTEzMjUzMVoX
 DTIzMTAwMTEzMjUzMVowHjEcMBoGA1UEAxMTaHViYmxlLWNhLmNpbGl1bS5pbzCC
@@ -2382,9 +2383,9 @@ jesErGj1HyfHJ/uFwExPPjISeOaLho8HlSs2GWVGVwdj0quwDZpO1RNsjzwY/9dZ
 5aHOmj879VLHjgIXZ5wmB8cEi+j/QMsJUQcck4AnbwJOHg3QNo7N/ijeXCilBmfU
 /SIbm68WynGdIBXcA9lE8spxRk0u8aZ2XxWqjXNgrgOCEFb4LwFRauhpgQ==
 -----END CERTIFICATE-----
-"#;
+";
 
-    const INITIAL_CERT: &[u8] = br#"-----BEGIN CERTIFICATE-----
+    const INITIAL_CERT: &[u8] = br"-----BEGIN CERTIFICATE-----
 MIIDUzCCAjugAwIBAgIRALW5Aia05bOKS5c6pCiF6vEwDQYJKoZIhvcNAQELBQAw
 HjEcMBoGA1UEAxMTaHViYmxlLWNhLmNpbGl1bS5pbzAeFw0yMDEwMDExMzI1MzJa
 Fw0yMzEwMDExMzI1MzJaMCMxITAfBgNVBAMMGCouaHViYmxlLXJlbGF5LmNpbGl1
@@ -2404,9 +2405,9 @@ Y5AAszQL1crOr5upHAHV2JdhdYV16V+eAqBVXScI0f4LZA5jJfz+032rQh7YgV7m
 fWreTeQPP1XlzwAgYXQ/hoWIsl3/qt0oP0N5s9IAGxZEe8cnSKPS2jc+Egz5f6zF
 jjx7jgWrWRTL+F4ZJ9G6Qku0hFwVRTbR0i+2Gm4nxfx1yx/Cxd44
 -----END CERTIFICATE-----
-"#;
+";
 
-    const INITIAL_KEY: &[u8] = br#"-----BEGIN RSA PRIVATE KEY-----
+    const INITIAL_KEY: &[u8] = br"-----BEGIN RSA PRIVATE KEY-----
 MIIEogIBAAKCAQEAqaGVv7JeBYrd3KrQDIDZkseYfUPxD7B54Tak2lJL01/dD38g
 u1DXj0TgWdOHYUqtWyk+jSfwBUnKR68crcpBZCTM7/CKsJomI4QNfIHyZm66Dhq8
 nSz8qZ17i6vGnf2IVRomwCi6MDCS5dnd2k0AZGNhG73bFTIHCMdgZIbPAqOidgac
@@ -2433,5 +2434,5 @@ rIRzAoGAYHc7ILNRbeD0bIH55JPQ7iu2DXNTW1KVhIkx2INPcbK7HgO2hHH52cEg
 ck9YU3p58lvJC3iA/FwczkEgxt9h8EwJMdsNK1abzMNHUHu52udA6YZbrKs22OiT
 whwz8ZXadaGGom3X1ZiHyCHnMvK26QUmUS0sa9t2RfSheawFpLo=
 -----END RSA PRIVATE KEY-----
-"#;
+";
 }

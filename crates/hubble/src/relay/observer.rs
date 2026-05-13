@@ -316,7 +316,7 @@ mod tests {
         for i in 0..5 {
             collector
                 .add_flow(FlowRecord::new(
-                    &format!("flow-{}", i),
+                    format!("flow-{i}"),
                     "10.0.0.1",
                     "10.0.0.2",
                     "tcp",

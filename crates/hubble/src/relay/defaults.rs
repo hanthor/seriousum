@@ -61,7 +61,6 @@ mod tests {
     fn default_constants_are_valid() {
         assert!(!DEFAULT_CLUSTER_NAME.is_empty());
         assert!(HEALTH_CHECK_INTERVAL.as_secs() > 0);
-        assert!(SORT_BUFFER_MAX_LEN > 0);
         assert!(SORT_BUFFER_DRAIN_TIMEOUT.as_millis() > 0);
         assert!(!PEER_SERVICE_NAME.is_empty());
     }

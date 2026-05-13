@@ -1,10 +1,19 @@
 //! Lightweight CNI scaffolds for parity-friendly model work.
 
+pub mod plugin;
+
+pub use plugin::{CniCommand, CniContext, CniVersionResult, PluginError, run as run_plugin};
+
+#[cfg(test)]
 use std::collections::HashMap;
+#[cfg(test)]
 use std::path::{Path, PathBuf};
+#[cfg(test)]
 use std::sync::{Mutex, OnceLock};
+#[cfg(test)]
 use std::time::Duration;
 
+#[cfg(test)]
 use ring::digest::{SHA256, digest};
 use serde::{Deserialize, Serialize};
 use seriousum_core::{Error, Identity, IpNetwork, Result, SecurityIdentity, SecurityLabel};
@@ -157,6 +166,7 @@ pub struct NetConf {
     pub ipam: NetConfIpam,
 }
 
+#[allow(clippy::trivially_copy_pass_by_ref)]
 fn is_zero_u32(v: &u32) -> bool {
     *v == 0
 }
@@ -180,8 +190,6 @@ struct ConfList {
     cni_version: String,
     #[serde(default)]
     name: String,
-    #[serde(default)]
-    plugins: Vec<serde_json::Value>,
 }
 
 /// Reads and parses a CNI network configuration file.
@@ -715,20 +723,25 @@ pub fn scaffold() -> CniReport {
     CniReport::new(CniModel::scaffold())
 }
 
+#[cfg(test)]
 const CONNECTION_TIMEOUT: Duration = Duration::from_millis(1500);
+#[cfg(test)]
 const MAX_DELETION_FILES: usize = 256;
 
+#[cfg(test)]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 struct EndpointBatchDeleteRequest {
     container_id: String,
 }
 
+#[cfg(test)]
 impl EndpointBatchDeleteRequest {
     fn marshal_binary(&self) -> std::result::Result<Vec<u8>, serde_json::Error> {
         serde_json::to_vec(self)
     }
 }
 
+#[cfg(test)]
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum DeletionError {
     Client(String),
@@ -737,15 +750,19 @@ enum DeletionError {
     Queue(String),
 }
 
+#[cfg(test)]
 type DeletionResult<T> = std::result::Result<T, DeletionError>;
 
+#[cfg(test)]
 trait EndpointDeletionClient: Send {
     fn endpoint_delete_many(&mut self, request: &EndpointBatchDeleteRequest) -> DeletionResult<()>;
 }
 
+#[cfg(test)]
 type NewCiliumClientFn =
     Box<dyn Fn(Duration) -> DeletionResult<Box<dyn EndpointDeletionClient>> + Send + Sync>;
 
+#[cfg(test)]
 struct DeletionFallbackClient {
     cli: Option<Box<dyn EndpointDeletionClient>>,
     delete_queue_dir: PathBuf,
@@ -753,12 +770,14 @@ struct DeletionFallbackClient {
     new_cilium_client_fn: NewCiliumClientFn,
 }
 
+#[cfg(test)]
 enum DeleteBatchOutcome {
     Deleted,
     RetryQueue,
     Failed(DeletionError),
 }
 
+#[cfg(test)]
 impl DeletionFallbackClient {
     fn new_for_test(
         delete_queue_dir: impl Into<PathBuf>,
@@ -854,36 +873,43 @@ impl DeletionFallbackClient {
     }
 }
 
+#[cfg(test)]
 fn deletion_request_filename(request: &EndpointBatchDeleteRequest) -> DeletionResult<String> {
+    use std::fmt::Write as _;
+
     let contents = request
         .marshal_binary()
         .map_err(|error| DeletionError::Other(error.to_string()))?;
     let hash = digest(&SHA256, &contents);
     let mut filename = String::with_capacity(hash.as_ref().len() * 2 + 7);
     for byte in hash.as_ref() {
-        filename.push_str(&format!("{byte:02x}"));
+        let _ = write!(filename, "{byte:02x}");
     }
     filename.push_str(".delete");
     Ok(filename)
 }
 
+#[cfg(test)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum LockMode {
     Shared,
     Exclusive,
 }
 
+#[cfg(test)]
 #[derive(Debug, Default)]
 struct LockState {
     shared_holders: usize,
     exclusive_holder: bool,
 }
 
+#[cfg(test)]
 struct LockFile {
     path: PathBuf,
     mode: Mutex<Option<LockMode>>,
 }
 
+#[cfg(test)]
 impl LockFile {
     fn new(path: impl AsRef<Path>) -> std::io::Result<Self> {
         let path = path.as_ref().to_path_buf();
@@ -954,17 +980,20 @@ impl LockFile {
     }
 }
 
+#[cfg(test)]
 impl Drop for LockFile {
     fn drop(&mut self) {
         self.unlock();
     }
 }
 
+#[cfg(test)]
 fn lock_registry() -> &'static Mutex<HashMap<PathBuf, LockState>> {
     static REGISTRY: OnceLock<Mutex<HashMap<PathBuf, LockState>>> = OnceLock::new();
     REGISTRY.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
+#[cfg(test)]
 fn lock<T>(mutex: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
     match mutex.lock() {
         Ok(guard) => guard,
@@ -1277,12 +1306,16 @@ mod parity_tests {
     impl ErrorMock {
         fn call(&mut self) -> DeletionResult<()> {
             self.call_count += 1;
-            match self.error_case {
-                ErrorCase::Never => Ok(()),
-                ErrorCase::Once if self.call_count == 1 => Err(self.err.clone()),
-                ErrorCase::Twice if self.call_count <= 2 => Err(self.err.clone()),
-                ErrorCase::Always => Err(self.err.clone()),
-                _ => Ok(()),
+            let should_fail = match self.error_case {
+                ErrorCase::Never => false,
+                ErrorCase::Once => self.call_count == 1,
+                ErrorCase::Twice => self.call_count <= 2,
+                ErrorCase::Always => true,
+            };
+            if should_fail {
+                Err(self.err.clone())
+            } else {
+                Ok(())
             }
         }
     }

@@ -33,7 +33,7 @@ impl ControllerConfig {
     pub fn new(name: impl Into<String>) -> Self {
         Self {
             name: name.into(),
-            run_interval: Duration::from_secs(60),
+            run_interval: Duration::from_mins(1),
             max_retries: None,
             error_retry_base: Duration::from_secs(1),
             error_retry_max: Duration::from_secs(30),
@@ -444,9 +444,9 @@ struct ManagedController {
 // ---------------------------------------------------------------------------
 
 /// "Infinity" wait: 24 h — safe to add to Instant::now().
-const WAIT_FOREVER: Duration = Duration::from_secs(86_400);
+const WAIT_FOREVER: Duration = Duration::from_hours(24);
 
-fn run_controller(
+struct ControllerRunner {
     name: String,
     shared_params: Arc<Mutex<SharedParams>>,
     stats: Arc<Mutex<ControllerStats>>,
@@ -454,106 +454,117 @@ fn run_controller(
     update_rx: std::sync::mpsc::Receiver<()>,
     terminated: Arc<(Mutex<bool>, Condvar)>,
     cancel_token: Arc<Mutex<CancelToken>>,
-) {
-    let mut error_retries: u32 = 1;
+}
 
-    loop {
-        // ── 1. Snapshot current params (release lock immediately). ──────────
-        let snap = {
-            let sp = shared_params.lock().unwrap();
-            sp.snapshot.clone()
-        };
+impl ControllerRunner {
+    fn run(self) {
+        let Self {
+            name,
+            shared_params,
+            stats,
+            stop_rx,
+            update_rx,
+            terminated,
+            cancel_token,
+        } = self;
+        let mut error_retries: u32 = 1;
 
-        // ── 2. Get current cancel token. ────────────────────────────────────
-        let token = cancel_token.lock().unwrap().clone();
+        loop {
+            // ── 1. Snapshot current params (release lock immediately). ──────────
+            let snap = {
+                let sp = shared_params.lock().unwrap();
+                sp.snapshot.clone()
+            };
 
-        // ── 3. Call DoFunc (no lock held). ──────────────────────────────────
-        let result = match &snap.do_func {
-            Some(f) => f(token.clone()),
-            None => Err(anyhow::anyhow!("controller {} DoFunc is nil", name)),
-        };
+            // ── 2. Get current cancel token. ────────────────────────────────────
+            let token = cancel_token.lock().unwrap().clone();
 
-        // ── 4. Determine next wait interval. ────────────────────────────────
-        let interval;
-        match result {
-            Ok(()) => {
-                {
-                    let mut s = stats.lock().unwrap();
-                    s.success_count += 1;
-                    s.last_error = None;
-                }
-                error_retries = 1;
+            // ── 3. Call DoFunc (no lock held). ──────────────────────────────────
+            let result = match &snap.do_func {
+                Some(f) => f(token.clone()),
+                None => Err(anyhow::anyhow!("controller {name} DoFunc is nil")),
+            };
 
-                if snap.run_interval == Duration::ZERO {
-                    interval = WAIT_FOREVER;
-                } else {
-                    interval = snap.run_interval;
-                }
-            }
-            Err(e) => {
-                // An ExitReason or a cancelled context both mean "done for now".
-                let is_exit = e.is::<ExitReason>() || token.is_cancelled();
-
-                if is_exit {
+            // ── 4. Determine next wait interval. ────────────────────────────────
+            let interval;
+            match result {
+                Ok(()) => {
                     {
                         let mut s = stats.lock().unwrap();
                         s.success_count += 1;
                         s.last_error = None;
                     }
-                    interval = WAIT_FOREVER;
-                } else {
-                    {
-                        let mut s = stats.lock().unwrap();
-                        s.failure_count += 1;
-                        s.last_error = Some(format!("{}", e));
-                    }
-                    if snap.no_error_retry {
+                    error_retries = 1;
+
+                    if snap.run_interval == Duration::ZERO {
                         interval = WAIT_FOREVER;
                     } else {
-                        let base = if snap.error_retry_base_duration == Duration::ZERO {
-                            Duration::from_secs(1)
+                        interval = snap.run_interval;
+                    }
+                }
+                Err(e) => {
+                    // An ExitReason or a cancelled context both mean "done for now".
+                    let is_exit = e.is::<ExitReason>() || token.is_cancelled();
+
+                    if is_exit {
+                        {
+                            let mut s = stats.lock().unwrap();
+                            s.success_count += 1;
+                            s.last_error = None;
+                        }
+                        interval = WAIT_FOREVER;
+                    } else {
+                        {
+                            let mut s = stats.lock().unwrap();
+                            s.failure_count += 1;
+                            s.last_error = Some(format!("{e}"));
+                        }
+                        if snap.no_error_retry {
+                            interval = WAIT_FOREVER;
                         } else {
-                            snap.error_retry_base_duration
-                        };
-                        interval = base.saturating_mul(error_retries);
-                        error_retries = error_retries.saturating_add(1);
+                            let base = if snap.error_retry_base_duration == Duration::ZERO {
+                                Duration::from_secs(1)
+                            } else {
+                                snap.error_retry_base_duration
+                            };
+                            interval = base.saturating_mul(error_retries);
+                            error_retries = error_retries.saturating_add(1);
+                        }
+                    }
+                }
+            }
+
+            // ── 5. Wait for stop / update / timer. ──────────────────────────────
+            match wait_for_signal(&stop_rx, &update_rx, interval) {
+                WaitResult::Stop => break,
+                WaitResult::Update => {
+                    error_retries = 1;
+                }
+                WaitResult::TimedOut => {
+                    // Race-check stop.
+                    if stop_rx.try_recv().is_ok() {
+                        break;
                     }
                 }
             }
         }
 
-        // ── 5. Wait for stop / update / timer. ──────────────────────────────
-        match wait_for_signal(&stop_rx, &update_rx, interval) {
-            WaitResult::Stop => break,
-            WaitResult::Update => {
-                error_retries = 1;
-                continue;
-            }
-            WaitResult::TimedOut => {
-                // Race-check stop.
-                if stop_rx.try_recv().is_ok() {
-                    break;
-                }
-                continue;
-            }
+        // ── Shutdown: run StopFunc. ──────────────────────────────────────────────
+        let stop_token = CancelToken::new(); // fresh, never cancelled
+        let stop_func = {
+            let sp = shared_params.lock().unwrap();
+            sp.snapshot.stop_func.clone()
+        };
+        if let Some(f) = stop_func {
+            let _ = f(stop_token);
         }
-    }
 
-    // ── Shutdown: run StopFunc. ──────────────────────────────────────────────
-    let stop_token = CancelToken::new(); // fresh, never cancelled
-    let stop_func = {
-        let sp = shared_params.lock().unwrap();
-        sp.snapshot.stop_func.clone()
-    };
-    if let Some(f) = stop_func {
-        let _ = f(stop_token);
+        // ── Signal termination. ─────────────────────────────────────────────────
+        let (lock, cv) = &*terminated;
+        let mut done = lock.lock().unwrap();
+        *done = true;
+        cv.notify_all();
     }
-
-    // ── Signal termination. ─────────────────────────────────────────────────
-    let (lock, cv) = &*terminated;
-    let mut done = lock.lock().unwrap();
-    *done = true;
-    cv.notify_all();
 }
 
 fn wait_for_signal(
@@ -645,7 +656,7 @@ impl Manager {
                 stats: Arc::clone(&existing.stats),
             }
         } else {
-            self.create_controller_locked(map, name, params)
+            Self::create_controller_locked(map, name, params)
         }
     }
 
@@ -659,12 +670,11 @@ impl Manager {
             return false;
         }
 
-        self.create_controller_locked(map, name, params);
+        Self::create_controller_locked(map, name, params);
         true
     }
 
     fn create_controller_locked(
-        &self,
         map: &mut HashMap<String, ManagedController>,
         name: &str,
         params: ControllerParams,
@@ -692,9 +702,16 @@ impl Manager {
         let t_token = Arc::clone(&cancel_token);
 
         std::thread::spawn(move || {
-            run_controller(
-                t_name, t_shared, t_stats, stop_rx, update_rx, t_term, t_token,
-            );
+            ControllerRunner {
+                name: t_name,
+                shared_params: t_shared,
+                stats: t_stats,
+                stop_rx,
+                update_rx,
+                terminated: t_term,
+                cancel_token: t_token,
+            }
+            .run();
         });
 
         let handle = ControllerHandle {
@@ -798,7 +815,7 @@ impl ControllerHandle {
     pub fn get_last_error(&self) -> anyhow::Result<()> {
         match &self.stats.lock().unwrap().last_error {
             None => Ok(()),
-            Some(e) => Err(anyhow::anyhow!("{}", e)),
+            Some(e) => Err(anyhow::anyhow!("{e}")),
         }
     }
 }
@@ -1065,8 +1082,7 @@ mod parity_tests {
         let err = mngr.remove_controller("not-exists").unwrap_err();
         assert!(
             err.is::<ControllerNotFound>(),
-            "expected ControllerNotFound, got: {}",
-            err
+            "expected ControllerNotFound, got: {err}"
         );
     }
 
@@ -1077,8 +1093,7 @@ mod parity_tests {
         let err = mngr.remove_controller("not-exists").unwrap_err();
         assert!(
             err.is::<ControllerMapEmpty>(),
-            "expected ControllerMapEmpty, got: {}",
-            err
+            "expected ControllerMapEmpty, got: {err}"
         );
     }
 
@@ -1096,8 +1111,7 @@ mod parity_tests {
         let err = mngr.remove_controller_and_wait("not-exists").unwrap_err();
         assert!(
             err.is::<ControllerMapEmpty>(),
-            "expected ControllerMapEmpty, got: {}",
-            err
+            "expected ControllerMapEmpty, got: {err}"
         );
     }
 
@@ -1197,10 +1211,10 @@ mod parity_tests {
         );
 
         // The controller must NOT self-exit for 1 s.
-        match rx.recv_timeout(Duration::from_secs(1)) {
-            Ok(()) => panic!("Controller exited unexpectedly"),
-            Err(_) => {} // timeout — correct
-        }
+        assert!(
+            rx.recv_timeout(Duration::from_secs(1)).is_err(),
+            "Controller exited unexpectedly"
+        );
         assert_eq!(iterations.load(Ordering::SeqCst), 1);
 
         // Explicitly remove — now StopFunc must fire.
@@ -1250,12 +1264,11 @@ mod parity_tests {
             if ctrl.get_success_count() >= 2 {
                 break;
             }
-            if n == 100 {
-                panic!(
-                    "timeout waiting for controller to succeed, last error: {:?}",
-                    ctrl.get_last_error()
-                );
-            }
+            assert!(
+                n != 100,
+                "timeout waiting for controller to succeed, last error: {:?}",
+                ctrl.get_last_error()
+            );
             std::thread::sleep(Duration::from_millis(100));
         }
 
@@ -1290,14 +1303,14 @@ mod parity_tests {
 
         // Wait for DoFunc to start.
         started_rx
-            .recv_timeout(Duration::from_secs(60))
+            .recv_timeout(Duration::from_mins(1))
             .expect("timeout waiting for controller to start");
 
         mngr.remove_all();
 
         // Wait for cancellation.
         cancelled_rx
-            .recv_timeout(Duration::from_secs(60))
+            .recv_timeout(Duration::from_mins(1))
             .expect("timeout waiting for controller to be cancelled");
     }
 
@@ -1437,11 +1450,10 @@ fn select_recv(
         if chan1.try_recv().is_ok() || chan2.try_recv().is_ok() {
             return;
         }
-        if std::time::Instant::now() >= deadline {
-            panic!(
-                "Intermediate updates should have been elided — neither func1 nor func2 completed in time"
-            );
-        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "Intermediate updates should have been elided — neither func1 nor func2 completed in time"
+        );
         std::thread::sleep(Duration::from_millis(5));
     }
 }

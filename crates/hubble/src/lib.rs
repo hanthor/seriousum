@@ -67,6 +67,7 @@ pub enum Verdict {
 
 /// TCP flag summary for a flow event.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[allow(clippy::struct_excessive_bools)]
 pub struct TcpFlags {
     /// SYN flag.
     pub syn: bool,
@@ -636,8 +637,10 @@ pub fn run() -> Result<String> {
     render_report(&HubbleReport::scaffold())
 }
 
+#[cfg(test)]
 const FLOW_PRINT_COUNT: u64 = 20;
 
+#[cfg(test)]
 const MONITOR_MESSAGE_TYPE_NAMES: [&str; 8] = [
     "capture",
     "drop",
@@ -649,6 +652,7 @@ const MONITOR_MESSAGE_TYPE_NAMES: [&str; 8] = [
     "trace-sock",
 ];
 
+#[cfg(test)]
 const FLOW_EVENT_TYPES: [&str; 6] = [
     "capture",
     "drop",
@@ -658,6 +662,7 @@ const FLOW_EVENT_TYPES: [&str; 6] = [
     "trace-sock",
 ];
 
+#[cfg(test)]
 const DEFAULT_FIELD_MASK: [&str; 20] = [
     "time",
     "verdict",
@@ -681,8 +686,10 @@ const DEFAULT_FIELD_MASK: [&str; 20] = [
     "ip_trace_id",
 ];
 
+#[cfg(test)]
 type RawFlowFilter = serde_json::Map<String, serde_json::Value>;
 
+#[cfg(test)]
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 struct SelectorOptions {
     all: bool,
@@ -693,17 +700,20 @@ struct SelectorOptions {
     first: u64,
 }
 
+#[cfg(test)]
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 struct MaskOptions {
     field_mask: Vec<String>,
     use_default_masks: bool,
 }
 
+#[cfg(test)]
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct FormattingOptions {
     output: String,
 }
 
+#[cfg(test)]
 impl Default for FormattingOptions {
     fn default() -> Self {
         Self {
@@ -712,11 +722,13 @@ impl Default for FormattingOptions {
     }
 }
 
+#[cfg(test)]
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 struct OtherOptions {
     input_file: Option<String>,
 }
 
+#[cfg(test)]
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 struct FlowRequest {
     number: u64,
@@ -729,6 +741,7 @@ struct FlowRequest {
     field_mask: Vec<String>,
 }
 
+#[cfg(test)]
 fn apply_flow_args(
     formatting: &FormattingOptions,
     masks: &mut MaskOptions,
@@ -751,6 +764,7 @@ fn apply_flow_args(
     Ok(())
 }
 
+#[cfg(test)]
 fn parse_raw_filters(filters: &[String]) -> std::result::Result<Vec<RawFlowFilter>, String> {
     let mut parsed = Vec::new();
     for raw in filters {
@@ -770,6 +784,7 @@ fn parse_raw_filters(filters: &[String]) -> std::result::Result<Vec<RawFlowFilte
     Ok(parsed)
 }
 
+#[cfg(test)]
 fn is_valid_flow_filter_key(key: &str) -> bool {
     matches!(
         key,
@@ -792,6 +807,7 @@ fn is_valid_flow_filter_key(key: &str) -> bool {
     )
 }
 
+#[cfg(test)]
 fn get_flow_filters_yaml(request: &FlowRequest) -> std::result::Result<String, String> {
     let allowlist = request
         .whitelist
@@ -826,6 +842,7 @@ fn get_flow_filters_yaml(request: &FlowRequest) -> std::result::Result<String, S
     Ok(out)
 }
 
+#[cfg(test)]
 fn get_flows_request(
     selector: &mut SelectorOptions,
     masks: &MaskOptions,
@@ -891,6 +908,7 @@ fn get_flows_request(
     })
 }
 
+#[cfg(test)]
 fn is_valid_field_mask_path(path: &str) -> bool {
     DEFAULT_FIELD_MASK.contains(&path)
 }
@@ -1380,11 +1398,15 @@ mod parity_tests {
     /// allowlist/denylist keys.
     #[test]
     fn parity_get_flow_filters_yaml() {
-        let mut request = FlowRequest::default();
-        request.whitelist =
-            vec![serde_json::from_str(r#"{"source_ip":["1.2.3.4/16"]}"#).expect("valid filter")];
-        request.blacklist =
-            vec![serde_json::from_str(r#"{"source_port":["80"]}"#).expect("valid filter")];
+        let request = FlowRequest {
+            whitelist: vec![
+                serde_json::from_str(r#"{"source_ip":["1.2.3.4/16"]}"#).expect("valid filter"),
+            ],
+            blacklist: vec![
+                serde_json::from_str(r#"{"source_port":["80"]}"#).expect("valid filter"),
+            ],
+            ..Default::default()
+        };
 
         let output = get_flow_filters_yaml(&request).expect("yaml output");
         let expected = "allowlist:\n    - '{\"source_ip\":[\"1.2.3.4/16\"]}'\ndenylist:\n    - '{\"source_port\":[\"80\"]}'\n";
