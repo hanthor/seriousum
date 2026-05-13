@@ -1,308 +1,419 @@
-//! Policy repository: stores and manages policies
-//!
-//! The repository is the main policy engine: it stores rules, compiles them per
-//! endpoint, and generates MapState for eBPF consumption.
+//! Policy repository and policy distillation.
 
-use std::collections::HashMap;
-use std::sync::Arc;
+use std::collections::{BTreeMap, BTreeSet};
+use std::sync::{Arc, RwLock};
 
-use dashmap::DashMap;
-use tokio::sync::RwLock;
+use tracing::debug;
 
 use crate::{
-    EndpointIdentity, MapState, PolicyError, PolicyRule,
-    PolicyVerdict, Result, TrafficDirection,
+    CIDRPolicy, EgressRule, EndpointIdentity, Key, L4Traffic, LabeledIdentity, Labels,
+    MapStateEntry, MapStateMap, PolicyError, PolicyRule, Protocol, Result, Rule, TrafficDirection,
+    insert_map_state,
 };
 
-/// Policy repository: stores rules and compiles policy per endpoint
-pub struct PolicyRepository {
-    /// All ingress rules
-    ingress_rules: Arc<DashMap<String, PolicyRule>>,
-    /// All egress rules
-    egress_rules: Arc<DashMap<String, PolicyRule>>,
-    /// Compiled policies per identity
-    compiled_policies: Arc<RwLock<HashMap<EndpointIdentity, CompiledPolicy>>>,
+/// Distilled L4 policy map: each L4 tuple maps to the selected peer identities.
+pub type L4PolicyMap = BTreeMap<L4Traffic, BTreeSet<u32>>;
+
+#[derive(Debug, Default)]
+struct RepositoryState {
+    revision: u64,
+    rules: Vec<Rule>,
 }
 
-/// Compiled policy for an endpoint
-#[derive(Debug, Clone)]
-pub struct CompiledPolicy {
-    pub identity: EndpointIdentity,
-    pub map_state: MapState,
+/// In-memory policy repository.
+#[derive(Debug, Clone, Default)]
+pub struct Repository {
+    state: Arc<RwLock<RepositoryState>>,
 }
 
-impl PolicyRepository {
+/// Compatibility alias preserved for existing benchmarks and callers.
+pub type PolicyRepository = Repository;
+
+/// Distilled selector policy for one endpoint identity.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct SelectorPolicy {
+    /// Repository revision used to compute the policy.
+    pub revision: u64,
+    /// Distilled ingress peer identities per L4 tuple.
+    pub ingress_policy: L4PolicyMap,
+    /// Distilled egress peer identities per L4 tuple.
+    pub egress_policy: L4PolicyMap,
+    /// Distilled CIDR policy.
+    pub cidr_policy: CIDRPolicy,
+    /// Whether ingress is in default-deny mode.
+    pub deny_ingress: bool,
+    /// Whether egress is in default-deny mode.
+    pub deny_egress: bool,
+    /// Final distilled datapath map state.
+    pub map_state: MapStateMap,
+}
+
+impl SelectorPolicy {
+    /// Returns true when ingress allows the given identity, protocol, and port.
+    #[must_use]
+    pub fn ingress_allows(&self, identity: u32, protocol: Protocol, port: u16) -> bool {
+        Self::policy_allows(&self.ingress_policy, identity, protocol, port)
+    }
+
+    /// Returns true when egress allows the given identity, protocol, and port.
+    #[must_use]
+    pub fn egress_allows(&self, identity: u32, protocol: Protocol, port: u16) -> bool {
+        Self::policy_allows(&self.egress_policy, identity, protocol, port)
+    }
+
+    fn policy_allows(
+        policy_map: &L4PolicyMap,
+        identity: u32,
+        protocol: Protocol,
+        port: u16,
+    ) -> bool {
+        policy_map
+            .iter()
+            .any(|(traffic, peers)| traffic.matches(protocol, port) && peers.contains(&identity))
+    }
+}
+
+impl Repository {
+    /// Creates an empty repository.
+    #[must_use]
     pub fn new() -> Self {
         Self {
-            ingress_rules: Arc::new(DashMap::new()),
-            egress_rules: Arc::new(DashMap::new()),
-            compiled_policies: Arc::new(RwLock::new(HashMap::new())),
+            state: Arc::new(RwLock::new(RepositoryState {
+                revision: 1,
+                rules: Vec::new(),
+            })),
         }
     }
 
-    /// Add an ingress rule
-    pub fn add_ingress_rule(&self, rule_id: impl Into<String>, rule: PolicyRule) -> Result<()> {
+    /// Returns the current repository revision.
+    pub fn revision(&self) -> Result<u64> {
+        Ok(self
+            .state
+            .read()
+            .map_err(|_| PolicyError::ConcurrentModification)?
+            .revision)
+    }
+
+    /// Returns a snapshot of all rules.
+    pub fn rules(&self) -> Result<Vec<Rule>> {
+        Ok(self
+            .state
+            .read()
+            .map_err(|_| PolicyError::ConcurrentModification)?
+            .rules
+            .clone())
+    }
+
+    /// Adds a core rule to the repository and returns the new revision.
+    pub fn add_rule(&self, rule: Rule) -> Result<u64> {
+        let mut state = self
+            .state
+            .write()
+            .map_err(|_| PolicyError::ConcurrentModification)?;
+        state.rules.push(rule);
+        state.revision += 1;
+        Ok(state.revision)
+    }
+
+    /// Deletes rules whose subject labels match exactly and returns the count.
+    pub fn delete_rule_by_labels(&self, labels: &Labels) -> Result<usize> {
+        let mut state = self
+            .state
+            .write()
+            .map_err(|_| PolicyError::ConcurrentModification)?;
+        let before = state.rules.len();
+        state.rules.retain(|rule| &rule.labels != labels);
+        let deleted = before.saturating_sub(state.rules.len());
+        if deleted > 0 {
+            state.revision += 1;
+        }
+        Ok(deleted)
+    }
+
+    /// Adds a compatibility ingress rule.
+    pub fn add_ingress_rule(&self, _id: impl Into<String>, rule: PolicyRule) -> Result<u64> {
         if rule.direction != TrafficDirection::Ingress {
             return Err(PolicyError::InvalidRule(
                 "cannot add non-ingress rule to ingress set".to_string(),
             ));
         }
-        self.ingress_rules.insert(rule_id.into(), rule);
-        Ok(())
+        self.add_rule(rule.into())
     }
 
-    /// Add an egress rule
-    pub fn add_egress_rule(&self, rule_id: impl Into<String>, rule: PolicyRule) -> Result<()> {
+    /// Adds a compatibility egress rule.
+    pub fn add_egress_rule(&self, _id: impl Into<String>, rule: PolicyRule) -> Result<u64> {
         if rule.direction != TrafficDirection::Egress {
             return Err(PolicyError::InvalidRule(
                 "cannot add non-egress rule to egress set".to_string(),
             ));
         }
-        self.egress_rules.insert(rule_id.into(), rule);
-        Ok(())
+        self.add_rule(rule.into())
     }
 
-    /// Get an ingress rule
-    pub fn get_ingress_rule(&self, rule_id: &str) -> Option<PolicyRule> {
-        self.ingress_rules.get(rule_id).map(|r| r.clone())
+    /// Resolves policy for one endpoint against a set of peer identities.
+    pub fn resolve_policy(
+        &self,
+        endpoint: &LabeledIdentity,
+        peers: &[LabeledIdentity],
+    ) -> Result<SelectorPolicy> {
+        let state = self
+            .state
+            .read()
+            .map_err(|_| PolicyError::ConcurrentModification)?;
+
+        let matching_rules = state
+            .rules
+            .iter()
+            .filter(|rule| rule.matches_endpoint(&endpoint.labels))
+            .cloned()
+            .collect::<Vec<_>>();
+
+        let mut policy = SelectorPolicy {
+            revision: state.revision,
+            ..SelectorPolicy::default()
+        };
+
+        let ingress_rules_present = matching_rules
+            .iter()
+            .any(|rule| !rule.ingress_rules.is_empty());
+        let egress_rules_present = matching_rules
+            .iter()
+            .any(|rule| !rule.egress_rules.is_empty());
+        policy.deny_ingress = matching_rules.iter().any(Rule::default_deny_ingress);
+        policy.deny_egress = matching_rules.iter().any(Rule::default_deny_egress);
+
+        if ingress_rules_present && !policy.deny_ingress {
+            debug!(
+                identity = endpoint.identity.id,
+                "ingress policy selected without default deny"
+            );
+        }
+        if egress_rules_present && !policy.deny_egress {
+            debug!(
+                identity = endpoint.identity.id,
+                "egress policy selected without default deny"
+            );
+        }
+
+        for rule in matching_rules {
+            for ingress in &rule.ingress_rules {
+                Self::apply_ingress_rule(&mut policy, ingress, peers);
+            }
+            for egress in &rule.egress_rules {
+                Self::apply_egress_rule(&mut policy, egress, peers);
+            }
+        }
+
+        Ok(policy)
     }
 
-    /// Get an egress rule
-    pub fn get_egress_rule(&self, rule_id: &str) -> Option<PolicyRule> {
-        self.egress_rules.get(rule_id).map(|r| r.clone())
-    }
-
-    /// Delete an ingress rule
-    pub fn delete_ingress_rule(&self, rule_id: &str) -> Option<PolicyRule> {
-        self.ingress_rules.remove(rule_id).map(|(_, r)| r)
-    }
-
-    /// Delete an egress rule
-    pub fn delete_egress_rule(&self, rule_id: &str) -> Option<PolicyRule> {
-        self.egress_rules.remove(rule_id).map(|(_, r)| r)
-    }
-
-    /// Get count of ingress rules
-    pub fn ingress_rule_count(&self) -> usize {
-        self.ingress_rules.len()
-    }
-
-    /// Get count of egress rules
-    pub fn egress_rule_count(&self) -> usize {
-        self.egress_rules.len()
-    }
-
-    /// Distill policy for an endpoint identity
-    ///
-    /// This is the main policy compilation algorithm: takes all applicable rules
-    /// and compiles them into a MapState suitable for eBPF consumption.
+    /// Compatibility entry point preserved for existing benchmarks.
     pub fn distill_policy(
         &self,
         endpoint_identity: EndpointIdentity,
-        endpoint_labels: &HashMap<String, String>,
-    ) -> Result<CompiledPolicy> {
-        let mut map_state = MapState::new();
-
-        // Compile ingress policies
-        for rule_ref in self.ingress_rules.iter() {
-            let rule = rule_ref.value();
-
-            // Check if rule applies to this endpoint
-            if !rule.subject_selector.matches(endpoint_labels) {
-                continue;
-            }
-
-            // For each peer that matches the selector
-            Self::compile_rule_to_mapstate(&mut map_state, rule, endpoint_identity, TrafficDirection::Ingress)?;
-        }
-
-        // Compile egress policies
-        for rule_ref in self.egress_rules.iter() {
-            let rule = rule_ref.value();
-
-            // Check if rule applies to this endpoint
-            if !rule.subject_selector.matches(endpoint_labels) {
-                continue;
-            }
-
-            Self::compile_rule_to_mapstate(&mut map_state, rule, endpoint_identity, TrafficDirection::Egress)?;
-        }
-
-        Ok(CompiledPolicy {
-            identity: endpoint_identity,
-            map_state,
-        })
+        endpoint_labels: &Labels,
+    ) -> Result<SelectorPolicy> {
+        let endpoint = LabeledIdentity::new(endpoint_identity.id, endpoint_labels.clone());
+        self.resolve_policy(&endpoint, &[])
     }
 
-    /// Compile a single rule into MapState
-    fn compile_rule_to_mapstate(
-        map_state: &mut MapState,
-        rule: &PolicyRule,
-        endpoint_identity: EndpointIdentity,
+    fn apply_ingress_rule(
+        policy: &mut SelectorPolicy,
+        ingress: &crate::IngressRule,
+        peers: &[LabeledIdentity],
+    ) {
+        let selected_peers = ingress.selected_peers(peers);
+        for cidr_rule in &ingress.cidr_rules {
+            policy.cidr_policy.add_ingress_rule(cidr_rule.clone());
+        }
+        for traffic in ingress.l4_policy.entries() {
+            let peer_entry = policy.ingress_policy.entry(traffic.clone()).or_default();
+            for peer in &selected_peers {
+                peer_entry.insert(peer.identity.id);
+                Self::insert_entries(
+                    &mut policy.map_state,
+                    peer.identity.id,
+                    TrafficDirection::Ingress,
+                    &traffic,
+                    ingress.deny,
+                    ingress.l4_policy.proxy_required,
+                    ingress.l4_policy.authentication_required,
+                );
+            }
+        }
+    }
+
+    fn apply_egress_rule(
+        policy: &mut SelectorPolicy,
+        egress: &EgressRule,
+        peers: &[LabeledIdentity],
+    ) {
+        let selected_peers = egress.selected_peers(peers);
+        for cidr_rule in &egress.cidr_rules {
+            policy.cidr_policy.add_egress_rule(cidr_rule.clone());
+        }
+        for traffic in egress.l4_policy.entries() {
+            let peer_entry = policy.egress_policy.entry(traffic.clone()).or_default();
+            for peer in &selected_peers {
+                peer_entry.insert(peer.identity.id);
+                Self::insert_entries(
+                    &mut policy.map_state,
+                    peer.identity.id,
+                    TrafficDirection::Egress,
+                    &traffic,
+                    egress.deny,
+                    egress.l4_policy.proxy_required,
+                    egress.l4_policy.authentication_required,
+                );
+            }
+        }
+    }
+
+    fn insert_entries(
+        map_state: &mut MapStateMap,
+        identity: u32,
         direction: TrafficDirection,
-    ) -> Result<()> {
-        if rule.direction != direction {
-            return Ok(());
-        }
-
-        // Determine verdict based on rule type (allow or deny)
-        // For now: inferred rules are allow, explicit deny rules are deny
-        let verdict = if rule.l4_policy.is_empty() {
-            PolicyVerdict::Deny
+        traffic: &L4Traffic,
+        deny: bool,
+        proxy_required: bool,
+        authentication_required: bool,
+    ) {
+        let ports: Vec<u16> = if traffic.is_wildcard() {
+            vec![0]
         } else {
-            PolicyVerdict::Allow
+            (traffic.port_start..=traffic.port_end).collect()
         };
+        let nexthdr = traffic.protocol.as_u8();
+        let proxy_port = if proxy_required { 15000 } else { 0 };
+        let entry = MapStateEntry::new(proxy_port, deny, authentication_required);
 
-        // Add entries for each allowed L4 traffic in the rule
-        for traffic in &rule.l4_policy.allowed {
-            let protocol_num = match traffic.protocol {
-                crate::l4::Protocol::TCP => 6,
-                crate::l4::Protocol::UDP => 17,
-                crate::l4::Protocol::ICMP => 1,
-                crate::l4::Protocol::ICMPv6 => 58,
-            };
-
-            // Iterate through port range
-            for port in traffic.port_start..=traffic.port_end {
-                match direction {
-                    TrafficDirection::Ingress => {
-                        // For ingress, the peer is the remote identity
-                        map_state.add_ingress(endpoint_identity, port, protocol_num, verdict)?;
-                    }
-                    TrafficDirection::Egress => {
-                        // For egress, the peer is the remote identity
-                        map_state.add_egress(endpoint_identity, port, protocol_num, verdict)?;
-                    }
-                }
-            }
+        for port in ports {
+            insert_map_state(
+                map_state,
+                Key::new(identity, port, nexthdr, direction),
+                entry.clone(),
+            );
         }
-
-        Ok(())
-    }
-
-    /// Get compiled policy for an endpoint
-    pub async fn get_compiled_policy(&self, identity: EndpointIdentity) -> Result<Option<CompiledPolicy>> {
-        let policies = self.compiled_policies.read().await;
-        Ok(policies.get(&identity).cloned())
-    }
-
-    /// Store compiled policy for an endpoint
-    pub async fn set_compiled_policy(&self, identity: EndpointIdentity, policy: CompiledPolicy) -> Result<()> {
-        let mut policies = self.compiled_policies.write().await;
-        policies.insert(identity, policy);
-        Ok(())
-    }
-
-    /// Clear compiled policies
-    pub async fn clear_compiled_policies(&self) -> Result<()> {
-        let mut policies = self.compiled_policies.write().await;
-        policies.clear();
-        Ok(())
-    }
-
-    /// Get count of compiled policies
-    pub async fn compiled_policy_count(&self) -> Result<usize> {
-        let policies = self.compiled_policies.read().await;
-        Ok(policies.len())
-    }
-}
-
-impl Default for PolicyRepository {
-    fn default() -> Self {
-        Self::new()
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::{CIDRRule, DefaultDenyConfig, IngressRule, L4Policy, Selector};
+    use ipnet::IpNet;
+    use std::collections::HashMap;
+    use std::str::FromStr;
 
-    #[test]
-    fn test_policy_repository_new() {
-        let repo = PolicyRepository::new();
-        assert_eq!(repo.ingress_rule_count(), 0);
-        assert_eq!(repo.egress_rule_count(), 0);
+    fn labeled_identity(id: u32, labels: &[(&str, &str)]) -> LabeledIdentity {
+        LabeledIdentity::new(
+            id,
+            labels
+                .iter()
+                .map(|(key, value)| (String::from(*key), String::from(*value)))
+                .collect::<HashMap<_, _>>(),
+        )
     }
 
     #[test]
-    fn test_add_ingress_rule() {
-        let repo = PolicyRepository::new();
-        let rule = PolicyRule::new(TrafficDirection::Ingress);
-        repo.add_ingress_rule("rule-1", rule).unwrap();
-        assert_eq!(repo.ingress_rule_count(), 1);
+    fn repository_add_delete_and_resolve_policy() {
+        let repo = Repository::new();
+        let rule = Rule::new(HashMap::from([("app".to_string(), "backend".to_string())]))
+            .with_ingress_rule(
+                IngressRule::new().with_selector(Selector::empty().with_label("app", "frontend")),
+            );
+
+        let revision = repo.add_rule(rule).expect("rule added");
+        assert_eq!(revision, 2);
+        assert_eq!(repo.rules().expect("rules snapshot").len(), 1);
+
+        let endpoint = labeled_identity(300, &[("app", "backend")]);
+        let peer = labeled_identity(100, &[("app", "frontend")]);
+        let policy = repo
+            .resolve_policy(&endpoint, &[peer])
+            .expect("policy resolved");
+        assert!(policy.deny_ingress);
+
+        let deleted = repo
+            .delete_rule_by_labels(&HashMap::from([("app".to_string(), "backend".to_string())]))
+            .expect("rule deleted");
+        assert_eq!(deleted, 1);
     }
 
     #[test]
-    fn test_add_egress_rule() {
-        let repo = PolicyRepository::new();
-        let rule = PolicyRule::new(TrafficDirection::Egress);
-        repo.add_egress_rule("rule-1", rule).unwrap();
-        assert_eq!(repo.egress_rule_count(), 1);
+    fn distillation_produces_expected_allowed_sets() {
+        let repo = Repository::new();
+        let mut ingress_l4 = L4Policy::new();
+        ingress_l4.add_allowed(L4Traffic::new(Protocol::TCP, 80));
+        let mut egress_l4 = L4Policy::new();
+        egress_l4.add_allowed(L4Traffic::new(Protocol::TCP, 5432));
+
+        let cidr_rule = CIDRRule::new(
+            IpNet::from_str("10.0.0.0/24").expect("valid CIDR"),
+            vec![IpNet::from_str("10.0.0.128/25").expect("valid CIDR")],
+        )
+        .expect("valid CIDR rule");
+
+        let rule = Rule::new(HashMap::from([("app".to_string(), "backend".to_string())]))
+            .with_ingress_rule(
+                IngressRule::new()
+                    .with_selector(Selector::empty().with_label("app", "frontend"))
+                    .with_l4_policy(ingress_l4),
+            )
+            .with_egress_rule(
+                crate::EgressRule::new()
+                    .with_selector(Selector::empty().with_label("app", "db"))
+                    .with_cidr_rule(cidr_rule)
+                    .with_l4_policy(egress_l4),
+            )
+            .with_enable_default_deny(DefaultDenyConfig::new(Some(true), Some(true)));
+
+        repo.add_rule(rule).expect("rule added");
+
+        let endpoint = labeled_identity(300, &[("app", "backend")]);
+        let frontend = labeled_identity(100, &[("app", "frontend")]);
+        let database = labeled_identity(200, &[("app", "db")]);
+        let policy = repo
+            .resolve_policy(&endpoint, &[frontend.clone(), database.clone()])
+            .expect("policy resolved");
+
+        assert!(policy.deny_ingress);
+        assert!(policy.deny_egress);
+        assert!(policy.ingress_allows(frontend.identity.id, Protocol::TCP, 80));
+        assert!(!policy.ingress_allows(database.identity.id, Protocol::TCP, 80));
+        assert!(policy.egress_allows(database.identity.id, Protocol::TCP, 5432));
+        assert_eq!(policy.cidr_policy.generate_cidr_prefixes().len(), 2);
+        assert_eq!(
+            policy
+                .map_state
+                .get(&Key::new(100, 80, 6, TrafficDirection::Ingress)),
+            Some(&MapStateEntry::allow(0, false))
+        );
+        assert_eq!(
+            policy
+                .map_state
+                .get(&Key::new(200, 5432, 6, TrafficDirection::Egress)),
+            Some(&MapStateEntry::allow(0, false))
+        );
     }
 
     #[test]
-    fn test_wrong_direction_ingress() {
-        let repo = PolicyRepository::new();
-        let rule = PolicyRule::new(TrafficDirection::Egress);
-        let result = repo.add_ingress_rule("rule-1", rule);
-        assert!(result.is_err());
-    }
+    fn non_default_deny_rules_keep_default_allow_flags() {
+        let repo = Repository::new();
+        let rule = Rule::new(HashMap::from([("app".to_string(), "backend".to_string())]))
+            .with_egress_rule(
+                crate::EgressRule::new().with_selector(Selector::empty().with_label("app", "db")),
+            )
+            .with_enable_default_deny(DefaultDenyConfig::new(Some(false), Some(false)));
+        repo.add_rule(rule).expect("rule added");
 
-    #[test]
-    fn test_wrong_direction_egress() {
-        let repo = PolicyRepository::new();
-        let rule = PolicyRule::new(TrafficDirection::Ingress);
-        let result = repo.add_egress_rule("rule-1", rule);
-        assert!(result.is_err());
-    }
+        let endpoint = labeled_identity(300, &[("app", "backend")]);
+        let database = labeled_identity(200, &[("app", "db")]);
+        let policy = repo
+            .resolve_policy(&endpoint, &[database])
+            .expect("policy resolved");
 
-    #[test]
-    fn test_get_ingress_rule() {
-        let repo = PolicyRepository::new();
-        let rule = PolicyRule::new(TrafficDirection::Ingress);
-        repo.add_ingress_rule("rule-1", rule).unwrap();
-
-        let retrieved = repo.get_ingress_rule("rule-1");
-        assert!(retrieved.is_some());
-    }
-
-    #[test]
-    fn test_delete_ingress_rule() {
-        let repo = PolicyRepository::new();
-        let rule = PolicyRule::new(TrafficDirection::Ingress);
-        repo.add_ingress_rule("rule-1", rule).unwrap();
-
-        let deleted = repo.delete_ingress_rule("rule-1");
-        assert!(deleted.is_some());
-        assert_eq!(repo.ingress_rule_count(), 0);
-    }
-
-    #[tokio::test]
-    async fn test_distill_policy() {
-        let repo = PolicyRepository::new();
-        let identity = EndpointIdentity::new(42);
-        let mut labels = HashMap::new();
-        labels.insert("app".to_string(), "web".to_string());
-
-        // Distill with no rules (should succeed with empty policy)
-        let compiled = repo.distill_policy(identity, &labels).unwrap();
-        assert_eq!(compiled.identity, identity);
-        assert!(compiled.map_state.is_ingress_empty());
-    }
-
-    #[tokio::test]
-    async fn test_compiled_policy_storage() {
-        let repo = PolicyRepository::new();
-        let identity = EndpointIdentity::new(42);
-        let mut labels = HashMap::new();
-        labels.insert("app".to_string(), "web".to_string());
-
-        let compiled = repo.distill_policy(identity, &labels).unwrap();
-        repo.set_compiled_policy(identity, compiled).await.unwrap();
-
-        assert_eq!(repo.compiled_policy_count().await.unwrap(), 1);
-
-        let retrieved = repo.get_compiled_policy(identity).await.unwrap();
-        assert!(retrieved.is_some());
+        assert!(!policy.deny_ingress);
+        assert!(!policy.deny_egress);
     }
 }

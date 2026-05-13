@@ -159,7 +159,7 @@ harness = false
 criterion = { version = "0.5", features = ["html_reports", "async_tokio"] }
 tokio = { version = "1", features = ["full"] }
 seriousum-loadbalancer = { path = "crates/loadbalancer" }
-seriousum-policy = { path = "crates/policy" }
+seriousum-policy = { package = "cilium-policy", path = "crates/policy" }
 seriousum-endpoints = { path = "crates/endpoints" }
 seriousum-fqdn = { path = "crates/fqdn" }
 serde_json = { workspace = true }

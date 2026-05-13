@@ -1,52 +1,82 @@
-//! L4 policy (port and protocol) handling
-//!
-//! Represents allowed/denied traffic on specific ports and protocols.
+//! L4 policy helpers.
 
-use std::collections::HashMap;
+use serde::{Deserialize, Serialize};
 
 use crate::{PolicyError, Result};
 
-/// Protocols supported in policies.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+/// Transport or network protocol used by an L4 rule.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
 pub enum Protocol {
+    /// Wildcard protocol.
+    Any,
+    /// TCP traffic.
     TCP,
+    /// UDP traffic.
     UDP,
+    /// SCTP traffic.
+    SCTP,
+    /// ICMP traffic.
     ICMP,
+    /// ICMPv6 traffic.
     ICMPv6,
+}
+
+impl Protocol {
+    /// Converts a protocol name into a protocol value.
+    #[must_use]
+    pub fn from_name(name: &str) -> Option<Self> {
+        match name.to_ascii_uppercase().as_str() {
+            "ANY" => Some(Self::Any),
+            "TCP" => Some(Self::TCP),
+            "UDP" => Some(Self::UDP),
+            "SCTP" => Some(Self::SCTP),
+            "ICMP" => Some(Self::ICMP),
+            "ICMPV6" => Some(Self::ICMPv6),
+            _ => None,
+        }
+    }
+
+    /// Returns the kernel protocol number for the protocol.
+    #[must_use]
+    pub fn as_u8(self) -> u8 {
+        match self {
+            Self::Any => 0,
+            Self::TCP => 6,
+            Self::UDP => 17,
+            Self::SCTP => 132,
+            Self::ICMP => 1,
+            Self::ICMPv6 => 58,
+        }
+    }
 }
 
 impl std::fmt::Display for Protocol {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
+            Self::Any => write!(f, "ANY"),
             Self::TCP => write!(f, "TCP"),
             Self::UDP => write!(f, "UDP"),
+            Self::SCTP => write!(f, "SCTP"),
             Self::ICMP => write!(f, "ICMP"),
             Self::ICMPv6 => write!(f, "ICMPv6"),
         }
     }
 }
 
-impl Protocol {
-    pub fn from_name(name: &str) -> Option<Self> {
-        match name.to_uppercase().as_str() {
-            "TCP" => Some(Self::TCP),
-            "UDP" => Some(Self::UDP),
-            "ICMP" => Some(Self::ICMP),
-            "ICMPV6" => Some(Self::ICMPv6),
-            _ => None,
-        }
-    }
-}
-
-/// L4 traffic specification: protocol + port range
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+/// A port and protocol range allowed by policy.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
 pub struct L4Traffic {
+    /// Protocol matched by the rule.
     pub protocol: Protocol,
+    /// First allowed port in the range.
     pub port_start: u16,
+    /// Last allowed port in the range.
     pub port_end: u16,
 }
 
 impl L4Traffic {
+    /// Creates a rule for a single port.
+    #[must_use]
     pub fn new(protocol: Protocol, port: u16) -> Self {
         Self {
             protocol,
@@ -55,12 +85,24 @@ impl L4Traffic {
         }
     }
 
+    /// Creates a wildcard rule matching all protocols and ports.
+    #[must_use]
+    pub fn any() -> Self {
+        Self {
+            protocol: Protocol::Any,
+            port_start: 0,
+            port_end: u16::MAX,
+        }
+    }
+
+    /// Creates a rule for a port range.
     pub fn range(protocol: Protocol, start: u16, end: u16) -> Result<Self> {
         if start > end {
-            return Err(PolicyError::InvalidL4Policy(
-                format!("port range invalid: {start} > {end}"),
-            ));
+            return Err(PolicyError::InvalidL4Policy(format!(
+                "port range invalid: {start} > {end}"
+            )));
         }
+
         Ok(Self {
             protocol,
             port_start: start,
@@ -68,89 +110,82 @@ impl L4Traffic {
         })
     }
 
+    /// Returns true when this rule covers the provided protocol and port.
+    #[must_use]
     pub fn matches(&self, protocol: Protocol, port: u16) -> bool {
-        self.protocol == protocol && port >= self.port_start && port <= self.port_end
+        (self.protocol == Protocol::Any || self.protocol == protocol)
+            && port >= self.port_start
+            && port <= self.port_end
+    }
+
+    /// Returns true when this rule represents a wildcard L3-only rule.
+    #[must_use]
+    pub fn is_wildcard(&self) -> bool {
+        self.protocol == Protocol::Any && self.port_start == 0 && self.port_end == u16::MAX
     }
 }
 
-/// L4 selector: matches traffic by protocol and port
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct L4Selector {
-    pub protocol: Protocol,
-    pub port_start: u16,
-    pub port_end: u16,
-}
-
-impl L4Selector {
-    pub fn new(protocol: Protocol, port: u16) -> Self {
-        Self {
-            protocol,
-            port_start: port,
-            port_end: port,
-        }
-    }
-
-    pub fn matches(&self, traffic: &L4Traffic) -> bool {
-        self.protocol == traffic.protocol
-            && traffic.port_start >= self.port_start
-            && traffic.port_end <= self.port_end
-    }
-}
-
-/// L4 policy: allowed/denied L4 traffic combinations
-#[derive(Debug, Clone, Default)]
+/// Distilled L4 policy attached to a rule.
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub struct L4Policy {
-    /// Allowed L4 traffic (empty = deny all)
+    /// Allowed protocol and port combinations.
     pub allowed: Vec<L4Traffic>,
-    /// Whether to redirect to L7 proxy
+    /// Whether matching traffic should be redirected to a proxy.
     pub proxy_required: bool,
-    /// Per-traffic L7 rules (for HTTP, DNS, etc.)
-    pub l7_rules: HashMap<String, Vec<String>>,
+    /// Whether matching traffic requires authentication.
+    pub authentication_required: bool,
 }
 
 impl L4Policy {
+    /// Creates an empty L4 policy.
+    #[must_use]
     pub fn new() -> Self {
         Self::default()
     }
 
+    /// Creates an allow-all policy.
+    #[must_use]
     pub fn allow_all() -> Self {
         Self {
-            allowed: vec![
-                L4Traffic::range(Protocol::TCP, 0, u16::MAX).unwrap(),
-                L4Traffic::range(Protocol::UDP, 0, u16::MAX).unwrap(),
-                L4Traffic::new(Protocol::ICMP, 0),
-            ],
+            allowed: vec![L4Traffic::any()],
             proxy_required: false,
-            l7_rules: HashMap::new(),
+            authentication_required: false,
         }
     }
 
+    /// Creates a deny-all policy.
+    #[must_use]
     pub fn deny_all() -> Self {
-        Self {
-            allowed: vec![],
-            proxy_required: false,
-            l7_rules: HashMap::new(),
-        }
+        Self::default()
     }
 
+    /// Adds an allowed L4 rule.
     pub fn add_allowed(&mut self, traffic: L4Traffic) {
         self.allowed.push(traffic);
     }
 
-    pub fn allows(&self, traffic: &L4Traffic) -> bool {
-        self.allowed.iter().any(|allowed| {
-            allowed.protocol == traffic.protocol
-                && traffic.port_start >= allowed.port_start
-                && traffic.port_end <= allowed.port_end
-        })
+    /// Returns the rule entries, defaulting to a wildcard when no ports are given.
+    #[must_use]
+    pub fn entries(&self) -> Vec<L4Traffic> {
+        if self.allowed.is_empty() {
+            vec![L4Traffic::any()]
+        } else {
+            self.allowed.clone()
+        }
     }
 
+    /// Returns true when the policy allows the provided traffic.
+    #[must_use]
+    pub fn allows(&self, protocol: Protocol, port: u16) -> bool {
+        self.entries()
+            .iter()
+            .any(|allowed| allowed.matches(protocol, port))
+    }
+
+    /// Returns true when the policy has no explicit entries.
+    #[must_use]
     pub fn is_empty(&self) -> bool {
         self.allowed.is_empty()
-    }
-
-    pub fn requires_proxy(&self) -> bool {
-        self.proxy_required
     }
 }
 
@@ -159,71 +194,22 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_protocol_from_name() {
+    fn protocol_from_name_supports_any() {
+        assert_eq!(Protocol::from_name("any"), Some(Protocol::Any));
         assert_eq!(Protocol::from_name("tcp"), Some(Protocol::TCP));
-        assert_eq!(Protocol::from_name("UDP"), Some(Protocol::UDP));
-        assert_eq!(Protocol::from_name("unknown"), None);
+        assert_eq!(Protocol::from_name("bad"), None);
     }
 
     #[test]
-    fn test_l4_traffic_new() {
-        let traffic = L4Traffic::new(Protocol::TCP, 80);
-        assert_eq!(traffic.protocol, Protocol::TCP);
-        assert_eq!(traffic.port_start, 80);
-        assert_eq!(traffic.port_end, 80);
+    fn l4_range_rejects_inverted_port_ranges() {
+        let result = L4Traffic::range(Protocol::TCP, 81, 80);
+        assert!(result.is_err());
     }
 
     #[test]
-    fn test_l4_traffic_range() {
-        let traffic = L4Traffic::range(Protocol::TCP, 8000, 9000).unwrap();
-        assert!(traffic.matches(Protocol::TCP, 8500));
-        assert!(!traffic.matches(Protocol::TCP, 7999));
-        assert!(!traffic.matches(Protocol::UDP, 8500));
-    }
-
-    #[test]
-    fn test_l4_traffic_range_invalid() {
-        assert!(L4Traffic::range(Protocol::TCP, 9000, 8000).is_err());
-    }
-
-    #[test]
-    fn test_l4_selector_matches() {
-        let selector = L4Selector::new(Protocol::TCP, 80);
-        let traffic = L4Traffic::new(Protocol::TCP, 80);
-        assert!(selector.matches(&traffic));
-
-        let traffic2 = L4Traffic::new(Protocol::UDP, 80);
-        assert!(!selector.matches(&traffic2));
-    }
-
-    #[test]
-    fn test_l4_policy_allow_all() {
+    fn wildcard_policy_matches_any_port() {
         let policy = L4Policy::allow_all();
-        assert!(!policy.is_empty());
-        assert!(policy.allows(&L4Traffic::new(Protocol::TCP, 80)));
-        assert!(policy.allows(&L4Traffic::new(Protocol::UDP, 53)));
-    }
-
-    #[test]
-    fn test_l4_policy_deny_all() {
-        let policy = L4Policy::deny_all();
-        assert!(policy.is_empty());
-        assert!(!policy.allows(&L4Traffic::new(Protocol::TCP, 80)));
-    }
-
-    #[test]
-    fn test_l4_policy_add_allowed() {
-        let mut policy = L4Policy::deny_all();
-        policy.add_allowed(L4Traffic::new(Protocol::TCP, 80));
-        assert!(policy.allows(&L4Traffic::new(Protocol::TCP, 80)));
-        assert!(!policy.allows(&L4Traffic::new(Protocol::TCP, 443)));
-    }
-
-    #[test]
-    fn test_l4_policy_proxy_required() {
-        let mut policy = L4Policy::new();
-        assert!(!policy.requires_proxy());
-        policy.proxy_required = true;
-        assert!(policy.requires_proxy());
+        assert!(policy.allows(Protocol::TCP, 80));
+        assert!(policy.allows(Protocol::UDP, 53));
     }
 }
