@@ -1,78 +1,62 @@
-//! Load balancer subsystem — ported from cilium/pkg/loadbalancer
-//!
-//! This module implements the Cilium load balancer, which reconciles Kubernetes Services
-//! with eBPF BPF maps for packet forwarding. It includes service types, frontend/backend
-//! management, consistent-hash backend selection (Maglev), and DSR/SNAT modes.
+#![allow(clippy::upper_case_acronyms)]
+//! Core load-balancer value types ported from Cilium's `pkg/loadbalancer`.
 
-use dashmap::DashMap;
 use serde::{Deserialize, Serialize};
-use std::net::{IpAddr, SocketAddr};
-use std::sync::Arc;
+use std::collections::HashMap;
+use std::fmt;
+use std::net::IpAddr;
 use thiserror::Error;
-use tracing::debug;
 
-/// Error type for load balancer operations.
-#[derive(Debug, Error)]
-pub enum LbError {
-    #[error("service not found: {0}")]
-    ServiceNotFound(String),
+/// Result type for pure load-balancer operations.
+pub type Result<T> = std::result::Result<T, LoadBalancerError>;
 
+/// Errors returned by pure load-balancer helpers.
+#[derive(Debug, Clone, PartialEq, Eq, Error)]
+pub enum LoadBalancerError {
+    /// The requested backend does not exist in the service.
     #[error("backend not found: {0}")]
-    BackendNotFound(String),
+    BackendNotFound(BackendID),
 
-    #[error("frontend not found: {0}")]
-    FrontendNotFound(String),
-
-    #[error("invalid service type")]
-    InvalidServiceType,
-
-    #[error("invalid IP address")]
-    InvalidIp,
-
-    #[error("no healthy backends available")]
-    NoHealthyBackends,
-
-    #[error("reconciliation failed: {0}")]
-    ReconciliationFailed(String),
-
-    #[error("eBPF map error: {0}")]
-    BpfMapError(String),
-
-    #[error("invalid configuration: {0}")]
-    InvalidConfig(String),
+    /// The requested state transition is not allowed.
+    #[error("invalid backend state transition from {from} to {to}")]
+    InvalidBackendStateTransition {
+        /// Current backend state.
+        from: BackendState,
+        /// Requested backend state.
+        to: BackendState,
+    },
 }
 
-pub type Result<T> = std::result::Result<T, LbError>;
+/// Service identifier allocated for a frontend.
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize, Default,
+)]
+pub struct ServiceID(pub u32);
 
-/// Service identifier in eBPF maps (u16).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
-pub struct ServiceId(pub u16);
-
-impl ServiceId {
-    pub const MIN: Self = Self(1);
-    pub const MAX: Self = Self(u16::MAX);
+impl ServiceID {
+    /// The zero service identifier.
     pub const ZERO: Self = Self(0);
-
-    pub fn is_reserved(&self) -> bool {
-        self.0 == 0
-    }
 }
 
-impl std::fmt::Display for ServiceId {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+impl fmt::Display for ServiceID {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "{}", self.0)
     }
 }
 
-/// Service name in format: namespace/name or cluster/namespace/name
+/// Fully-qualified service name.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct ServiceName {
+    /// Kubernetes namespace.
     pub namespace: String,
+    /// Kubernetes service name.
     pub name: String,
+    /// Optional cluster name for clustermesh services.
     pub cluster: Option<String>,
 }
 
 impl ServiceName {
+    /// Creates a service name in the local cluster.
     pub fn new(namespace: impl Into<String>, name: impl Into<String>) -> Self {
         Self {
             namespace: namespace.into(),
@@ -81,847 +65,651 @@ impl ServiceName {
         }
     }
 
+    /// Associates the service with a specific cluster.
     pub fn with_cluster(mut self, cluster: impl Into<String>) -> Self {
         self.cluster = Some(cluster.into());
         self
     }
+
+    /// Returns whether two service names are deeply equal.
+    pub fn deep_equals(&self, other: &Self) -> bool {
+        self == other
+    }
 }
 
-impl std::fmt::Display for ServiceName {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+impl fmt::Display for ServiceName {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         if let Some(cluster) = &self.cluster {
-            write!(f, "{}/{}/{}", cluster, self.namespace, self.name)
+            write!(f, "{cluster}/{}/{}", self.namespace, self.name)
         } else {
             write!(f, "{}/{}", self.namespace, self.name)
         }
     }
 }
 
-/// Layer 3 and Layer 4 address (IP + port + protocol).
+/// Supported L4 protocols for service and backend addresses.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum L4Type {
+    /// No protocol was specified.
+    None,
+    /// Wildcard protocol.
+    Any,
+    /// TCP.
+    TCP,
+    /// UDP.
+    UDP,
+    /// SCTP.
+    SCTP,
+}
+
+impl fmt::Display for L4Type {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let value = match self {
+            Self::None => "NONE",
+            Self::Any => "ANY",
+            Self::TCP => "TCP",
+            Self::UDP => "UDP",
+            Self::SCTP => "SCTP",
+        };
+        f.write_str(value)
+    }
+}
+
+/// Layer 4 address consisting of protocol and port.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct L4Addr {
+    /// Layer 4 protocol.
+    pub protocol: L4Type,
+    /// Transport port.
+    pub port: u16,
+}
+
+impl L4Addr {
+    /// Creates a new L4 address.
+    pub const fn new(protocol: L4Type, port: u16) -> Self {
+        Self { protocol, port }
+    }
+
+    /// Returns whether two L4 addresses are deeply equal.
+    pub fn deep_equals(&self, other: &Self) -> bool {
+        self == other
+    }
+}
+
+impl fmt::Display for L4Addr {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}/{}", self.port, self.protocol)
+    }
+}
+
+/// L3/L4 address used by frontends and backends.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct L3n4Addr {
+    /// IP address.
     pub ip: IpAddr,
-    pub port: u16,
-    pub protocol: L4Protocol,
+    /// Layer 4 address.
+    pub l4_addr: L4Addr,
 }
 
 impl L3n4Addr {
-    pub fn new(ip: IpAddr, port: u16, protocol: L4Protocol) -> Self {
-        Self { ip, port, protocol }
+    /// Creates a new L3/L4 address.
+    pub const fn new(ip: IpAddr, port: u16, protocol: L4Type) -> Self {
+        Self {
+            ip,
+            l4_addr: L4Addr::new(protocol, port),
+        }
     }
 
-    pub fn socket_addr(&self) -> SocketAddr {
-        SocketAddr::new(self.ip, self.port)
+    /// Returns the transport port.
+    pub const fn port(&self) -> u16 {
+        self.l4_addr.port
     }
-}
 
-impl std::fmt::Display for L3n4Addr {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{}:{}({})", self.ip, self.port, self.protocol)
+    /// Returns the L4 protocol.
+    pub const fn protocol(&self) -> L4Type {
+        self.l4_addr.protocol
     }
-}
 
-/// Layer 4 protocol.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
-pub enum L4Protocol {
-    TCP,
-    UDP,
-    SCTP,
-    Unknown(u8),
-}
+    /// Returns whether the address is IPv6.
+    pub fn is_ipv6(&self) -> bool {
+        self.ip.is_ipv6()
+    }
 
-impl std::fmt::Display for L4Protocol {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::TCP => write!(f, "TCP"),
-            Self::UDP => write!(f, "UDP"),
-            Self::SCTP => write!(f, "SCTP"),
-            Self::Unknown(n) => write!(f, "Unknown({})", n),
+    /// Returns whether two addresses are deeply equal.
+    pub fn deep_equals(&self, other: &Self) -> bool {
+        self == other
+    }
+
+    /// Formats the address in Cilium's `ip:port/proto` style.
+    pub fn string_with_protocol(&self) -> String {
+        if self.is_ipv6() {
+            format!("[{}]:{}/{}", self.ip, self.port(), self.protocol())
+        } else {
+            format!("{}:{}/{}", self.ip, self.port(), self.protocol())
         }
     }
 }
 
-/// Service type.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
-pub enum SvcType {
-    ClusterIp,
-    NodePort,
-    LoadBalancer,
-    ExternalIps,
-    HostPort,
-    LocalRedirect,
-}
-
-impl std::fmt::Display for SvcType {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::ClusterIp => write!(f, "ClusterIP"),
-            Self::NodePort => write!(f, "NodePort"),
-            Self::LoadBalancer => write!(f, "LoadBalancer"),
-            Self::ExternalIps => write!(f, "ExternalIPs"),
-            Self::HostPort => write!(f, "HostPort"),
-            Self::LocalRedirect => write!(f, "LocalRedirect"),
-        }
+impl fmt::Display for L3n4Addr {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(&self.string_with_protocol())
     }
 }
 
-/// Traffic policy (Local vs Cluster).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
-pub enum TrafficPolicy {
-    Cluster,
-    Local,
+/// L3/L4 address paired with a numeric identifier.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct L3n4AddrID {
+    /// Address portion.
+    pub addr: L3n4Addr,
+    /// Numeric identifier.
+    pub id: u32,
 }
 
-impl std::fmt::Display for TrafficPolicy {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::Cluster => write!(f, "Cluster"),
-            Self::Local => write!(f, "Local"),
+impl L3n4AddrID {
+    /// Creates a new identified address.
+    pub fn new(addr: L3n4Addr, id: impl Into<u32>) -> Self {
+        Self {
+            addr,
+            id: id.into(),
         }
+    }
+
+    /// Returns whether two identified addresses are deeply equal.
+    pub fn deep_equals(&self, other: &Self) -> bool {
+        self == other
+    }
+
+    /// Returns the identifier as a service ID.
+    pub const fn service_id(&self) -> ServiceID {
+        ServiceID(self.id)
     }
 }
 
-/// Forwarding mode.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
-pub enum ForwardingMode {
-    DSR,  // Direct Server Return
-    SNAT, // Source NAT
-}
-
-impl std::fmt::Display for ForwardingMode {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::DSR => write!(f, "DSR"),
-            Self::SNAT => write!(f, "SNAT"),
-        }
+impl fmt::Display for L3n4AddrID {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{} ({})", self.addr, self.id)
     }
 }
 
-/// Backend state.
+/// Backend identifier.
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize, Default,
+)]
+pub struct BackendID(pub u32);
+
+impl fmt::Display for BackendID {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}", self.0)
+    }
+}
+
+impl From<u32> for ServiceID {
+    fn from(value: u32) -> Self {
+        Self(value)
+    }
+}
+
+impl From<ServiceID> for u32 {
+    fn from(value: ServiceID) -> Self {
+        value.0
+    }
+}
+
+impl From<u32> for BackendID {
+    fn from(value: u32) -> Self {
+        Self(value)
+    }
+}
+
+impl From<BackendID> for u32 {
+    fn from(value: BackendID) -> Self {
+        value.0
+    }
+}
+
+/// Backend state used for reconciliation and traffic eligibility.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum BackendState {
+    /// Eligible for load-balancing.
     Active,
+    /// Gracefully terminating and only used as fallback.
     Terminating,
+    /// Temporarily quarantined and not selected.
     Quarantined,
+    /// Manually held out of rotation.
+    Maintenance,
 }
 
-impl std::fmt::Display for BackendState {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::Active => write!(f, "Active"),
-            Self::Terminating => write!(f, "Terminating"),
-            Self::Quarantined => write!(f, "Quarantined"),
-        }
+impl BackendState {
+    /// Returns whether a transition to `next` is allowed.
+    pub fn can_transition_to(self, next: Self) -> bool {
+        self == next
+            || matches!(
+                (self, next),
+                (Self::Active | Self::Quarantined, Self::Terminating)
+                    | (Self::Active, Self::Quarantined | Self::Maintenance)
+                    | (Self::Quarantined | Self::Maintenance, Self::Active)
+            )
     }
 }
 
-/// Backend represents a single pod backing a service.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+impl fmt::Display for BackendState {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let value = match self {
+            Self::Active => "active",
+            Self::Terminating => "terminating",
+            Self::Quarantined => "quarantined",
+            Self::Maintenance => "maintenance",
+        };
+        f.write_str(value)
+    }
+}
+
+/// Backend entry consisting of an address, numeric ID, and current state.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct Backend {
-    pub service_name: ServiceName,
-    pub address: L3n4Addr,
-    pub node_name: Option<String>,
-    pub port_names: Vec<String>,
-    pub weight: u16,
+    /// Address and numeric identifier.
+    pub address: L3n4AddrID,
+    /// Current backend state.
     pub state: BackendState,
-    pub healthy: bool,
 }
 
 impl Backend {
-    pub fn new(service_name: ServiceName, address: L3n4Addr) -> Self {
+    /// Creates a new active backend.
+    pub fn new(id: BackendID, addr: L3n4Addr) -> Self {
+        Self::with_state(id, addr, BackendState::Active)
+    }
+
+    /// Creates a backend with an explicit state.
+    pub fn with_state(id: BackendID, addr: L3n4Addr, state: BackendState) -> Self {
         Self {
-            service_name,
-            address,
-            node_name: None,
-            port_names: Vec::new(),
-            weight: 100,
-            state: BackendState::Active,
-            healthy: true,
+            address: L3n4AddrID::new(addr, id),
+            state,
         }
     }
 
-    pub fn is_alive(&self) -> bool {
-        self.healthy && (self.state == BackendState::Active || self.state == BackendState::Terminating)
+    /// Returns the backend identifier.
+    pub const fn id(&self) -> BackendID {
+        BackendID(self.address.id)
+    }
+
+    /// Returns whether this backend is eligible for traffic.
+    pub fn is_active(&self) -> bool {
+        self.state == BackendState::Active
+    }
+
+    /// Updates the backend state if the transition is valid.
+    pub fn transition_to(&mut self, next: BackendState) -> Result<()> {
+        if !self.state.can_transition_to(next) {
+            return Err(LoadBalancerError::InvalidBackendStateTransition {
+                from: self.state,
+                to: next,
+            });
+        }
+        self.state = next;
+        Ok(())
     }
 }
 
-impl std::fmt::Display for Backend {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(
-            f,
-            "{} -> {} ({})",
-            self.service_name,
-            self.address,
-            if self.healthy { "healthy" } else { "unhealthy" }
-        )
+impl fmt::Display for Backend {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{} [{}]", self.address.addr, self.state)
     }
 }
 
-/// Frontend represents a service endpoint (VIP + port).
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct Frontend {
-    pub address: L3n4Addr,
-    pub service_type: SvcType,
-    pub service_name: ServiceName,
-    pub id: ServiceId,
+/// Cilium service type.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum SVCType {
+    /// No service type.
+    None,
+    /// HostPort service.
+    HostPort,
+    /// ClusterIP service.
+    ClusterIP,
+    /// NodePort service.
+    NodePort,
+    /// ExternalIPs service.
+    ExternalIPs,
+    /// LoadBalancer service.
+    LoadBalancer,
+    /// Local redirect service.
+    LocalRedirect,
+}
+
+impl fmt::Display for SVCType {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let value = match self {
+            Self::None => "NONE",
+            Self::HostPort => "HostPort",
+            Self::ClusterIP => "ClusterIP",
+            Self::NodePort => "NodePort",
+            Self::ExternalIPs => "ExternalIPs",
+            Self::LoadBalancer => "LoadBalancer",
+            Self::LocalRedirect => "LocalRedirect",
+        };
+        f.write_str(value)
+    }
+}
+
+/// Service traffic policy.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum SVCTrafficPolicy {
+    /// No traffic policy was specified.
+    None,
+    /// Route to any healthy backend.
+    Cluster,
+    /// Route only to local backends.
+    Local,
+}
+
+impl fmt::Display for SVCTrafficPolicy {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let value = match self {
+            Self::None => "NONE",
+            Self::Cluster => "Cluster",
+            Self::Local => "Local",
+        };
+        f.write_str(value)
+    }
+}
+
+/// NAT policy applied to backend traffic.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum SVCNatPolicy {
+    /// No address-family translation.
+    None,
+    /// Translate IPv4 frontends to IPv6 backends.
+    Nat46,
+    /// Translate IPv6 frontends to IPv4 backends.
+    Nat64,
+}
+
+impl fmt::Display for SVCNatPolicy {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let value = match self {
+            Self::None => "NONE",
+            Self::Nat46 => "Nat46",
+            Self::Nat64 => "Nat64",
+        };
+        f.write_str(value)
+    }
+}
+
+/// Service definition containing a frontend and its backends.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SVC {
+    /// Optional Kubernetes service name.
+    pub name: Option<ServiceName>,
+    /// Service frontend address and identifier.
+    pub frontend: L3n4AddrID,
+    /// Backends serving the frontend.
     pub backends: Vec<Backend>,
-    pub traffic_policy: TrafficPolicy,
-    pub forwarding_mode: ForwardingMode,
+    /// Service type.
+    pub svc_type: SVCType,
+    /// External traffic policy.
+    pub ext_traffic_policy: SVCTrafficPolicy,
+    /// Internal traffic policy.
+    pub int_traffic_policy: SVCTrafficPolicy,
+    /// NAT policy.
+    pub nat_policy: SVCNatPolicy,
 }
 
-impl Frontend {
-    pub fn new(address: L3n4Addr, service_type: SvcType, service_name: ServiceName) -> Self {
+impl SVC {
+    /// Creates a new service with default policies.
+    pub fn new(frontend: L3n4AddrID) -> Self {
         Self {
-            address,
-            service_type,
-            service_name,
-            id: ServiceId::ZERO,
+            name: None,
+            frontend,
             backends: Vec::new(),
-            traffic_policy: TrafficPolicy::Cluster,
-            forwarding_mode: ForwardingMode::SNAT,
+            svc_type: SVCType::ClusterIP,
+            ext_traffic_policy: SVCTrafficPolicy::Cluster,
+            int_traffic_policy: SVCTrafficPolicy::Cluster,
+            nat_policy: SVCNatPolicy::None,
         }
     }
 
-    pub fn with_backends(mut self, backends: Vec<Backend>) -> Self {
-        self.backends = backends;
-        self
+    /// Returns the frontend identifier as a service ID.
+    pub const fn service_id(&self) -> ServiceID {
+        self.frontend.service_id()
     }
 
-    pub fn healthy_backends(&self) -> Vec<&Backend> {
-        self.backends.iter().filter(|b| b.is_alive()).collect()
-    }
-
-    pub fn local_backends(&self, node_name: &str) -> Vec<&Backend> {
+    /// Returns all backends currently in the active state.
+    pub fn active_backends(&self) -> Vec<&Backend> {
         self.backends
             .iter()
-            .filter(|b| b.node_name.as_deref() == Some(node_name) && b.is_alive())
+            .filter(|backend| backend.is_active())
             .collect()
+    }
+
+    /// Returns whether the service already contains the backend ID.
+    pub fn has_backend(&self, backend_id: BackendID) -> bool {
+        self.backends
+            .iter()
+            .any(|backend| backend.id() == backend_id)
+    }
+
+    /// Updates the state of a backend referenced by ID.
+    pub fn update_backend_state(
+        &mut self,
+        backend_id: BackendID,
+        next_state: BackendState,
+    ) -> Result<()> {
+        let backend = self
+            .backends
+            .iter_mut()
+            .find(|backend| backend.id() == backend_id)
+            .ok_or(LoadBalancerError::BackendNotFound(backend_id))?;
+        backend.transition_to(next_state)
     }
 }
 
-impl std::fmt::Display for Frontend {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+impl fmt::Display for SVC {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(
             f,
-            "{}:{} ({}, {} backends)",
-            self.address.ip,
-            self.address.port,
-            self.service_type,
-            self.backends.len()
+            "{} -> {} backends ({})",
+            self.frontend.addr,
+            self.backends.len(),
+            self.svc_type
         )
     }
 }
 
-/// Service represents a Kubernetes service with multiple frontends.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct Service {
-    pub name: ServiceName,
-    pub frontends: Vec<Frontend>,
-    pub session_affinity: bool,
-    pub session_affinity_timeout: u32,
+/// Backend reconciliation delta between desired and actual state.
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub struct BackendDiff {
+    /// Backends present only in the desired state.
+    pub added: Vec<Backend>,
+    /// Backends present only in the actual state.
+    pub removed: Vec<Backend>,
+    /// Backends with the same ID but different content.
+    pub updated: Vec<Backend>,
 }
 
-impl Service {
-    pub fn new(name: ServiceName) -> Self {
-        Self {
-            name,
-            frontends: Vec::new(),
-            session_affinity: false,
-            session_affinity_timeout: 10800,
-        }
-    }
-
-    pub fn with_frontends(mut self, frontends: Vec<Frontend>) -> Self {
-        self.frontends = frontends;
-        self
+impl BackendDiff {
+    /// Returns `true` when no reconciliation is required.
+    pub fn is_empty(&self) -> bool {
+        self.added.is_empty() && self.removed.is_empty() && self.updated.is_empty()
     }
 }
 
-impl std::fmt::Display for Service {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{} ({} frontends)", self.name, self.frontends.len())
-    }
-}
+/// Computes the backend reconciliation delta between desired and actual state.
+pub fn diff_backends(desired: &[Backend], actual: &[Backend]) -> BackendDiff {
+    let desired_by_id: HashMap<BackendID, &Backend> = desired
+        .iter()
+        .map(|backend| (backend.id(), backend))
+        .collect();
+    let actual_by_id: HashMap<BackendID, &Backend> = actual
+        .iter()
+        .map(|backend| (backend.id(), backend))
+        .collect();
 
-/// Maglev consistent hash implementation for backend selection.
-///
-/// Maglev uses a permutation table to consistently map traffic to backends
-/// with minimal disruption on backend changes.
-pub struct MaglevHash {
-    backends: Vec<String>,
-    permutation_table: Vec<usize>,
-    table_size: usize,
-}
+    let added = desired
+        .iter()
+        .filter(|backend| !actual_by_id.contains_key(&backend.id()))
+        .cloned()
+        .collect();
 
-impl MaglevHash {
-    const DEFAULT_TABLE_SIZE: usize = 65521; // Prime number
-
-    pub fn new(backends: Vec<String>) -> Result<Self> {
-        if backends.is_empty() {
-            return Err(LbError::NoHealthyBackends);
-        }
-
-        let table_size = Self::DEFAULT_TABLE_SIZE;
-        let mut perm_table = vec![usize::MAX; table_size];
-
-        // Build permutation table using Maglev algorithm
-        let mut offset = vec![0usize; backends.len()];
-        let mut skip = vec![0usize; backends.len()];
-
-        for (i, backend) in backends.iter().enumerate() {
-            // Use hash of backend to seed offset and skip
-            let hash = fnv_hash(backend);
-            offset[i] = (hash as usize) % table_size;
-            skip[i] = ((hash >> 32) as usize % (table_size - 1)) + 1;
-        }
-
-        // Fill permutation table
-        for j in 0..table_size {
-            for i in 0..backends.len() {
-                let pos = (offset[i] + j * skip[i]) % table_size;
-                if perm_table[pos] == usize::MAX {
-                    perm_table[pos] = i;
-                    break;
-                }
-            }
-        }
-
-        Ok(Self {
-            backends,
-            permutation_table: perm_table,
-            table_size,
+    let updated = desired
+        .iter()
+        .filter_map(|backend| match actual_by_id.get(&backend.id()) {
+            Some(actual_backend) if *actual_backend != backend => Some(backend.clone()),
+            _ => None,
         })
+        .collect();
+
+    let removed = actual
+        .iter()
+        .filter(|backend| !desired_by_id.contains_key(&backend.id()))
+        .cloned()
+        .collect();
+
+    BackendDiff {
+        added,
+        removed,
+        updated,
     }
-
-    pub fn select(&self, key: &[u8]) -> Result<&str> {
-        if self.backends.is_empty() {
-            return Err(LbError::NoHealthyBackends);
-        }
-        let hash = fnv_hash_bytes(key);
-        let idx = (hash as usize) % self.table_size;
-        let backend_idx = self.permutation_table[idx];
-        Ok(&self.backends[backend_idx])
-    }
-}
-
-/// FNV-1a hash function.
-fn fnv_hash(s: &str) -> u64 {
-    fnv_hash_bytes(s.as_bytes())
-}
-
-fn fnv_hash_bytes(data: &[u8]) -> u64 {
-    const FNV_OFFSET_BASIS: u64 = 0xcbf29ce484222325;
-    const FNV_PRIME: u64 = 0x100000001b3;
-
-    let mut hash = FNV_OFFSET_BASIS;
-    for &byte in data {
-        hash ^= byte as u64;
-        hash = hash.wrapping_mul(FNV_PRIME);
-    }
-    hash
-}
-
-/// Load balancer manager.
-pub struct LoadBalancer {
-    services: Arc<DashMap<ServiceName, Service>>,
-    frontends: Arc<DashMap<ServiceId, Frontend>>,
-    service_id_counter: Arc<std::sync::atomic::AtomicU16>,
-}
-
-impl LoadBalancer {
-    pub fn new() -> Self {
-        Self {
-            services: Arc::new(DashMap::new()),
-            frontends: Arc::new(DashMap::new()),
-            service_id_counter: Arc::new(std::sync::atomic::AtomicU16::new(ServiceId::MIN.0)),
-        }
-    }
-
-    /// Add or update a service.
-    pub fn upsert_service(&self, service: Service) -> Result<()> {
-        debug!("Upserting service: {}", service.name);
-        self.services.insert(service.name.clone(), service);
-        Ok(())
-    }
-
-    /// Retrieve a service by name.
-    pub fn get_service(&self, name: &ServiceName) -> Result<Option<Service>> {
-        Ok(self.services.get(name).map(|entry| entry.value().clone()))
-    }
-
-    /// List all services.
-    pub fn list_services(&self) -> Vec<Service> {
-        self.services.iter().map(|entry| entry.value().clone()).collect()
-    }
-
-    /// Allocate a new service ID.
-    fn allocate_service_id(&self) -> ServiceId {
-        let id = self.service_id_counter.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-        ServiceId(id)
-    }
-
-    /// Add a frontend for a service.
-    pub fn add_frontend(&self, mut frontend: Frontend) -> Result<()> {
-        frontend.id = self.allocate_service_id();
-        debug!("Adding frontend: {} with ID {}", frontend.address, frontend.id);
-        self.frontends.insert(frontend.id, frontend);
-        Ok(())
-    }
-
-    /// Get a frontend by ID.
-    pub fn get_frontend(&self, id: ServiceId) -> Result<Option<Frontend>> {
-        Ok(self.frontends.get(&id).map(|entry| entry.value().clone()))
-    }
-
-    /// List all frontends.
-    pub fn list_frontends(&self) -> Vec<Frontend> {
-        self.frontends.iter().map(|entry| entry.value().clone()).collect()
-    }
-
-    /// Select a backend for a frontend using Maglev hashing.
-    pub fn select_backend(&self, frontend_id: ServiceId, flow_hash: &[u8]) -> Result<Backend> {
-        let frontend = self
-            .frontends
-            .get(&frontend_id)
-            .ok_or_else(|| LbError::FrontendNotFound(frontend_id.to_string()))?;
-
-        let healthy_backends = frontend
-            .healthy_backends()
-            .into_iter()
-            .map(|b| b.address.ip.to_string())
-            .collect::<Vec<_>>();
-
-        if healthy_backends.is_empty() {
-            return Err(LbError::NoHealthyBackends);
-        }
-
-        let maglev = MaglevHash::new(healthy_backends)?;
-        let selected_ip = maglev.select(flow_hash)?;
-
-        // Find the backend with this IP
-        frontend
-            .healthy_backends()
-            .into_iter()
-            .find(|b| b.address.ip.to_string() == selected_ip)
-            .cloned()
-            .ok_or_else(|| LbError::BackendNotFound(selected_ip.to_string()))
-    }
-
-    /// Update backends for a service.
-    pub fn update_backends(&self, service_name: &ServiceName, backends: Vec<Backend>) -> Result<()> {
-        let mut service = self
-            .services
-            .get_mut(service_name)
-            .ok_or_else(|| LbError::ServiceNotFound(service_name.to_string()))?;
-
-        for frontend in &mut service.frontends {
-            frontend.backends = backends.clone();
-        }
-
-        debug!("Updated {} backends for service {}", backends.len(), service_name);
-        Ok(())
-    }
-
-    /// Remove a service.
-    pub fn remove_service(&self, name: &ServiceName) -> Result<()> {
-        self.services.remove(name);
-        debug!("Removed service: {}", name);
-        Ok(())
-    }
-
-    /// Get statistics.
-    pub fn stats(&self) -> LoadBalancerStats {
-        LoadBalancerStats {
-            services: self.services.len(),
-            frontends: self.frontends.len(),
-            total_backends: self
-                .frontends
-                .iter()
-                .map(|entry| entry.value().backends.len())
-                .sum(),
-        }
-    }
-}
-
-impl Default for LoadBalancer {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-/// Load balancer statistics.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct LoadBalancerStats {
-    pub services: usize,
-    pub frontends: usize,
-    pub total_backends: usize,
-}
-
-/// Run the load balancer scaffold.
-pub fn scaffold() -> String {
-    format!(
-        "load balancer scaffold ready | services=0 | frontends=0 | backends=0"
-    )
-}
-
-/// Run the load balancer.
-pub fn run() -> Result<String> {
-    Ok(scaffold())
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::{HashSet, hash_map::DefaultHasher};
+    use std::hash::{Hash, Hasher};
+    use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 
-    #[test]
-    fn test_service_name_display() {
-        let name = ServiceName::new("default", "nginx");
-        assert_eq!(name.to_string(), "default/nginx");
-
-        let name = ServiceName::new("default", "nginx").with_cluster("us-west");
-        assert_eq!(name.to_string(), "us-west/default/nginx");
+    fn backend(id: u32, ip: IpAddr, state: BackendState) -> Backend {
+        Backend::with_state(id.into(), L3n4Addr::new(ip, 8080, L4Type::TCP), state)
     }
 
     #[test]
-    fn test_service_id_reserved() {
-        assert!(ServiceId::ZERO.is_reserved());
-        assert!(!ServiceId::MIN.is_reserved());
-    }
-
-    #[test]
-    fn test_backend_is_alive() {
-        let backend = Backend::new(
-            ServiceName::new("default", "nginx"),
-            L3n4Addr::new("10.0.0.1".parse().unwrap(), 8080, L4Protocol::TCP),
-        );
-        assert!(backend.is_alive());
-
-        let mut backend = backend;
-        backend.healthy = false;
-        assert!(!backend.is_alive());
-
-        backend.healthy = true;
-        backend.state = BackendState::Quarantined;
-        assert!(!backend.is_alive());
-    }
-
-    #[test]
-    fn test_frontend_healthy_backends() {
-        let svc_name = ServiceName::new("default", "nginx");
-        let backend1 = Backend::new(
-            svc_name.clone(),
-            L3n4Addr::new("10.0.0.1".parse().unwrap(), 8080, L4Protocol::TCP),
-        );
-        let mut backend2 = Backend::new(
-            svc_name.clone(),
-            L3n4Addr::new("10.0.0.2".parse().unwrap(), 8080, L4Protocol::TCP),
-        );
-        backend2.healthy = false;
-
-        let frontend = Frontend::new(
-            L3n4Addr::new("10.1.1.1".parse().unwrap(), 80, L4Protocol::TCP),
-            SvcType::ClusterIp,
-            svc_name,
-        )
-        .with_backends(vec![backend1.clone(), backend2]);
-
-        let healthy = frontend.healthy_backends();
-        assert_eq!(healthy.len(), 1);
-        assert_eq!(healthy[0].address.ip.to_string(), "10.0.0.1");
-    }
-
-    #[test]
-    fn test_frontend_local_backends() {
-        let svc_name = ServiceName::new("default", "nginx");
-        let mut backend1 = Backend::new(
-            svc_name.clone(),
-            L3n4Addr::new("10.0.0.1".parse().unwrap(), 8080, L4Protocol::TCP),
-        );
-        backend1.node_name = Some("node1".to_string());
-
-        let mut backend2 = Backend::new(
-            svc_name.clone(),
-            L3n4Addr::new("10.0.0.2".parse().unwrap(), 8080, L4Protocol::TCP),
-        );
-        backend2.node_name = Some("node2".to_string());
-
-        let frontend = Frontend::new(
-            L3n4Addr::new("10.1.1.1".parse().unwrap(), 80, L4Protocol::TCP),
-            SvcType::ClusterIp,
-            svc_name,
-        )
-        .with_backends(vec![backend1, backend2]);
-
-        let local = frontend.local_backends("node1");
-        assert_eq!(local.len(), 1);
-        assert_eq!(local[0].address.ip.to_string(), "10.0.0.1");
-    }
-
-    #[test]
-    fn test_maglev_hash_creation() {
-        let backends = vec!["backend1".to_string(), "backend2".to_string(), "backend3".to_string()];
-        let maglev = MaglevHash::new(backends).unwrap();
-        assert_eq!(maglev.backends.len(), 3);
-        assert_eq!(maglev.table_size, MaglevHash::DEFAULT_TABLE_SIZE);
-    }
-
-    #[test]
-    fn test_maglev_hash_empty_backends() {
-        let backends: Vec<String> = vec![];
-        let result = MaglevHash::new(backends);
-        assert!(result.is_err());
-    }
-
-    #[test]
-    fn test_maglev_select_consistent() {
-        let backends = vec!["backend1".to_string(), "backend2".to_string()];
-        let maglev = MaglevHash::new(backends).unwrap();
-
-        let flow_hash = b"flow1";
-        let selected1 = maglev.select(flow_hash).unwrap();
-        let selected2 = maglev.select(flow_hash).unwrap();
-
-        assert_eq!(selected1, selected2, "Selection should be deterministic");
-    }
-
-    #[test]
-    fn test_maglev_select_distribution() {
-        let backends = vec!["b1".to_string(), "b2".to_string(), "b3".to_string()];
-        let maglev = MaglevHash::new(backends).unwrap();
-
-        // Verify that selection works and is deterministic
-        let flow_hash1 = b"flow1";
-        let selected1 = maglev.select(flow_hash1).unwrap();
-        let selected1_again = maglev.select(flow_hash1).unwrap();
-        assert_eq!(selected1, selected1_again);
-
-        // Verify different flows might select different backends
-        let flow_hash2 = b"flow2";
-        let selected2 = maglev.select(flow_hash2).unwrap();
-        // No assertion on difference - depends on hash distribution
-        assert!(!selected2.is_empty());
-    }
-
-    #[test]
-    fn test_load_balancer_add_service() {
-        let lb = LoadBalancer::new();
-        let service = Service::new(ServiceName::new("default", "nginx"));
-
-        assert!(lb.upsert_service(service).is_ok());
-        assert_eq!(lb.stats().services, 1);
-    }
-
-    #[test]
-    fn test_load_balancer_add_frontend() {
-        let lb = LoadBalancer::new();
-        let svc_name = ServiceName::new("default", "nginx");
-        let service = Service::new(svc_name.clone());
-        lb.upsert_service(service).unwrap();
-
-        let frontend = Frontend::new(
-            L3n4Addr::new("10.1.1.1".parse().unwrap(), 80, L4Protocol::TCP),
-            SvcType::ClusterIp,
-            svc_name,
+    fn l3n4addr_creation_string_and_equality() {
+        let ipv4 = L3n4Addr::new(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)), 80, L4Type::TCP);
+        let ipv4_same = L3n4Addr::new(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)), 80, L4Type::TCP);
+        let ipv6 = L3n4Addr::new(
+            IpAddr::V6(Ipv6Addr::new(0x2001, 0xdb8, 0, 0, 0, 0, 0, 1)),
+            443,
+            L4Type::UDP,
         );
 
-        assert!(lb.add_frontend(frontend).is_ok());
-        assert_eq!(lb.stats().frontends, 1);
+        assert_eq!(ipv4.to_string(), "10.0.0.1:80/TCP");
+        assert_eq!(ipv6.to_string(), "[2001:db8::1]:443/UDP");
+        assert!(ipv4.deep_equals(&ipv4_same));
+        assert_eq!(ipv4, ipv4_same);
+        assert_ne!(ipv4, ipv6);
     }
 
     #[test]
-    fn test_load_balancer_select_backend() {
-        let lb = LoadBalancer::new();
-        let svc_name = ServiceName::new("default", "nginx");
-
-        let backend1 = Backend::new(
-            svc_name.clone(),
-            L3n4Addr::new("10.0.0.1".parse().unwrap(), 8080, L4Protocol::TCP),
-        );
-        let backend2 = Backend::new(
-            svc_name.clone(),
-            L3n4Addr::new("10.0.0.2".parse().unwrap(), 8080, L4Protocol::TCP),
+    fn backend_state_transitions_follow_go_rules() {
+        let mut backend = backend(
+            17,
+            IpAddr::V4(Ipv4Addr::new(10, 0, 0, 17)),
+            BackendState::Active,
         );
 
-        let frontend = Frontend::new(
-            L3n4Addr::new("10.1.1.1".parse().unwrap(), 80, L4Protocol::TCP),
-            SvcType::ClusterIp,
-            svc_name,
-        )
-        .with_backends(vec![backend1, backend2]);
+        assert!(backend.transition_to(BackendState::Quarantined).is_ok());
+        assert_eq!(backend.state, BackendState::Quarantined);
 
-        lb.add_frontend(frontend).unwrap();
-        let frontends = lb.list_frontends();
-        let frontend_id = frontends[0].id;
+        assert!(backend.transition_to(BackendState::Active).is_ok());
+        assert_eq!(backend.state, BackendState::Active);
 
-        let selected = lb.select_backend(frontend_id, b"flow1").unwrap();
-        assert!(selected.address.ip.to_string().starts_with("10.0.0"));
-    }
+        assert!(backend.transition_to(BackendState::Terminating).is_ok());
+        assert_eq!(backend.state, BackendState::Terminating);
 
-    #[test]
-    fn test_load_balancer_update_backends() {
-        let lb = LoadBalancer::new();
-        let svc_name = ServiceName::new("default", "nginx");
-
-        let service = Service::new(svc_name.clone());
-        lb.upsert_service(service).unwrap();
-
-        let backend = Backend::new(
-            svc_name.clone(),
-            L3n4Addr::new("10.0.0.1".parse().unwrap(), 8080, L4Protocol::TCP),
+        let error = backend.transition_to(BackendState::Maintenance);
+        assert_eq!(
+            error,
+            Err(LoadBalancerError::InvalidBackendStateTransition {
+                from: BackendState::Terminating,
+                to: BackendState::Maintenance,
+            })
         );
-
-        assert!(lb.update_backends(&svc_name, vec![backend]).is_ok());
     }
 
     #[test]
-    fn test_load_balancer_remove_service() {
-        let lb = LoadBalancer::new();
-        let svc_name = ServiceName::new("default", "nginx");
-        let service = Service::new(svc_name.clone());
+    fn diff_backends_detects_add_remove_and_update() {
+        let desired = vec![
+            backend(
+                1,
+                IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)),
+                BackendState::Active,
+            ),
+            backend(
+                2,
+                IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2)),
+                BackendState::Quarantined,
+            ),
+        ];
+        let actual = vec![
+            backend(
+                2,
+                IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2)),
+                BackendState::Active,
+            ),
+            backend(
+                3,
+                IpAddr::V4(Ipv4Addr::new(10, 0, 0, 3)),
+                BackendState::Active,
+            ),
+        ];
 
-        lb.upsert_service(service).unwrap();
-        assert_eq!(lb.stats().services, 1);
+        let diff = diff_backends(&desired, &actual);
 
-        lb.remove_service(&svc_name).unwrap();
-        assert_eq!(lb.stats().services, 0);
+        assert_eq!(diff.added, vec![desired[0].clone()]);
+        assert_eq!(diff.removed, vec![actual[1].clone()]);
+        assert_eq!(diff.updated, vec![desired[1].clone()]);
     }
 
     #[test]
-    fn test_l3n4addr_socket_addr() {
-        let addr = L3n4Addr::new("10.0.0.1".parse().unwrap(), 8080, L4Protocol::TCP);
-        let socket = addr.socket_addr();
-        assert_eq!(socket.port(), 8080);
-        assert_eq!(socket.ip().to_string(), "10.0.0.1");
+    fn service_id_hash_and_equality_are_stable() {
+        let first = ServiceID(42);
+        let same = ServiceID(42);
+        let different = ServiceID(7);
+
+        assert_eq!(first, same);
+        assert_ne!(first, different);
+
+        let mut set = HashSet::new();
+        set.insert(first);
+        set.insert(same);
+        set.insert(different);
+        assert_eq!(set.len(), 2);
+
+        let mut first_hasher = DefaultHasher::new();
+        first.hash(&mut first_hasher);
+        let mut same_hasher = DefaultHasher::new();
+        same.hash(&mut same_hasher);
+        assert_eq!(first_hasher.finish(), same_hasher.finish());
     }
 
     #[test]
-    fn test_service_display() {
-        let service = Service::new(ServiceName::new("default", "nginx"));
-        assert!(service.to_string().contains("default/nginx"));
-    }
-
-    #[test]
-    fn test_fnv_hash_deterministic() {
-        let hash1 = fnv_hash("test");
-        let hash2 = fnv_hash("test");
-        assert_eq!(hash1, hash2);
-    }
-
-    #[test]
-    fn test_fnv_hash_different_inputs() {
-        let hash1 = fnv_hash("test1");
-        let hash2 = fnv_hash("test2");
-        assert_ne!(hash1, hash2);
-    }
-
-    #[test]
-    fn test_traffic_policy_display() {
-        assert_eq!(TrafficPolicy::Cluster.to_string(), "Cluster");
-        assert_eq!(TrafficPolicy::Local.to_string(), "Local");
-    }
-
-    #[test]
-    fn test_backend_state_display() {
-        assert_eq!(BackendState::Active.to_string(), "Active");
-        assert_eq!(BackendState::Terminating.to_string(), "Terminating");
-        assert_eq!(BackendState::Quarantined.to_string(), "Quarantined");
-    }
-
-    #[test]
-    fn test_forwarding_mode_display() {
-        assert_eq!(ForwardingMode::DSR.to_string(), "DSR");
-        assert_eq!(ForwardingMode::SNAT.to_string(), "SNAT");
-    }
-
-    #[test]
-    fn test_svc_type_display() {
-        assert_eq!(SvcType::ClusterIp.to_string(), "ClusterIP");
-        assert_eq!(SvcType::NodePort.to_string(), "NodePort");
-        assert_eq!(SvcType::LoadBalancer.to_string(), "LoadBalancer");
-    }
-
-    #[test]
-    fn test_l4protocol_display() {
-        assert_eq!(L4Protocol::TCP.to_string(), "TCP");
-        assert_eq!(L4Protocol::UDP.to_string(), "UDP");
-        assert_eq!(L4Protocol::SCTP.to_string(), "SCTP");
-    }
-
-    #[test]
-    fn test_load_balancer_stats() {
-        let lb = LoadBalancer::new();
-        let stats = lb.stats();
-        assert_eq!(stats.services, 0);
-        assert_eq!(stats.frontends, 0);
-        assert_eq!(stats.total_backends, 0);
-    }
-
-    #[test]
-    fn test_backend_with_node_name() {
-        let backend = Backend::new(
-            ServiceName::new("default", "nginx"),
-            L3n4Addr::new("10.0.0.1".parse().unwrap(), 8080, L4Protocol::TCP),
+    fn svc_helpers_operate_on_backend_ids() {
+        let frontend = L3n4AddrID::new(
+            L3n4Addr::new(IpAddr::V4(Ipv4Addr::new(10, 96, 0, 1)), 80, L4Type::TCP),
+            ServiceID(100),
         );
-        let mut backend = backend;
-        backend.node_name = Some("node1".to_string());
+        let mut svc = SVC::new(frontend);
+        svc.backends = vec![
+            backend(
+                10,
+                IpAddr::V4(Ipv4Addr::new(10, 0, 0, 10)),
+                BackendState::Active,
+            ),
+            backend(
+                11,
+                IpAddr::V4(Ipv4Addr::new(10, 0, 0, 11)),
+                BackendState::Maintenance,
+            ),
+        ];
 
-        assert_eq!(backend.node_name.as_deref(), Some("node1"));
-    }
-
-    #[test]
-    fn test_frontend_ports_names() {
-        let mut frontend = Frontend::new(
-            L3n4Addr::new("10.1.1.1".parse().unwrap(), 80, L4Protocol::TCP),
-            SvcType::ClusterIp,
-            ServiceName::new("default", "nginx"),
+        assert_eq!(svc.service_id(), ServiceID(100));
+        assert_eq!(svc.active_backends().len(), 1);
+        assert!(svc.has_backend(BackendID(10)));
+        assert!(!svc.has_backend(BackendID(99)));
+        assert!(
+            svc.update_backend_state(BackendID(11), BackendState::Active)
+                .is_ok()
         );
-        frontend.backends = vec![];
-
-        // Add backends with port names
-        let mut backend = Backend::new(
-            frontend.service_name.clone(),
-            L3n4Addr::new("10.0.0.1".parse().unwrap(), 8080, L4Protocol::TCP),
-        );
-        backend.port_names = vec!["http".to_string()];
-        frontend.backends.push(backend);
-
-        assert!(!frontend.backends.is_empty());
-        assert_eq!(frontend.backends[0].port_names[0], "http");
-    }
-
-    #[test]
-    fn test_load_balancer_list_services() {
-        let lb = LoadBalancer::new();
-        let svc1 = Service::new(ServiceName::new("default", "nginx"));
-        let svc2 = Service::new(ServiceName::new("default", "redis"));
-
-        lb.upsert_service(svc1).unwrap();
-        lb.upsert_service(svc2).unwrap();
-
-        let services = lb.list_services();
-        assert_eq!(services.len(), 2);
-    }
-
-    #[test]
-    fn test_load_balancer_list_frontends() {
-        let lb = LoadBalancer::new();
-        let svc_name = ServiceName::new("default", "nginx");
-
-        let frontend1 = Frontend::new(
-            L3n4Addr::new("10.1.1.1".parse().unwrap(), 80, L4Protocol::TCP),
-            SvcType::ClusterIp,
-            svc_name.clone(),
-        );
-        let frontend2 = Frontend::new(
-            L3n4Addr::new("10.1.1.2".parse().unwrap(), 443, L4Protocol::TCP),
-            SvcType::ClusterIp,
-            svc_name,
-        );
-
-        lb.add_frontend(frontend1).unwrap();
-        lb.add_frontend(frontend2).unwrap();
-
-        let frontends = lb.list_frontends();
-        assert_eq!(frontends.len(), 2);
+        assert_eq!(svc.active_backends().len(), 2);
     }
 }
