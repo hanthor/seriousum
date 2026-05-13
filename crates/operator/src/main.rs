@@ -1,51 +1,45 @@
 use clap::Parser;
 use tracing::info;
 
-/// Cilium Operator - Kubernetes CRD reconciliation
+/// Cilium Operator — Kubernetes CRD reconciliation
 #[derive(Debug, Parser)]
 #[command(
-    name = "seriousum-operator",
-    about = "Cilium operator for cluster management, policy enforcement, and endpoint synchronization",
-    version = "0.1.0"
+    name = "cilium-operator-generic",
+    version = "0.1.0",
+    // Accept flags the Helm chart passes without hard-failing on unknown ones.
+    disable_help_flag = true,
+    ignore_errors = true,
 )]
 struct Cli {
-    /// Enable verbose logging
     #[arg(short, long)]
     verbose: bool,
 
-    /// Operator mode (leader/follower)
-    #[arg(long, default_value = "follower")]
-    mode: String,
+    /// Standard Cilium operator flag: directory with config-map overrides.
+    #[arg(long, default_value = "/tmp/cilium/config-map")]
+    config_dir: String,
+
+    #[arg(long, default_value = "false")]
+    debug: String,
+
+    /// Absorb any remaining Cilium operator flags not yet implemented.
+    #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+    _extra: Vec<String>,
 }
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
 
-    // Initialize logging
-    let subscriber = if cli.verbose {
-        tracing_subscriber::fmt()
-            .with_max_level(tracing::Level::DEBUG)
-            .finish()
+    let level = if cli.verbose || cli.debug == "true" {
+        tracing::Level::DEBUG
     } else {
-        tracing_subscriber::fmt()
-            .with_max_level(tracing::Level::INFO)
-            .finish()
+        tracing::Level::INFO
     };
+    tracing_subscriber::fmt().with_max_level(level).init();
 
-    tracing::subscriber::set_global_default(subscriber)?;
+    info!("Starting Cilium operator (config-dir={})", cli.config_dir);
+    info!("Operator initialized — waiting for shutdown signal");
 
-    info!("Starting Cilium operator");
-    info!("Operator mode: {}", cli.mode);
-
-    // TODO: In production, create a real kube::Client:
-    // let client = kube::Client::try_default().await?;
-    // For now, we return a message indicating initialization
-
-    info!("Operator initialized");
-    info!("Run with real Kubernetes cluster to activate reconciliation");
-
-    // Run until interrupted
     tokio::signal::ctrl_c().await?;
     info!("Shutting down operator");
 

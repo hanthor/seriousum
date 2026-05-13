@@ -323,11 +323,22 @@ impl Daemon {
 
 /// Command-line arguments for the daemon.
 #[derive(Debug, Clone, Parser)]
-#[command(name = "seriousum-daemon", version, about = "Run the seriousum daemon")]
+#[command(
+    name = "seriousum-daemon",
+    version,
+    about = "Run the seriousum daemon",
+    disable_help_flag = true,
+    ignore_errors = true
+)]
 pub struct Cli {
     /// Optional configuration file.
     #[arg(short, long)]
     pub config: Option<PathBuf>,
+
+    /// Additional daemon flags passed by the Cilium Helm chart and scripts.
+    /// These are accepted for compatibility and ignored until implemented.
+    #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+    pub _extra: Vec<String>,
 }
 
 /// Returns the default configuration file path.

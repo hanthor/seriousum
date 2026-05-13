@@ -211,11 +211,12 @@ export PATH="$BIN_DIR:$PATH"
 CILIUM_IMAGE="$AGENT_IMAGE_REPO"
 CILIUM_TAG="$AGENT_IMAGE_TAG"
 # Use local Rust operator image (fallback to upstream if needed)
-CILIUM_OPERATOR_IMAGE="${OPERATOR_IMAGE_REPO:-$IMAGE_PREFIX/operator-generic}"
+# Use operator.image.override to bypass the helm template's cloud-suffix logic
+CILIUM_OPERATOR_IMAGE="${OPERATOR_IMAGE_REPO:-$IMAGE_PREFIX/operator}"
 CILIUM_OPERATOR_TAG="${OPERATOR_IMAGE_TAG:-$IMAGE_TAG}"
 HUBBLE_RELAY_IMAGE="$IMAGE_PREFIX/hubble"
 HUBBLE_RELAY_TAG="$IMAGE_TAG"
-CLUSTERMESH_INSTALL_OVERRIDES="image.useDigest=false,operator.image.useDigest=false,hubble.relay.image.useDigest=false,clustermesh.apiserver.image.useDigest=false,clustermesh.apiserver.image.repository=$IMAGE_PREFIX/clustermesh-apiserver,clustermesh.apiserver.image.tag=$IMAGE_TAG,clustermesh.apiserver.image.pullPolicy=IfNotPresent,operator.image.pullPolicy=IfNotPresent,hubble.relay.image.pullPolicy=IfNotPresent"
+CLUSTERMESH_INSTALL_OVERRIDES="image.useDigest=false,operator.image.useDigest=false,hubble.relay.image.useDigest=false,clustermesh.apiserver.image.useDigest=false,clustermesh.apiserver.image.repository=$IMAGE_PREFIX/clustermesh-apiserver,clustermesh.apiserver.image.tag=$IMAGE_TAG,clustermesh.apiserver.image.pullPolicy=IfNotPresent,operator.image.pullPolicy=IfNotPresent,hubble.relay.image.pullPolicy=IfNotPresent,operator.image.override=$CILIUM_OPERATOR_IMAGE:$CILIUM_OPERATOR_TAG"
 
 export CILIUM_IMAGE
 export CILIUM_TAG

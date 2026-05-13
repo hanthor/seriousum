@@ -32,6 +32,7 @@ make_alias() {
 make_alias cilium seriousum-daemon
 make_alias cilium-dbg seriousum-daemon
 make_alias cilium-cli seriousum-cli
+make_alias cilium-cni seriousum-cni
 make_alias operator seriousum-operator
 make_alias hubble hubble
 make_alias clustermesh-apiserver clustermesh-apiserver
@@ -41,6 +42,7 @@ printf '  %s\n' \
   "$OUTPUT_DIR/cilium" \
   "$OUTPUT_DIR/cilium-dbg" \
   "$OUTPUT_DIR/cilium-cli" \
+  "$OUTPUT_DIR/cilium-cni" \
   "$OUTPUT_DIR/operator" \
   "$OUTPUT_DIR/hubble" \
   "$OUTPUT_DIR/clustermesh-apiserver"

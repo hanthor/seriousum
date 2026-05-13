@@ -1,0 +1,846 @@
+{
+  "cilium_pod": "cilium-2j82g",
+  "cilium_pod_spec": [
+    {
+      "image": "quay.io/cilium/cilium-ci:latest",
+      "livenessProbe": {
+        "failureThreshold": 10,
+        "httpGet": {
+          "host": "127.0.0.1",
+          "httpHeaders": [
+            {
+              "name": "brief",
+              "value": "true"
+            },
+            {
+              "name": "require-k8s-connectivity",
+              "value": "false"
+            }
+          ],
+          "path": "/healthz",
+          "port": "health",
+          "scheme": "HTTP"
+        },
+        "periodSeconds": 30,
+        "successThreshold": 1,
+        "timeoutSeconds": 5
+      },
+      "name": "cilium-agent",
+      "ports": [
+        {
+          "containerPort": 9879,
+          "hostPort": 9879,
+          "name": "health",
+          "protocol": "TCP"
+        },
+        {
+          "containerPort": 4244,
+          "hostPort": 4244,
+          "name": "peer-service",
+          "protocol": "TCP"
+        }
+      ],
+      "readinessProbe": {
+        "failureThreshold": 3,
+        "httpGet": {
+          "host": "127.0.0.1",
+          "httpHeaders": [
+            {
+              "name": "brief",
+              "value": "true"
+            }
+          ],
+          "path": "/healthz",
+          "port": "health",
+          "scheme": "HTTP"
+        },
+        "periodSeconds": 30,
+        "successThreshold": 1,
+        "timeoutSeconds": 5
+      },
+      "startupProbe": {
+        "failureThreshold": 300,
+        "httpGet": {
+          "host": "127.0.0.1",
+          "httpHeaders": [
+            {
+              "name": "brief",
+              "value": "true"
+            }
+          ],
+          "path": "/healthz",
+          "port": "health",
+          "scheme": "HTTP"
+        },
+        "initialDelaySeconds": 5,
+        "periodSeconds": 2,
+        "successThreshold": 1,
+        "timeoutSeconds": 1
+      }
+    }
+  ],
+  "coredns": [
+    {
+      "name": "coredns-674b8bbfcf-98dw4",
+      "node": "cilium-upstream-control-plane",
+      "phase": "Running",
+      "podIP": "10.0.0.96",
+      "ready": [
+        true
+      ]
+    },
+    {
+      "name": "coredns-674b8bbfcf-xfkzc",
+      "node": "cilium-upstream-control-plane",
+      "phase": "Running",
+      "podIP": "10.0.0.104",
+      "ready": [
+        true
+      ]
+    }
+  ],
+  "health_endpoints": {
+    "/api/v1/healthz": "HTTP/1.1 404 Not Found\nContent-Type: text/plain; charset=utf-8\nX-Content-Type-Options: nosniff\nDate: Wed, 13 May 2026 17:05:48 GMT\nContent-Length: 19\n\n404 page not found\n",
+    "/healthz": "HTTP/1.1 200 OK\nDate: Wed, 13 May 2026 17:05:48 GMT\nContent-Length: 0\n",
+    "/v1/healthz": "HTTP/1.1 404 Not Found\nContent-Type: text/plain; charset=utf-8\nX-Content-Type-Options: nosniff\nDate: Wed, 13 May 2026 17:05:48 GMT\nContent-Length: 19\n\n404 page not found\n",
+    "capture_method": "kubectl port-forward pod/cilium-2j82g 9879:9879 + host curl"
+  },
+  "node_taints": [
+    {
+      "name": "cilium-upstream-control-plane",
+      "taints": []
+    },
+    {
+      "name": "cilium-upstream-worker",
+      "taints": []
+    }
+  ],
+  "recent_events": [
+    {
+      "kind": "Pod",
+      "lastTimestamp": "2026-05-13T17:04:28Z",
+      "message": "Created container: coredns",
+      "name": "coredns-674b8bbfcf-9wvls",
+      "reason": "Created",
+      "type": "Normal"
+    },
+    {
+      "kind": "Pod",
+      "lastTimestamp": "2026-05-13T17:04:28Z",
+      "message": "Started container coredns",
+      "name": "coredns-674b8bbfcf-9wvls",
+      "reason": "Started",
+      "type": "Normal"
+    },
+    {
+      "kind": "Pod",
+      "lastTimestamp": "2026-05-13T17:04:29Z",
+      "message": "Readiness probe failed: HTTP probe failed with statuscode: 503",
+      "name": "coredns-674b8bbfcf-9wvls",
+      "reason": "Unhealthy",
+      "type": "Warning"
+    },
+    {
+      "kind": "Pod",
+      "lastTimestamp": "2026-05-13T17:04:30Z",
+      "message": "Stopping container coredns",
+      "name": "coredns-674b8bbfcf-9wvls",
+      "reason": "Killing",
+      "type": "Normal"
+    },
+    {
+      "kind": "Pod",
+      "lastTimestamp": "2026-05-13T17:02:00Z",
+      "message": "0/1 nodes are available: 1 node(s) had untolerated taint {node.kubernetes.io/not-ready: }. preemption: 0/1 nodes are available: 1 Preemption is not helpful for scheduling.",
+      "name": "coredns-674b8bbfcf-xd2vf",
+      "reason": "FailedScheduling",
+      "type": "Warning"
+    },
+    {
+      "kind": "Pod",
+      "lastTimestamp": "2026-05-13T17:04:23Z",
+      "message": "Successfully assigned kube-system/coredns-674b8bbfcf-xd2vf to cilium-upstream-worker",
+      "name": "coredns-674b8bbfcf-xd2vf",
+      "reason": "Scheduled",
+      "type": "Normal"
+    },
+    {
+      "kind": "Pod",
+      "lastTimestamp": "2026-05-13T17:04:28Z",
+      "message": "Container image \"registry.k8s.io/coredns/coredns:v1.12.0\" already present on machine",
+      "name": "coredns-674b8bbfcf-xd2vf",
+      "reason": "Pulled",
+      "type": "Normal"
+    },
+    {
+      "kind": "Pod",
+      "lastTimestamp": "2026-05-13T17:04:28Z",
+      "message": "Created container: coredns",
+      "name": "coredns-674b8bbfcf-xd2vf",
+      "reason": "Created",
+      "type": "Normal"
+    },
+    {
+      "kind": "Pod",
+      "lastTimestamp": "2026-05-13T17:04:28Z",
+      "message": "Started container coredns",
+      "name": "coredns-674b8bbfcf-xd2vf",
+      "reason": "Started",
+      "type": "Normal"
+    },
+    {
+      "kind": "Pod",
+      "lastTimestamp": "2026-05-13T17:04:30Z",
+      "message": "Stopping container coredns",
+      "name": "coredns-674b8bbfcf-xd2vf",
+      "reason": "Killing",
+      "type": "Normal"
+    },
+    {
+      "kind": "Pod",
+      "lastTimestamp": "2026-05-13T17:04:28Z",
+      "message": "Successfully assigned kube-system/coredns-674b8bbfcf-xfkzc to cilium-upstream-control-plane",
+      "name": "coredns-674b8bbfcf-xfkzc",
+      "reason": "Scheduled",
+      "type": "Normal"
+    },
+    {
+      "kind": "Pod",
+      "lastTimestamp": "2026-05-13T17:04:32Z",
+      "message": "Container image \"registry.k8s.io/coredns/coredns:v1.12.0\" already present on machine",
+      "name": "coredns-674b8bbfcf-xfkzc",
+      "reason": "Pulled",
+      "type": "Normal"
+    },
+    {
+      "kind": "Pod",
+      "lastTimestamp": "2026-05-13T17:04:32Z",
+      "message": "Created container: coredns",
+      "name": "coredns-674b8bbfcf-xfkzc",
+      "reason": "Created",
+      "type": "Normal"
+    },
+    {
+      "kind": "Pod",
+      "lastTimestamp": "2026-05-13T17:04:32Z",
+      "message": "Started container coredns",
+      "name": "coredns-674b8bbfcf-xfkzc",
+      "reason": "Started",
+      "type": "Normal"
+    },
+    {
+      "kind": "ReplicaSet",
+      "lastTimestamp": "2026-05-13T17:02:00Z",
+      "message": "Created pod: coredns-674b8bbfcf-xd2vf",
+      "name": "coredns-674b8bbfcf",
+      "reason": "SuccessfulCreate",
+      "type": "Normal"
+    },
+    {
+      "kind": "ReplicaSet",
+      "lastTimestamp": "2026-05-13T17:02:00Z",
+      "message": "Created pod: coredns-674b8bbfcf-9wvls",
+      "name": "coredns-674b8bbfcf",
+      "reason": "SuccessfulCreate",
+      "type": "Normal"
+    },
+    {
+      "kind": "ReplicaSet",
+      "lastTimestamp": "2026-05-13T17:04:28Z",
+      "message": "Deleted pod: coredns-674b8bbfcf-9wvls",
+      "name": "coredns-674b8bbfcf",
+      "reason": "SuccessfulDelete",
+      "type": "Normal"
+    },
+    {
+      "kind": "ReplicaSet",
+      "lastTimestamp": "2026-05-13T17:04:28Z",
+      "message": "Deleted pod: coredns-674b8bbfcf-xd2vf",
+      "name": "coredns-674b8bbfcf",
+      "reason": "SuccessfulDelete",
+      "type": "Normal"
+    },
+    {
+      "kind": "ReplicaSet",
+      "lastTimestamp": "2026-05-13T17:04:28Z",
+      "message": "Created pod: coredns-674b8bbfcf-98dw4",
+      "name": "coredns-674b8bbfcf",
+      "reason": "SuccessfulCreate",
+      "type": "Normal"
+    },
+    {
+      "kind": "ReplicaSet",
+      "lastTimestamp": "2026-05-13T17:04:28Z",
+      "message": "Created pod: coredns-674b8bbfcf-xfkzc",
+      "name": "coredns-674b8bbfcf",
+      "reason": "SuccessfulCreate",
+      "type": "Normal"
+    }
+  ],
+  "source": {
+    "cluster": "cilium-upstream",
+    "kubeconfig": "target/cilium-kind/cilium-upstream.kubeconfig",
+    "log": "target/bg-upstream-K8sAgentChaosTest-20260513-223331.log",
+    "recipe": "just run-upstream-fresh cilium-upstream K8sAgentChaosTest 30m"
+  },
+  "status_json": {
+    "attach-mode": "tcx",
+    "auth-certificate-provider": {
+      "state": "Disabled"
+    },
+    "bandwidth-manager": {
+      "devices": null
+    },
+    "bpf-maps": {
+      "dynamic-size-ratio": 0.0025,
+      "maps": [
+        {
+          "name": "Auth",
+          "size": 524288
+        },
+        {
+          "name": "Non-TCP connection tracking",
+          "size": 443041
+        },
+        {
+          "name": "TCP connection tracking",
+          "size": 886082
+        },
+        {
+          "name": "Endpoints",
+          "size": 65535
+        },
+        {
+          "name": "IP cache",
+          "size": 512000
+        },
+        {
+          "name": "IPv4 masquerading agent",
+          "size": 16384
+        },
+        {
+          "name": "IPv6 masquerading agent",
+          "size": 16384
+        },
+        {
+          "name": "IPv4 fragmentation",
+          "size": 8192
+        },
+        {
+          "name": "IPv4 service",
+          "size": 65536
+        },
+        {
+          "name": "IPv6 service",
+          "size": 65536
+        },
+        {
+          "name": "IPv4 service backend",
+          "size": 65536
+        },
+        {
+          "name": "IPv6 service backend",
+          "size": 65536
+        },
+        {
+          "name": "IPv4 service reverse NAT",
+          "size": 65536
+        },
+        {
+          "name": "IPv6 service reverse NAT",
+          "size": 65536
+        },
+        {
+          "name": "Metrics",
+          "size": 1024
+        },
+        {
+          "name": "Ratelimit metrics",
+          "size": 64
+        },
+        {
+          "name": "NAT",
+          "size": 886082
+        },
+        {
+          "name": "Neighbor table",
+          "size": 886082
+        },
+        {
+          "name": "Endpoint policy",
+          "size": 16384
+        },
+        {
+          "name": "Policy stats",
+          "size": 65536
+        },
+        {
+          "name": "Session affinity",
+          "size": 65536
+        },
+        {
+          "name": "Sock reverse NAT",
+          "size": 443041
+        }
+      ]
+    },
+    "cilium": {
+      "msg": "1.20.0-dev (v1.20.0-dev-00ccd972)",
+      "state": "Ok"
+    },
+    "clock-source": {
+      "mode": "ktime"
+    },
+    "cluster": {
+      "ciliumHealth": {
+        "state": "Ok"
+      },
+      "nodes": null,
+      "self": "cilium-upstream-control-plane"
+    },
+    "cni-chaining": {
+      "mode": "none"
+    },
+    "cni-file": {
+      "msg": "successfully wrote CNI configuration file to /host/etc/cni/net.d/05-cilium.conflist",
+      "state": "Ok"
+    },
+    "configured-datapath-mode": "veth",
+    "controllers": [
+      {
+        "configuration": {
+          "error-retry": true,
+          "interval": "5m0s"
+        },
+        "name": "resolve-identity-44",
+        "status": {
+          "last-failure-timestamp": "0001-01-01T00:00:00.000Z",
+          "last-success-timestamp": "2026-05-13T17:04:29.092Z",
+          "success-count": 1
+        },
+        "uuid": "ddd050b3-b0ff-40b9-a0e3-c1c3de435b4d"
+      },
+      {
+        "configuration": {
+          "error-retry": true,
+          "interval": "15m0s"
+        },
+        "name": "sync-policymap-1679",
+        "status": {
+          "last-failure-timestamp": "0001-01-01T00:00:00.000Z",
+          "last-success-timestamp": "2026-05-13T17:04:31.966Z",
+          "success-count": 1
+        },
+        "uuid": "7253fa73-1e3f-439a-8cc8-62578e0f419a"
+      },
+      {
+        "configuration": {
+          "error-retry": true,
+          "error-retry-base": "2s",
+          "interval": "1s"
+        },
+        "name": "endpoint-44-regeneration-recovery",
+        "status": {
+          "last-failure-timestamp": "0001-01-01T00:00:00.000Z",
+          "last-success-timestamp": "0001-01-01T00:00:00.000Z"
+        },
+        "uuid": "66761e19-676c-43e9-b327-13bc7eac4a09"
+      },
+      {
+        "configuration": {
+          "error-retry": true,
+          "interval": "10s"
+        },
+        "name": "sync-to-k8s-ciliumendpoint (1679)",
+        "status": {
+          "last-failure-timestamp": "0001-01-01T00:00:00.000Z",
+          "last-success-timestamp": "2026-05-13T17:04:59.101Z",
+          "success-count": 5
+        },
+        "uuid": "0872fd11-f26d-4aed-a380-21f3a28f07f4"
+      },
+      {
+        "configuration": {
+          "error-retry": true,
+          "interval": "1m0s"
+        },
+        "name": "cilium-health-ep",
+        "status": {
+          "last-failure-timestamp": "0001-01-01T00:00:00.000Z",
+          "last-success-timestamp": "2026-05-13T17:04:25.912Z",
+          "success-count": 1
+        },
+        "uuid": "c0eb688c-4df9-428b-ac86-8614d24819b4"
+      },
+      {
+        "configuration": {
+          "error-retry": true
+        },
+        "name": "resolve-labels-kube-system/coredns-674b8bbfcf-98dw4",
+        "status": {
+          "last-failure-timestamp": "0001-01-01T00:00:00.000Z",
+          "last-success-timestamp": "2026-05-13T17:04:29.092Z",
+          "success-count": 1
+        },
+        "uuid": "0e0d33f5-50d7-448d-a8bd-cf759f997561"
+      },
+      {
+        "configuration": {
+          "error-retry": true,
+          "error-retry-base": "2s",
+          "interval": "1s"
+        },
+        "name": "endpoint-461-regeneration-recovery",
+        "status": {
+          "last-failure-timestamp": "0001-01-01T00:00:00.000Z",
+          "last-success-timestamp": "0001-01-01T00:00:00.000Z"
+        },
+        "uuid": "8d72f722-6bf8-4a57-80ad-fde6125a8f72"
+      },
+      {
+        "configuration": {
+          "error-retry": true,
+          "interval": "15m0s"
+        },
+        "name": "sync-policymap-393",
+        "status": {
+          "last-failure-timestamp": "0001-01-01T00:00:00.000Z",
+          "last-success-timestamp": "2026-05-13T17:04:26.718Z",
+          "success-count": 1
+        },
+        "uuid": "27ae462e-1dc7-4edb-a4e1-b5acc4d6cef8"
+      },
+      {
+        "configuration": {
+          "error-retry": true,
+          "interval": "30s"
+        },
+        "name": "k8s-heartbeat",
+        "status": {
+          "last-failure-timestamp": "0001-01-01T00:00:00.000Z",
+          "last-success-timestamp": "2026-05-13T17:04:52.787Z",
+          "success-count": 2
+        },
+        "uuid": "c8af2668-0e89-4a1b-8317-0a2ad97fe689"
+      },
+      {
+        "configuration": {
+          "error-retry": true,
+          "interval": "5m0s"
+        },
+        "name": "endpoint-gc",
+        "status": {
+          "last-failure-timestamp": "0001-01-01T00:00:00.000Z",
+          "last-success-timestamp": "2026-05-13T17:04:24.864Z",
+          "success-count": 1
+        },
+        "uuid": "257ca245-fbc1-4a5c-b6bc-69afed649070"
+      },
+      {
+        "configuration": {
+          "error-retry": true,
+          "interval": "2m0s"
+        },
+        "name": "endpoint-periodic-regeneration",
+        "status": {
+          "last-failure-timestamp": "0001-01-01T00:00:00.000Z",
+          "last-success-timestamp": "2026-05-13T17:04:24.863Z",
+          "success-count": 1
+        },
+        "uuid": "bdf01cb1-7f9c-4d6c-95ab-a3b5e5b19c99"
+      },
+      {
+        "configuration": {
+          "error-retry": true,
+          "interval": "30s"
+        },
+        "name": "ct-map-pressure",
+        "status": {
+          "last-failure-timestamp": "0001-01-01T00:00:00.000Z",
+          "last-success-timestamp": "2026-05-13T17:04:54.870Z",
+          "success-count": 2
+        },
+        "uuid": "bd94b3aa-87a4-4269-87aa-b6ffc28539f9"
+      },
+      {
+        "configuration": {
+          "error-retry": true,
+          "error-retry-base": "10s"
+        },
+        "name": "write-cni-file",
+        "status": {
+          "last-failure-timestamp": "0001-01-01T00:00:00.000Z",
+          "last-success-timestamp": "2026-05-13T17:04:22.943Z",
+          "success-count": 2
+        },
+        "uuid": "502bdccb-96f7-4db2-8eba-9e1572ec4d4c"
+      },
+      {
+        "configuration": {
+          "error-retry": true,
+          "interval": "5m0s"
+        },
+        "name": "resolve-identity-393",
+        "status": {
+          "last-failure-timestamp": "0001-01-01T00:00:00.000Z",
+          "last-success-timestamp": "2026-05-13T17:04:24.864Z",
+          "success-count": 1
+        },
+        "uuid": "98ddba8d-c2d1-4e67-97eb-7dc272653b45"
+      },
+      {
+        "configuration": {
+          "error-retry": true,
+          "interval": "5m0s"
+        },
+        "name": "resolve-identity-461",
+        "status": {
+          "last-failure-timestamp": "0001-01-01T00:00:00.000Z",
+          "last-success-timestamp": "2026-05-13T17:04:25.912Z",
+          "success-count": 1
+        },
+        "uuid": "6283798d-ba8b-4003-935e-e3d1183f42d9"
+      },
+      {
+        "configuration": {
+          "error-retry": true
+        },
+        "name": "resolve-labels-kube-system/coredns-674b8bbfcf-xfkzc",
+        "status": {
+          "last-failure-timestamp": "0001-01-01T00:00:00.000Z",
+          "last-success-timestamp": "2026-05-13T17:04:29.092Z",
+          "success-count": 1
+        },
+        "uuid": "c1839a34-e7d5-455a-b1ac-af69161b54a0"
+      },
+      {
+        "configuration": {
+          "error-retry": true,
+          "error-retry-base": "2s",
+          "interval": "1s"
+        },
+        "name": "endpoint-1679-regeneration-recovery",
+        "status": {
+          "last-failure-timestamp": "0001-01-01T00:00:00.000Z",
+          "last-success-timestamp": "0001-01-01T00:00:00.000Z"
+        },
+        "uuid": "e8a5e1bd-c80d-4a37-8fc5-7fbbc0479887"
+      },
+      {
+        "configuration": {
+          "error-retry": true,
+          "interval": "10s"
+        },
+        "name": "sync-to-k8s-ciliumendpoint (44)",
+        "status": {
+          "last-failure-timestamp": "0001-01-01T00:00:00.000Z",
+          "last-success-timestamp": "2026-05-13T17:04:59.101Z",
+          "success-count": 5
+        },
+        "uuid": "caf659c1-483f-449c-873d-8025a121111a"
+      },
+      {
+        "configuration": {
+          "error-retry": true,
+          "interval": "15m0s"
+        },
+        "name": "sync-policymap-44",
+        "status": {
+          "last-failure-timestamp": "0001-01-01T00:00:00.000Z",
+          "last-success-timestamp": "2026-05-13T17:04:31.977Z",
+          "success-count": 1
+        },
+        "uuid": "731d333d-f1ab-4314-8cc7-0855eef69e7b"
+      },
+      {
+        "configuration": {
+          "error-retry": true,
+          "error-retry-base": "2s",
+          "interval": "1s"
+        },
+        "name": "endpoint-393-regeneration-recovery",
+        "status": {
+          "last-failure-timestamp": "0001-01-01T00:00:00.000Z",
+          "last-success-timestamp": "0001-01-01T00:00:00.000Z"
+        },
+        "uuid": "bf1a6b42-fa0e-4e25-89af-4d6ad9ddf00d"
+      },
+      {
+        "configuration": {
+          "error-retry": true
+        },
+        "name": "ipcache-inject-labels",
+        "status": {
+          "last-failure-timestamp": "0001-01-01T00:00:00.000Z",
+          "last-success-timestamp": "2026-05-13T17:04:59.756Z",
+          "success-count": 22
+        },
+        "uuid": "15ed46ee-9614-486c-9342-37536e4d375b"
+      },
+      {
+        "configuration": {
+          "error-retry": true,
+          "interval": "15m0s"
+        },
+        "name": "sync-policymap-461",
+        "status": {
+          "last-failure-timestamp": "0001-01-01T00:00:00.000Z",
+          "last-success-timestamp": "2026-05-13T17:04:28.305Z",
+          "success-count": 1
+        },
+        "uuid": "8b7eb7ff-0cf0-404f-93bb-d8a0bed7738a"
+      },
+      {
+        "configuration": {
+          "error-retry": true,
+          "interval": "5m0s"
+        },
+        "name": "resolve-identity-1679",
+        "status": {
+          "last-failure-timestamp": "0001-01-01T00:00:00.000Z",
+          "last-success-timestamp": "2026-05-13T17:04:29.092Z",
+          "success-count": 1
+        },
+        "uuid": "af4beca0-0603-4373-acd5-962facedec5f"
+      }
+    ],
+    "datapath-mode": "veth",
+    "encryption": {
+      "mode": "Disabled"
+    },
+    "host-firewall": {
+      "devices": [
+        "eth0"
+      ],
+      "mode": "Disabled"
+    },
+    "hubble": {
+      "observer": {
+        "current-flows": 205,
+        "max-flows": 65535,
+        "seen-flows": 159,
+        "uptime": "35.001288643s"
+      },
+      "state": "Ok"
+    },
+    "hubble-metrics": {
+      "state": "Disabled"
+    },
+    "identity-range": {
+      "max-identity": 65535,
+      "min-identity": 256
+    },
+    "ipam": {
+      "allocations": {
+        "10.0.0.104": "kube-system/coredns-674b8bbfcf-xfkzc",
+        "10.0.0.201": "router",
+        "10.0.0.202": "health",
+        "10.0.0.96": "kube-system/coredns-674b8bbfcf-98dw4",
+        "fd02::2": "kube-system/coredns-674b8bbfcf-98dw4",
+        "fd02::42": "health",
+        "fd02::4d": "router",
+        "fd02::70": "kube-system/coredns-674b8bbfcf-xfkzc"
+      },
+      "ipv4": [
+        "10.0.0.202",
+        "10.0.0.96",
+        "10.0.0.104",
+        "10.0.0.201"
+      ],
+      "ipv6": [
+        "fd02::42",
+        "fd02::4d",
+        "fd02::70",
+        "fd02::2"
+      ],
+      "status": "IPv4: 4/254 allocated from 10.0.0.0/24, IPv6: 4/254 allocated from fd02::/120"
+    },
+    "ipv4-big-tcp": {
+      "maxGRO": 65536,
+      "maxGSO": 65536
+    },
+    "ipv6-big-tcp": {
+      "maxGRO": 65536,
+      "maxGSO": 65536
+    },
+    "kube-proxy-replacement": {
+      "deviceList": [
+        {
+          "ip": [
+            "",
+            "",
+            "",
+            "172.19.0.5",
+            "fc00:c111::5",
+            "fe80::e0bb:1ff:fe54:304d"
+          ],
+          "name": "eth0"
+        }
+      ],
+      "devices": [
+        "eth0"
+      ],
+      "directRoutingDevice": "eth0",
+      "features": {
+        "annotations": null,
+        "externalIPs": {},
+        "hostPort": {},
+        "nat46X64": {},
+        "nodePort": {},
+        "sessionAffinity": {
+          "enabled": true
+        },
+        "socketLB": {},
+        "socketLBTracing": {}
+      },
+      "mode": "False"
+    },
+    "kubernetes": {
+      "k8s-api-versions": [
+        "core/v1::Pods",
+        "cilium/v2alpha1::CiliumEndpointSlice",
+        "cilium/v2::CiliumNode",
+        "networking.k8s.io/v1::NetworkPolicy",
+        "cilium/v2::CiliumNetworkPolicy",
+        "cilium/v2::CiliumClusterwideNetworkPolicy",
+        "cilium/v2::CiliumCIDRGroup"
+      ],
+      "msg": "1.33 (v1.33.1) [linux/amd64]",
+      "state": "Ok"
+    },
+    "kvstore": {
+      "state": "Disabled"
+    },
+    "masquerading": {
+      "enabled": true,
+      "enabledProtocols": {
+        "ipv4": true,
+        "ipv6": true
+      },
+      "mode": "iptables",
+      "snat-exclusion-cidr": "10.0.0.0/8",
+      "snat-exclusion-cidr-v4": "10.0.0.0/8",
+      "snat-exclusion-cidr-v6": "fd02::/112"
+    },
+    "nodeMonitor": {
+      "cpus": 32,
+      "npages": 64,
+      "pagesize": 4096
+    },
+    "proxy": {
+      "envoy-deployment-mode": "external",
+      "ip": "10.0.0.201",
+      "port-range": "10000-20000",
+      "redirects": null,
+      "total-ports": 1
+    },
+    "routing": {
+      "inter-host-routing-mode": "Tunnel",
+      "intra-host-routing-mode": "Legacy",
+      "tunnel-protocol": "vxlan"
+    },
+    "srv6": {
+      "srv6EncapMode": "reduced"
+    }
+  }
+}

@@ -25,6 +25,8 @@ This directory is intentionally limited to docs that are still current.
 
 ### Parity / evidence docs
 - [PARITY_PROOF_DASHBOARD.md](PARITY_PROOF_DASHBOARD.md) — authoritative parity-proof status
+- [PARITY_PROOF.md](PARITY_PROOF.md) — latest published parity proof from same-harness ginkgo comparison
+- [SPEED_COMPARISON.md](SPEED_COMPARISON.md) — latest published upstream vs seriousum speed comparison
 - [component-porting-compliance.md](component-porting-compliance.md) — crate/component evidence report
 - [parity-matrix.md](parity-matrix.md) — Rust ↔ Cilium mapping
 - [FULL_TEST_SUITE_CATALOG.md](FULL_TEST_SUITE_CATALOG.md) — integration and test inventory

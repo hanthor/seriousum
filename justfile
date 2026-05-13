@@ -11,6 +11,12 @@ KIND_CLUSTER := "kind"
 CILIUM_REPO := "/var/home/james/dev/cilium"
 TEST_TIMEOUT := "12m"
 
+# Upstream Cilium CI images — used for benchmark comparisons against seriousum
+CILIUM_CI_AGENT := "quay.io/cilium/cilium-ci"
+CILIUM_CI_TAG := "latest"
+CILIUM_CI_OPERATOR := "quay.io/cilium/operator-generic-ci:latest"
+CILIUM_CI_HUBBLE_RELAY := "quay.io/cilium/hubble-relay-ci:latest"
+
 # Colors for output
 GREEN := '\033[0;32m'
 BLUE := '\033[0;34m'
@@ -236,6 +242,28 @@ NC := '\033[0m' # No Color
 @clean-all: cluster-delete clean
     echo "{{GREEN}}Full clean complete!{{NC}}"
 
+# Aggressive cleanup: kills all kind clusters, removes docker networks, prunes containers
+@clean-aggressive:
+    echo "{{BLUE}}Performing aggressive cleanup...{{NC}}"
+    echo "  Deleting all kind clusters..."
+    kind get clusters 2>/dev/null | xargs -I {} kind delete cluster --name {} >/dev/null 2>&1 || true
+    echo "  Removing kind-cilium network..."
+    docker network rm kind-cilium >/dev/null 2>&1 || true
+    docker network rm kind >/dev/null 2>&1 || true
+    echo "  Pruning all docker containers..."
+    docker container prune -f >/dev/null 2>&1 || true
+    echo "  Pruning docker networks..."
+    docker network prune -f >/dev/null 2>&1 || true
+    echo "  Waiting for system to stabilize..."
+    sleep 3
+    echo "{{GREEN}}Aggressive cleanup complete!{{NC}}"
+
+# Cleanup before fresh test run
+@fresh-prep: clean-aggressive
+    echo "{{BLUE}}Preparing for fresh test run...{{NC}}"
+    mkdir -p target/cilium-kind target/cilium-dropin
+    echo "{{GREEN}}Ready for fresh test!{{NC}}"
+
 # Run multiple test suites sequentially on a single cluster (efficient)
 @test-sequential timeout=TEST_TIMEOUT:
     echo "{{BLUE}}Running test suites sequentially{{NC}}"
@@ -294,6 +322,37 @@ NC := '\033[0m' # No Color
         -f images/cilium-agent.Dockerfile .
     echo "{{GREEN}}✓ localhost/seriousum/cilium-agent:{{tag}} built{{NC}}"
 
+# Build ALL images without BuildKit attestations so kind load works
+@build-all-compat tag=IMAGE_TAG:
+    echo "{{BLUE}}Building all images (kind-compatible)...{{NC}}"
+    DOCKER_BUILDKIT=0 docker build --platform linux/amd64 \
+        -t localhost:5000/seriousum/cilium-agent:{{tag}} \
+        -f images/cilium-agent.Dockerfile .
+    DOCKER_BUILDKIT=0 docker build --platform linux/amd64 \
+        -t localhost:5000/seriousum/operator-generic:{{tag}} \
+        -f images/operator.Dockerfile target/release
+    DOCKER_BUILDKIT=0 docker build --platform linux/amd64 \
+        -t localhost:5000/seriousum/hubble:{{tag}} \
+        -f images/hubble.Dockerfile target/release
+    DOCKER_BUILDKIT=0 docker build --platform linux/amd64 \
+        -t localhost:5000/seriousum/cilium-dbg:{{tag}} \
+        -f images/cilium-dbg.Dockerfile target/release
+    DOCKER_BUILDKIT=0 docker build --platform linux/amd64 \
+        -t localhost:5000/seriousum/clustermesh-apiserver:{{tag}} \
+        -f images/clustermesh-apiserver.Dockerfile target/release
+    echo "{{GREEN}}✓ All images built as localhost:5000/seriousum/*:{{tag}}{{NC}}"
+
+# Load ALL seriousum images into an existing kind cluster
+@load-all cluster=KIND_CLUSTER tag=IMAGE_TAG:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    for img in cilium-agent operator-generic hubble cilium-dbg clustermesh-apiserver; do
+        echo "Loading localhost:5000/seriousum/$img:{{tag}} into {{cluster}}..."
+        kind load docker-image "localhost:5000/seriousum/$img:{{tag}}" --name {{cluster}} 2>&1 || \
+            echo "  (skipped $img — image may not exist locally)"
+    done
+    echo "Done loading images into {{cluster}}"
+
 # Load a pre-built agent image into an existing kind cluster (no cluster recreation)
 @load-agent cluster=KIND_CLUSTER tag=IMAGE_TAG:
     echo "{{BLUE}}Loading cilium-agent:{{tag}} into kind cluster '{{cluster}}'...{{NC}}"
@@ -308,19 +367,38 @@ NC := '\033[0m' # No Color
     ./scripts/build-cilium-dropin.sh target/cilium-dropin
     echo "{{GREEN}}✓ test-setup complete (ginkgo binary + dropin ready){{NC}}"
 
-# Run ginkgo against an EXISTING cluster (no image build, no cluster recreation)
-# Usage: just run-existing cilium-rust-test K8sAgentFQDNTest
-@run-existing cluster=KIND_CLUSTER focus='K8sAgentFQDNTest' timeout=TEST_TIMEOUT:
+# Run ginkgo against an EXISTING cluster using pre-loaded images (no build, no cluster recreation)
+# Images must already be loaded into the cluster via `just load-all` or `just build-all-compat`+`just load-all`
+# Usage: just run-existing cilium-ginkgo K8sAgentChaosTest
+run-existing cluster=KIND_CLUSTER focus='K8sAgentChaosTest' timeout=TEST_TIMEOUT:
     #!/usr/bin/env bash
     set -euo pipefail
-    mkdir -p target/cilium-kind
-    kind get kubeconfig --name {{cluster}} > target/cilium-kind/{{cluster}}.kubeconfig
-    export KUBECONFIG="$PWD/target/cilium-kind/{{cluster}}.kubeconfig"
-    export PATH="$PWD/target/cilium-dropin:$PATH"
+    ROOT="$(git rev-parse --show-toplevel)"
+    IMGPREFIX="localhost:5000/seriousum"
+    TAG="{{IMAGE_TAG}}"
+    mkdir -p "$ROOT/target/cilium-kind"
+    KUBECONF="$ROOT/target/cilium-kind/{{cluster}}.kubeconfig"
+    kind get kubeconfig --name {{cluster}} > "$KUBECONF"
+    export KUBECONFIG="$KUBECONF"
+    export PATH="$ROOT/target/cilium-dropin:$PATH"
     export CNI_INTEGRATION=kind
     export INTEGRATION_TESTS=true
-    export K8S_VERSION=$(kubectl version -o json 2>/dev/null | python3 -c "import sys,json; v=json.load(sys.stdin)['serverVersion']; print(f\"{v['major']}.{v['minor']}\")" 2>/dev/null || echo "1.33")
-    echo -e "{{BLUE}}Running focus='{{focus}}' against cluster='{{cluster}}'{{NC}}"
+    # Mirror CI's fresh-cluster assumption: remove orphaned non-Helm objects that
+    # can survive interrupted local runs and block chart re-install ownership checks.
+    kubectl -n kube-system delete serviceaccount cilium-envoy --ignore-not-found >/dev/null 2>&1 || true
+    kubectl -n kube-system delete configmap cilium-envoy-config --ignore-not-found >/dev/null 2>&1 || true
+    K8S_VER=$(kubectl version -o json 2>/dev/null \
+        | python3 -c "import sys,json; v=json.load(sys.stdin)['serverVersion']; print(v['major']+'.'+v['minor'])" \
+        2>/dev/null || echo "1.33")
+    export K8S_VERSION="$K8S_VER"
+    # Put all image settings into HELM_OVERRIDES so they go through cliOverrideOptions
+    # (applied last via maps.Copy — always wins over defaultHelmOptions and kindHelmOverrides).
+    # This avoids the env-var→defaultHelmOptions double-suffix bug when env vars from prior
+    # runs are still exported in the shell.
+    # operator.image.override bypasses the chart's "repository-cloud+suffix" logic.
+    # The chart appends "-generic" (cloud) automatically, which would double the suffix.
+    HELM_OVERRIDES="image.repository=$IMGPREFIX/cilium-agent,image.tag=$TAG,image.useDigest=false,image.pullPolicy=Never,operator.image.override=$IMGPREFIX/operator-generic:$TAG,operator.image.pullPolicy=Never,hubble.relay.image.repository=$IMGPREFIX/hubble,hubble.relay.image.tag=$TAG,hubble.relay.image.useDigest=false,hubble.relay.image.pullPolicy=Never,clustermesh.apiserver.image.repository=$IMGPREFIX/clustermesh-apiserver,clustermesh.apiserver.image.tag=$TAG,clustermesh.apiserver.image.useDigest=false,clustermesh.apiserver.image.pullPolicy=Never"
+    echo "Running focus='{{focus}}' against cluster='{{cluster}}' (k8s $K8S_VER)"
     cd {{CILIUM_REPO}}/test
     timeout --preserve-status --kill-after=5m {{timeout}} \
         ./test.test \
@@ -328,14 +406,18 @@ NC := '\033[0m' # No Color
             --ginkgo.v \
             -- \
             -cilium.testScope=k8s \
-            -cilium.kubeconfig="$PWD/../../../dev/seriousum/target/cilium-kind/{{cluster}}.kubeconfig" \
-            -cilium.passCLIEnvironment=true \
-            -cilium.image="localhost/seriousum/cilium-agent" \
-            -cilium.tag="{{IMAGE_TAG}}" \
-            -cilium.operator-image="quay.io/cilium/operator-generic" \
-            -cilium.operator-tag="latest" \
-            -cilium.operator-suffix="" \
+            -cilium.kubeconfig="$KUBECONF" \
+            -cilium.install-helm-overrides="$HELM_OVERRIDES" \
             -cilium.holdEnvironment=false
+
+# Recreate cluster + load local seriousum images + run ginkgo focus.
+# Mirrors upstream CI behavior (fresh kind cluster per run), avoiding stale-resource
+# ownership conflicts between repeated local test iterations.
+# Usage: just run-existing-fresh cilium-ginkgo K8sAgentChaosTest
+run-existing-fresh cluster='cilium-ginkgo' focus='K8sAgentChaosTest' timeout=TEST_TIMEOUT agent_port_prefix='234' operator_port_prefix='235':
+    just ginkgo-cluster {{cluster}} {{agent_port_prefix}} {{operator_port_prefix}}
+    just load-all {{cluster}}
+    just run-existing {{cluster}} {{focus}} {{timeout}}
 
 # ============================================================================
 # PARALLEL TESTING & IMPLEMENTATION WORKFLOWS
@@ -367,3 +449,112 @@ NC := '\033[0m' # No Color
 @test-parallel-report:
     echo "{{BLUE}}Parallel Test Results{{NC}}"
     bash -c 'if [ -f target/parallel-test-results/AGGREGATED_RESULTS.md ]; then cat target/parallel-test-results/AGGREGATED_RESULTS.md; else echo "No parallel test results found. Run just test-parallel first."; fi'
+
+# ============================================================================
+# BENCHMARK COMPARISON: upstream Cilium vs seriousum (Rust)
+# ============================================================================
+
+# Create a fresh kind cluster ready for ginkgo tests using the proper CNI setup script.
+# Deletes any existing cluster with the same name first.
+# agent_port_prefix/operator_port_prefix avoid debug-port collisions when multiple clusters exist.
+# Usage: just ginkgo-cluster cilium-ginkgo
+# Usage: just ginkgo-cluster cilium-upstream 236 237
+ginkgo-cluster cluster='cilium-ginkgo' agent_port_prefix='234' operator_port_prefix='235':
+    #!/usr/bin/env bash
+    set -euo pipefail
+    ROOT="$(git rev-parse --show-toplevel)"
+    mkdir -p "$ROOT/target/cilium-kind"
+    KUBECONF="$ROOT/target/cilium-kind/{{cluster}}.kubeconfig"
+    kind delete cluster --name {{cluster}} 2>/dev/null || true
+    AGENTPORTPREFIX={{agent_port_prefix}} OPERATORPORTPREFIX={{operator_port_prefix}} \
+        bash "{{CILIUM_REPO}}/contrib/scripts/kind.sh" 1 1 {{cluster}} kindest/node:v1.33.1 iptables dual "" "" "$KUBECONF"
+    echo "Cluster {{cluster}} ready — kubeconfig: $KUBECONF"
+
+# Pull and load upstream Cilium CI images into an existing kind cluster.
+# These are the reference images used for benchmark comparisons.
+# NOTE: Skips hubble-relay-ci which is small enough to pull live (IfNotPresent).
+# Usage: just load-upstream cilium-ginkgo
+load-upstream cluster=KIND_CLUSTER:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    # kind load docker-image fails on multi-arch BuildKit images; use docker save|ctr import instead.
+    for img in "{{CILIUM_CI_AGENT}}:{{CILIUM_CI_TAG}}" "{{CILIUM_CI_OPERATOR}}"; do
+        echo "Pulling $img (linux/amd64)..."
+        DOCKER_BUILDKIT=0 docker pull --platform linux/amd64 "$img"
+        for node in $(kind get nodes --name {{cluster}}); do
+            echo "  importing $img into $node..."
+            docker save "$img" | docker exec -i "$node" ctr --namespace=k8s.io images import -
+        done
+    done
+    echo "Done — upstream CI images loaded into {{cluster}}"
+
+# Run ginkgo against an EXISTING cluster using upstream Cilium CI images.
+# This is the benchmark baseline — compare results against `just run-existing`
+# which runs the same suite against the seriousum Rust agent.
+# Usage: just run-upstream cilium-ginkgo K8sAgentChaosTest
+run-upstream cluster=KIND_CLUSTER focus='K8sAgentChaosTest' timeout=TEST_TIMEOUT:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    ROOT="$(git rev-parse --show-toplevel)"
+    AGENT_IMG="{{CILIUM_CI_AGENT}}"
+    AGENT_TAG="{{CILIUM_CI_TAG}}"
+    OPERATOR_IMG="{{CILIUM_CI_OPERATOR}}"
+    HUBBLE_IMG="{{CILIUM_CI_HUBBLE_RELAY}}"
+    HUBBLE_REPO="${HUBBLE_IMG%:*}"
+    HUBBLE_TAG="${HUBBLE_IMG##*:}"
+    mkdir -p "$ROOT/target/cilium-kind"
+    KUBECONF="$ROOT/target/cilium-kind/{{cluster}}.kubeconfig"
+    kind get kubeconfig --name {{cluster}} > "$KUBECONF"
+    export KUBECONFIG="$KUBECONF"
+    export PATH="$ROOT/target/cilium-dropin:$PATH"
+    export CNI_INTEGRATION=kind
+    export INTEGRATION_TESTS=true
+    # Remove orphaned non-Helm envoy objects from interrupted local runs; this
+    # keeps baseline installs aligned with CI's clean-cluster behavior.
+    kubectl -n kube-system delete serviceaccount cilium-envoy --ignore-not-found >/dev/null 2>&1 || true
+    kubectl -n kube-system delete configmap cilium-envoy-config --ignore-not-found >/dev/null 2>&1 || true
+    K8S_VER=$(kubectl version -o json 2>/dev/null \
+        | python3 -c "import sys,json; v=json.load(sys.stdin)['serverVersion']; print(v['major']+'.'+v['minor'])" \
+        2>/dev/null || echo "1.33")
+    export K8S_VERSION="$K8S_VER"
+    # operator.image.override bypasses the Helm chart cloud-suffix logic (same as run-existing).
+    # Agent + operator use Never (pre-loaded); hubble-relay uses IfNotPresent (pulls from quay.io).
+    HELM_OVERRIDES="image.repository=$AGENT_IMG,image.tag=$AGENT_TAG,image.useDigest=false,image.pullPolicy=Never,operator.image.override=$OPERATOR_IMG,operator.image.pullPolicy=Never,hubble.relay.image.repository=$HUBBLE_REPO,hubble.relay.image.tag=$HUBBLE_TAG,hubble.relay.image.useDigest=false,hubble.relay.image.pullPolicy=IfNotPresent"
+    echo "Running UPSTREAM CILIUM focus='{{focus}}' against cluster='{{cluster}}' (k8s $K8S_VER)"
+    echo "  Agent:    $AGENT_IMG:$AGENT_TAG"
+    echo "  Operator: $OPERATOR_IMG"
+    cd {{CILIUM_REPO}}/test
+    timeout --preserve-status --kill-after=5m {{timeout}} \
+        ./test.test \
+            --ginkgo.focus="{{focus}}" \
+            --ginkgo.v \
+            -- \
+            -cilium.testScope=k8s \
+            -cilium.kubeconfig="$KUBECONF" \
+            -cilium.install-helm-overrides="$HELM_OVERRIDES" \
+            -cilium.holdEnvironment=false
+
+# Recreate cluster + load upstream CI images + run baseline focus.
+# Usage: just run-upstream-fresh cilium-upstream K8sAgentChaosTest
+run-upstream-fresh cluster='cilium-upstream' focus='K8sAgentChaosTest' timeout=TEST_TIMEOUT agent_port_prefix='236' operator_port_prefix='237':
+    just ginkgo-cluster {{cluster}} {{agent_port_prefix}} {{operator_port_prefix}}
+    just load-upstream {{cluster}}
+    just run-upstream {{cluster}} {{focus}} {{timeout}}
+
+# Run a test in the background in a detached session (immune to SIGHUP / terminal close).
+# Logs go to target/bg-<focus>-<timestamp>.log
+# Usage: just run-bg cilium-ginkgo K8sAgentChaosTest
+# Usage: just run-bg cilium-ginkgo K8sAgentChaosTest 30m upstream
+run-bg cluster=KIND_CLUSTER focus='K8sAgentChaosTest' timeout=TEST_TIMEOUT variant='seriousum':
+    #!/usr/bin/env bash
+    set -euo pipefail
+    ROOT="$(git rev-parse --show-toplevel)"
+    TS=$(date +%Y%m%d-%H%M%S)
+    LOGFILE="$ROOT/target/bg-{{variant}}-{{focus}}-$TS.log"
+    mkdir -p "$ROOT/target"
+    RECIPE="run-existing"
+    if [ "{{variant}}" = "upstream" ]; then RECIPE="run-upstream"; fi
+    echo "Launching $RECIPE {{focus}} in background (setsid)..."
+    echo "Log: $LOGFILE"
+    setsid just "$RECIPE" {{cluster}} {{focus}} {{timeout}} > "$LOGFILE" 2>&1 &
+    echo "PID: $! — tail -f $LOGFILE"

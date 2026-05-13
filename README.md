@@ -5,6 +5,10 @@
 [![Tests](https://img.shields.io/badge/tests-430%2F430-brightgreen)](docs/FULL_TEST_SUITE_CATALOG.md)
 [![Parity Proof](https://img.shields.io/badge/parity%20proof-not%20yet%20proven-yellow)](docs/PARITY_PROOF_DASHBOARD.md)
 
+**Published evidence (latest):**
+- **Parity proof**: [docs/PARITY_PROOF.md](docs/PARITY_PROOF.md)
+- **Speed comparison (same ginkgo harness)**: [docs/SPEED_COMPARISON.md](docs/SPEED_COMPARISON.md)
+
 A Rust-based reimplementation effort for major Cilium userspace and control-plane components.
 
 Seriousum currently delivers a substantial Rust port of core Cilium subsystems, compatibility-oriented binaries, benchmark comparisons against upstream Cilium, and a formal **parity proof dashboard** that tracks what is and is not yet proven.

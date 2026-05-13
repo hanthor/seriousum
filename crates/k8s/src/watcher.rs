@@ -4,6 +4,7 @@ use futures::{StreamExt, TryStreamExt};
 use k8s_openapi::api::core::v1::{Node, Pod, Service};
 use kube::{
     Api, Client,
+    api::{Patch, PatchParams},
     runtime::{
         WatchStreamExt,
         watcher::{self, watcher},
@@ -65,6 +66,44 @@ impl K8sWatcher {
     pub fn from_client(client: Client) -> (Self, tokio::sync::broadcast::Receiver<K8sEvent>) {
         let (tx, rx) = tokio::sync::broadcast::channel(1024);
         (Self { client, tx }, rx)
+    }
+
+    /// Resolve the node name for a given pod.
+    pub async fn resolve_node_name_from_pod(
+        &self,
+        namespace: &str,
+        pod_name: &str,
+    ) -> Result<Option<String>> {
+        let pods: Api<Pod> = Api::namespaced(self.client.clone(), namespace);
+        let pod = pods.get(pod_name).await?;
+        Ok(pod.spec.and_then(|spec| spec.node_name))
+    }
+
+    /// Remove bootstrap-blocking taints from the given node.
+    ///
+    /// Returns `true` when at least one taint was present and removed.
+    pub async fn remove_agent_not_ready_taint(&self, node_name: &str) -> Result<bool> {
+        let api: Api<Node> = Api::all(self.client.clone());
+        let mut node = api.get(node_name).await?;
+        let Some(spec) = node.spec.as_mut() else {
+            return Ok(false);
+        };
+        let Some(taints) = spec.taints.as_mut() else {
+            return Ok(false);
+        };
+
+        if !remove_bootstrap_blocking_taints(taints) {
+            return Ok(false);
+        }
+
+        let params = PatchParams::default();
+        let patch = Patch::Merge(serde_json::json!({
+            "spec": {
+                "taints": spec.taints,
+            }
+        }));
+        let _updated = api.patch(node_name, &params, &patch).await?;
+        Ok(true)
     }
 
     /// Start watching nodes in the background.
@@ -155,5 +194,62 @@ impl K8sWatcher {
                 }
             }
         })
+    }
+}
+
+fn remove_bootstrap_blocking_taints(taints: &mut Vec<k8s_openapi::api::core::v1::Taint>) -> bool {
+    let before = taints.len();
+    taints.retain(|taint| {
+        !matches!(
+            taint.key.as_str(),
+            "node.cilium.io/agent-not-ready" | "node.kubernetes.io/not-ready"
+        )
+    });
+    taints.len() != before
+}
+
+#[cfg(test)]
+mod tests {
+    use super::remove_bootstrap_blocking_taints;
+
+    #[test]
+    fn test_remove_bootstrap_blocking_taints() {
+        let mut taints = vec![
+            k8s_openapi::api::core::v1::Taint {
+                key: String::from("node.cilium.io/agent-not-ready"),
+                value: Some(String::from("true")),
+                effect: String::from("NoSchedule"),
+                time_added: None,
+            },
+            k8s_openapi::api::core::v1::Taint {
+                key: String::from("node.kubernetes.io/not-ready"),
+                value: None,
+                effect: String::from("NoSchedule"),
+                time_added: None,
+            },
+            k8s_openapi::api::core::v1::Taint {
+                key: String::from("dedicated"),
+                value: Some(String::from("system")),
+                effect: String::from("NoSchedule"),
+                time_added: None,
+            },
+        ];
+
+        assert!(remove_bootstrap_blocking_taints(&mut taints));
+        assert_eq!(taints.len(), 1);
+        assert_eq!(taints[0].key, "dedicated");
+    }
+
+    #[test]
+    fn test_remove_bootstrap_blocking_taints_noop() {
+        let mut taints = vec![k8s_openapi::api::core::v1::Taint {
+            key: String::from("dedicated"),
+            value: Some(String::from("system")),
+            effect: String::from("NoSchedule"),
+            time_added: None,
+        }];
+
+        assert!(!remove_bootstrap_blocking_taints(&mut taints));
+        assert_eq!(taints.len(), 1);
     }
 }

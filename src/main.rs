@@ -2,7 +2,13 @@ use clap::Parser;
 
 fn main() -> anyhow::Result<()> {
     let args: Vec<String> = std::env::args().collect();
+    let bin_name = args
+        .first()
+        .and_then(|arg| std::path::Path::new(arg).file_name())
+        .and_then(|f| f.to_str())
+        .unwrap_or_default();
     let daemon_mode = args.get(1).is_some_and(|arg| arg == "daemon")
+        || bin_name == "cilium-agent"
         || (args.len() == 1 && std::env::var_os("CILIUM_AGENT").is_some());
 
     if daemon_mode {
