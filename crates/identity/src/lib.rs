@@ -1,8 +1,18 @@
-//! Lightweight identity scaffolds for parity-friendly model work.
+//! Identity allocation and IPCache — ported from cilium/pkg/identity.
+//!
+//! Provides scope-aware identity allocation (local, global, remote-node),
+//! identity caching, and IP-to-identity mapping.
+
+pub mod allocation;
+pub mod ipcache;
+
+pub use allocation::{IdentityNotifier, LabelSet, LocalIdentityCache};
+pub use ipcache::{IPCache, IPPrefixEntry};
 
 use serde::{Deserialize, Serialize};
 use seriousum_api::VersionInfo;
-use seriousum_core::{Error, Identity, Result, SecurityIdentity, SecurityLabel};
+pub use seriousum_core::NumericIdentity;
+use seriousum_core::{Error, Identity, Result, SecurityLabel};
 use std::collections::BTreeMap;
 
 /// Default component name for identity scaffolds.
@@ -53,7 +63,7 @@ impl IdentityModel {
     pub fn scaffold() -> Self {
         Self::new(
             Identity::new(
-                SecurityIdentity::world(),
+                NumericIdentity::world(),
                 [SecurityLabel::new("identity", "scaffold")],
             ),
             "synthetic",
@@ -168,7 +178,7 @@ mod tests {
     fn validate_rejects_missing_source() {
         let model = IdentityModel::new(
             Identity::new(
-                SecurityIdentity::host(),
+                NumericIdentity::host(),
                 [SecurityLabel::new("role", "node")],
             ),
             "",
