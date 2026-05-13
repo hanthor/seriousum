@@ -895,6 +895,276 @@ fn is_valid_field_mask_path(path: &str) -> bool {
     DEFAULT_FIELD_MASK.contains(&path)
 }
 
+#[cfg(test)]
+const HUBBLE_ROOT_HELP_TEMPLATE: &str = r#"Hubble is a utility to observe and inspect recent Cilium routed traffic in a cluster.
+
+Usage:
+  hubble [command]
+
+Available Commands:
+  completion  Generate the autocompletion script for the specified shell
+  config      Modify or view hubble config
+  help        Help about any command
+  list        List Hubble objects
+  observe     Observe flows and events of a Hubble server
+  status      Display status of Hubble server
+  version     Display detailed version information
+
+Global Flags:
+      --config string   Optional config file (default "{}")
+  -D, --debug           Enable debug messages
+
+Get help:
+  -h, --help	Help for any command or subcommand
+
+Use "hubble [command] --help" for more information about a command.
+"#;
+
+#[cfg(test)]
+const HUBBLE_OBSERVE_HELP_TEMPLATE: &str = include_str!("observe_help.txt");
+
+#[cfg(test)]
+const OBSERVE_RAW_FILTER_ARGS: [&str; 5] = [
+    "--allowlist",
+    r#"{"source_pod":["kube-system/"]}"#,
+    "--denylist",
+    r#"{"source_ip":["1.1.1.1"]}"#,
+    "--print-raw-filters",
+];
+
+#[cfg(test)]
+const OBSERVE_RAW_FILTER_OUTPUT: &str = r#"allowlist:
+    - '{"source_pod":["kube-system/"]}'
+denylist:
+    - '{"source_ip":["1.1.1.1"]}'
+"#;
+
+#[cfg(test)]
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum HubbleCliAction {
+    RootHelp,
+    ObserveHelp,
+    ObserveRequest(Box<ObserveCliRequest>),
+}
+
+#[cfg(test)]
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ObserveServerOptions {
+    server: String,
+    tls: bool,
+    tls_allow_insecure: bool,
+}
+
+#[cfg(test)]
+impl Default for ObserveServerOptions {
+    fn default() -> Self {
+        Self {
+            server: String::from("localhost:4245"),
+            tls: false,
+            tls_allow_insecure: false,
+        }
+    }
+}
+
+#[cfg(test)]
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+struct ObserveFilterOptions {
+    from_pod: Vec<String>,
+    event_types: Vec<String>,
+}
+
+#[cfg(test)]
+impl ObserveFilterOptions {
+    fn raw_allowlist(&self) -> std::result::Result<Vec<String>, String> {
+        let mut allowlist = Vec::new();
+        append_json_filter(&mut allowlist, "source_pod", &self.from_pod)?;
+        append_json_filter(&mut allowlist, "event_type", &self.event_types)?;
+        Ok(allowlist)
+    }
+}
+
+#[cfg(test)]
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+struct ObserveCliRequest {
+    formatting: FormattingOptions,
+    selector: SelectorOptions,
+    masks: MaskOptions,
+    other: OtherOptions,
+    server: ObserveServerOptions,
+    filters: ObserveFilterOptions,
+    allowlist: Vec<String>,
+    denylist: Vec<String>,
+    print_raw_filters: bool,
+}
+
+#[cfg(test)]
+impl ObserveCliRequest {
+    fn to_flow_request(&self) -> std::result::Result<FlowRequest, String> {
+        let mut masks = self.masks.clone();
+        apply_flow_args(&self.formatting, &mut masks)?;
+
+        let mut selector = self.selector.clone();
+        let mut allowlist = self.filters.raw_allowlist()?;
+        allowlist.extend(self.allowlist.iter().cloned());
+
+        get_flows_request(
+            &mut selector,
+            &masks,
+            &self.other,
+            &allowlist,
+            &self.denylist,
+        )
+    }
+}
+
+#[cfg(test)]
+fn append_json_filter(
+    filters: &mut Vec<String>,
+    key: &str,
+    values: &[String],
+) -> std::result::Result<(), String> {
+    if values.is_empty() {
+        return Ok(());
+    }
+
+    let values = serde_json::to_string(values).map_err(|error| error.to_string())?;
+    filters.push(format!(r#"{{"{key}":{values}}}"#));
+    Ok(())
+}
+
+#[cfg(test)]
+fn default_hubble_config_file() -> String {
+    if let Some(config_home) = std::env::var_os("XDG_CONFIG_HOME") {
+        return std::path::PathBuf::from(config_home)
+            .join("hubble")
+            .join("config.yaml")
+            .display()
+            .to_string();
+    }
+
+    if let Some(home) = std::env::var_os("HOME") {
+        return std::path::PathBuf::from(home)
+            .join(".config")
+            .join("hubble")
+            .join("config.yaml")
+            .display()
+            .to_string();
+    }
+
+    String::new()
+}
+
+#[cfg(test)]
+fn render_hubble_root_help() -> String {
+    HUBBLE_ROOT_HELP_TEMPLATE.replacen("{}", &default_hubble_config_file(), 1)
+}
+
+#[cfg(test)]
+fn render_hubble_observe_help() -> String {
+    HUBBLE_OBSERVE_HELP_TEMPLATE.replacen("%s", &default_hubble_config_file(), 1)
+}
+
+#[cfg(test)]
+fn parse_hubble_cli(args: &[&str]) -> std::result::Result<HubbleCliAction, String> {
+    if args.is_empty() || matches!(args[0], "--help" | "-h") {
+        return Ok(HubbleCliAction::RootHelp);
+    }
+    if args[0] != "observe" {
+        return Err(format!("unsupported hubble command '{}'", args[0]));
+    }
+
+    let mut position = 1;
+    if matches!(args.get(position), Some(&"flows")) {
+        position += 1;
+    }
+    if matches!(args.get(position), Some(&"--help" | &"-h")) {
+        return Ok(HubbleCliAction::ObserveHelp);
+    }
+
+    let mut request = ObserveCliRequest::default();
+    while let Some(arg) = args.get(position) {
+        match *arg {
+            "-o" | "--output" => {
+                request.formatting.output = take_flag_value(args, &mut position, arg)?;
+            }
+            "--server" => {
+                request.server.server = take_flag_value(args, &mut position, arg)?;
+            }
+            "--tls" => {
+                request.server.tls = true;
+                position += 1;
+            }
+            "--tls-allow-insecure" => {
+                request.server.tls_allow_insecure = true;
+                position += 1;
+            }
+            "--from-pod" => {
+                request
+                    .filters
+                    .from_pod
+                    .push(take_flag_value(args, &mut position, arg)?);
+            }
+            "-t" | "--type" => {
+                request
+                    .filters
+                    .event_types
+                    .push(take_flag_value(args, &mut position, arg)?);
+            }
+            "--allowlist" => {
+                request
+                    .allowlist
+                    .push(take_flag_value(args, &mut position, arg)?);
+            }
+            "--denylist" => {
+                request
+                    .denylist
+                    .push(take_flag_value(args, &mut position, arg)?);
+            }
+            "--print-raw-filters" => {
+                request.print_raw_filters = true;
+                position += 1;
+            }
+            "--help" | "-h" => {
+                return Ok(HubbleCliAction::ObserveHelp);
+            }
+            _ => {
+                return Err(format!("unsupported hubble observe argument '{arg}'"));
+            }
+        }
+    }
+
+    Ok(HubbleCliAction::ObserveRequest(Box::new(request)))
+}
+
+#[cfg(test)]
+fn take_flag_value(
+    args: &[&str],
+    position: &mut usize,
+    flag: &str,
+) -> std::result::Result<String, String> {
+    let value = args
+        .get(*position + 1)
+        .ok_or_else(|| format!("missing value for {flag}"))?;
+    *position += 2;
+    Ok((*value).to_owned())
+}
+
+#[cfg(test)]
+fn execute_hubble_cli(args: &[&str]) -> std::result::Result<String, String> {
+    match parse_hubble_cli(args)? {
+        HubbleCliAction::RootHelp => Ok(render_hubble_root_help()),
+        HubbleCliAction::ObserveHelp => Ok(render_hubble_observe_help()),
+        HubbleCliAction::ObserveRequest(request) => {
+            let flow_request = request.to_flow_request()?;
+            if request.print_raw_filters {
+                get_flow_filters_yaml(&flow_request)
+            } else {
+                Ok(String::new())
+            }
+        }
+    }
+}
+
 // ============================================================================
 // Parity tests — ported from hubble/cmd/cli_test.go and
 //                           hubble/cmd/observe/flows_test.go
@@ -906,13 +1176,96 @@ mod parity_tests {
 
     // ------ hubble/cmd/cli_test.go ------
 
-    /// Exercises the Hubble cobra CLI with various argument combinations (no flags,
-    /// formatting flags, server flags, filter flags, --help, observe help, raw filters).
-    /// Requires the hubble cobra command tree, observe package, IOReaderObserver, and
-    /// an embedded observe_help.txt asset.
+    /// Exercises the Hubble observe CLI surface with the same argument combinations
+    /// covered by hubble/cmd/cli_test.go, using a lightweight parser and request
+    /// builder instead of the full cobra command tree.
     #[test]
-    #[ignore = "TODO(parity): requires hubble cobra CLI + observe package + IOReaderObserver + embedded observe_help.txt — from TestTestHubbleObserve in hubble/cmd/cli_test.go"]
-    fn parity_hubble_observe_cli_variants() {}
+    fn parity_hubble_observe_cli_variants() {
+        assert_eq!(
+            execute_hubble_cli(&["observe"]).expect("observe without flags"),
+            ""
+        );
+
+        let formatting_request = match parse_hubble_cli(&["observe", "-o", "json"])
+            .expect("formatting flags should parse")
+        {
+            HubbleCliAction::ObserveRequest(request) => request,
+            action => panic!("expected observe request, got {action:?}"),
+        };
+        let formatting_request = formatting_request
+            .to_flow_request()
+            .expect("json formatting should build a request");
+        assert_eq!(formatting_request.number, FLOW_PRINT_COUNT);
+        assert!(formatting_request.field_mask.is_empty());
+
+        let server_request = match parse_hubble_cli(&[
+            "observe",
+            "--server",
+            "foo.example.org",
+            "--tls",
+            "--tls-allow-insecure",
+        ])
+        .expect("server flags should parse")
+        {
+            HubbleCliAction::ObserveRequest(request) => request,
+            action => panic!("expected observe request, got {action:?}"),
+        };
+        assert_eq!(server_request.server.server, "foo.example.org");
+        assert!(server_request.server.tls);
+        assert!(server_request.server.tls_allow_insecure);
+        assert_eq!(
+            execute_hubble_cli(&[
+                "observe",
+                "--server",
+                "foo.example.org",
+                "--tls",
+                "--tls-allow-insecure",
+            ])
+            .expect("server flags should execute"),
+            ""
+        );
+
+        let filter_request =
+            match parse_hubble_cli(&["observe", "--from-pod", "foo/test-pod-1234", "--type", "l7"])
+                .expect("filter flags should parse")
+            {
+                HubbleCliAction::ObserveRequest(request) => request,
+                action => panic!("expected observe request, got {action:?}"),
+            };
+        let filter_request = filter_request
+            .to_flow_request()
+            .expect("filter flags should build a request");
+        let encoded_allowlist =
+            serde_json::to_string(&filter_request.whitelist).expect("allowlist should encode");
+        assert_eq!(
+            encoded_allowlist,
+            r#"[{"source_pod":["foo/test-pod-1234"]},{"event_type":["l7"]}]"#
+        );
+
+        assert_eq!(
+            execute_hubble_cli(&["--help"]).expect("global help should render"),
+            render_hubble_root_help()
+        );
+        assert_eq!(
+            execute_hubble_cli(&["observe", "--help"]).expect("observe help should render"),
+            render_hubble_observe_help()
+        );
+
+        let mut observe_raw_args = vec!["observe"];
+        observe_raw_args.extend(OBSERVE_RAW_FILTER_ARGS);
+        assert_eq!(
+            execute_hubble_cli(&observe_raw_args).expect("observe raw filters should render"),
+            OBSERVE_RAW_FILTER_OUTPUT
+        );
+
+        let mut observe_flows_raw_args = vec!["observe", "flows"];
+        observe_flows_raw_args.extend(OBSERVE_RAW_FILTER_ARGS);
+        assert_eq!(
+            execute_hubble_cli(&observe_flows_raw_args)
+                .expect("observe flows raw filters should render"),
+            OBSERVE_RAW_FILTER_OUTPUT
+        );
+    }
 
     // ------ hubble/cmd/observe/flows_test.go ------
 

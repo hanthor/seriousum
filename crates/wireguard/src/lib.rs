@@ -340,7 +340,7 @@ impl WireGuardPeerReconciler {
         }
     }
 
-    fn seed_restored_peer<I>(&mut self, public_key: WGKey, allowed_ips: I)
+    fn seed_restored_peer<I>(&mut self, public_key: &WGKey, allowed_ips: I)
     where
         I: IntoIterator<Item = IpNet>,
     {
@@ -352,8 +352,7 @@ impl WireGuardPeerReconciler {
 
     fn upsert_workload(&mut self, prefix: IpNet, node_name: impl Into<String>) {
         let node_name = node_name.into();
-        self.workload_owner
-            .insert(prefix.clone(), node_name.clone());
+        self.workload_owner.insert(prefix, node_name.clone());
         if let Some(owner) = self.restored_owner.get_mut(&prefix) {
             *owner = RestoredOwner::Node(node_name);
         }
@@ -367,7 +366,7 @@ impl WireGuardPeerReconciler {
     fn update_peer(
         &mut self,
         node_name: impl Into<String>,
-        public_key: WGKey,
+        public_key: &WGKey,
         node_ipv4: Option<Ipv4Addr>,
         node_ipv6: Option<Ipv6Addr>,
     ) -> Result<()> {
@@ -380,14 +379,16 @@ impl WireGuardPeerReconciler {
         if self
             .peers
             .iter()
-            .any(|(other_name, peer)| other_name != &node_name && peer.public_key == public_key)
+            .any(|(other_name, peer)| other_name != &node_name && peer.public_key == *public_key)
         {
             return Err(Error::Wireguard(format!(
                 "detected duplicate public key for node {node_name}"
             )));
         }
 
-        let endpoint = self.endpoint_selection.select_endpoint(node_ipv4, node_ipv6)?;
+        let endpoint = self
+            .endpoint_selection
+            .select_endpoint(node_ipv4, node_ipv6)?;
         self.peers.insert(
             node_name.clone(),
             ReconciledPeer {
@@ -399,7 +400,7 @@ impl WireGuardPeerReconciler {
         );
 
         for owner in self.restored_owner.values_mut() {
-            if matches!(owner, RestoredOwner::Key(key) if *key == public_key) {
+            if matches!(owner, RestoredOwner::Key(key) if *key == *public_key) {
                 *owner = RestoredOwner::Node(node_name.clone());
             }
         }
@@ -410,8 +411,9 @@ impl WireGuardPeerReconciler {
     fn delete_peer(&mut self, node_name: &str) {
         self.peers.remove(node_name);
         self.workload_owner.retain(|_, owner| owner != node_name);
-        self.restored_owner
-            .retain(|_, owner| !matches!(owner, RestoredOwner::Node(owner_name) if owner_name == node_name));
+        self.restored_owner.retain(
+            |_, owner| !matches!(owner, RestoredOwner::Node(owner_name) if owner_name == node_name),
+        );
     }
 
     fn restore_finished(&mut self) {
@@ -439,7 +441,7 @@ impl WireGuardPeerReconciler {
                 self.workload_owner
                     .iter()
                     .filter(|(_, owner)| *owner == node_name)
-                    .map(|(prefix, _)| prefix.clone()),
+                    .map(|(prefix, _)| *prefix),
             );
         }
         if !self.restore_finished {
@@ -447,11 +449,11 @@ impl WireGuardPeerReconciler {
                 self.restored_owner
                     .iter()
                     .filter(|(_, owner)| owner.belongs_to(node_name))
-                    .map(|(prefix, _)| prefix.clone()),
+                    .map(|(prefix, _)| *prefix),
             );
         }
 
-        allowed_ips.sort_by_key(|prefix| prefix.to_string());
+        allowed_ips.sort_by_key(ToString::to_string);
         allowed_ips.dedup();
         allowed_ips
     }
@@ -786,8 +788,18 @@ mod parity_tests {
                     "fd00::2/128",
                     "fd01::b/128",
                 ],
-                vec!["10.0.0.2/32", "192.168.60.11/32", "fd00::2/128", "fd01::b/128"],
-                vec!["10.0.0.3/32", "192.168.60.12/32", "fd00::3/128", "fd01::c/128"],
+                vec![
+                    "10.0.0.2/32",
+                    "192.168.60.11/32",
+                    "fd00::2/128",
+                    "fd01::b/128",
+                ],
+                vec![
+                    "10.0.0.3/32",
+                    "192.168.60.12/32",
+                    "fd00::3/128",
+                    "fd01::c/128",
+                ],
             ),
             (
                 "tunnel-with-fallback",
@@ -800,8 +812,18 @@ mod parity_tests {
                     "fd00::2/128",
                     "fd01::b/128",
                 ],
-                vec!["10.0.0.2/32", "192.168.60.11/32", "fd00::2/128", "fd01::b/128"],
-                vec!["10.0.0.3/32", "192.168.60.12/32", "fd00::3/128", "fd01::c/128"],
+                vec![
+                    "10.0.0.2/32",
+                    "192.168.60.11/32",
+                    "fd00::2/128",
+                    "fd01::b/128",
+                ],
+                vec![
+                    "10.0.0.3/32",
+                    "192.168.60.12/32",
+                    "fd00::3/128",
+                    "fd01::c/128",
+                ],
             ),
             (
                 "tunnel-without-fallback",
@@ -811,14 +833,17 @@ mod parity_tests {
                 vec!["192.168.60.12/32", "fd01::c/128"],
             ),
         ] {
-            let mut reconciler = WireGuardPeerReconciler::new(mode, PeerEndpointSelection::default());
+            let mut reconciler =
+                WireGuardPeerReconciler::new(mode, PeerEndpointSelection::default());
             reconciler.upsert_workload(cidr("10.0.0.1/32"), "k8s1");
             reconciler.upsert_workload(cidr("fd00::1/128"), "k8s1");
             reconciler.upsert_workload(cidr("10.0.0.2/32"), "k8s1");
             reconciler.upsert_workload(cidr("fd00::2/128"), "k8s1");
 
+            let key1 = peer_key(1);
+            let key2 = peer_key(2);
             reconciler
-                .update_peer("k8s1", peer_key(1), Some(node1_ipv4), Some(node1_ipv6))
+                .update_peer("k8s1", &key1, Some(node1_ipv4), Some(node1_ipv6))
                 .expect("first peer should reconcile");
             let peer = reconciler.peer("k8s1").expect("k8s1 should exist");
             assert_eq!(peer.node_ipv4, Some(node1_ipv4), "{name}");
@@ -831,14 +856,14 @@ mod parity_tests {
             reconciler.delete_workload(&cidr("10.0.0.1/32"));
             reconciler.delete_workload(&cidr("fd00::1/128"));
             reconciler
-                .update_peer("k8s2", peer_key(2), Some(node2_ipv4), Some(node2_ipv6))
+                .update_peer("k8s2", &key2, Some(node2_ipv4), Some(node2_ipv6))
                 .expect("second peer should reconcile");
 
             assert_cidrs_eq(reconciler.allowed_ips_by_node("k8s1"), &second_k8s1);
             assert_cidrs_eq(reconciler.allowed_ips_by_node("k8s2"), &second_k8s2);
 
             let error = reconciler
-                .update_peer("k8s2", peer_key(1), Some(node2_ipv4), Some(node2_ipv6))
+                .update_peer("k8s2", &key1, Some(node2_ipv4), Some(node2_ipv6))
                 .expect_err("duplicate key should fail");
             assert!(error.to_string().contains("duplicate public key"), "{name}");
 
@@ -893,11 +918,37 @@ mod parity_tests {
                     "fd00::3/128",
                     "fd01::b/128",
                 ],
-                vec!["10.0.0.4/32", "192.168.60.12/32", "fd00::4/128", "fd01::c/128"],
-                vec!["10.0.0.2/32", "192.168.60.11/32", "fd00::1/128", "fd00::2/128", "fd01::b/128"],
-                vec!["10.0.0.4/32", "192.168.60.12/32", "fd00::4/128", "fd01::c/128"],
-                vec!["10.0.0.4/32", "192.168.60.13/32", "fd00::4/128", "fd01::c/128"],
-                vec!["10.0.0.4/32", "192.168.60.12/32", "fd00::4/128", "fd01::c/128"],
+                vec![
+                    "10.0.0.4/32",
+                    "192.168.60.12/32",
+                    "fd00::4/128",
+                    "fd01::c/128",
+                ],
+                vec![
+                    "10.0.0.2/32",
+                    "192.168.60.11/32",
+                    "fd00::1/128",
+                    "fd00::2/128",
+                    "fd01::b/128",
+                ],
+                vec![
+                    "10.0.0.4/32",
+                    "192.168.60.12/32",
+                    "fd00::4/128",
+                    "fd01::c/128",
+                ],
+                vec![
+                    "10.0.0.4/32",
+                    "192.168.60.13/32",
+                    "fd00::4/128",
+                    "fd01::c/128",
+                ],
+                vec![
+                    "10.0.0.4/32",
+                    "192.168.60.12/32",
+                    "fd00::4/128",
+                    "fd01::c/128",
+                ],
             ),
             (
                 "tunnel-with-fallback",
@@ -933,11 +984,37 @@ mod parity_tests {
                     "fd00::3/128",
                     "fd01::b/128",
                 ],
-                vec!["10.0.0.4/32", "192.168.60.12/32", "fd00::4/128", "fd01::c/128"],
-                vec!["10.0.0.2/32", "192.168.60.11/32", "fd00::1/128", "fd00::2/128", "fd01::b/128"],
-                vec!["10.0.0.4/32", "192.168.60.12/32", "fd00::4/128", "fd01::c/128"],
-                vec!["10.0.0.4/32", "192.168.60.13/32", "fd00::4/128", "fd01::c/128"],
-                vec!["10.0.0.4/32", "192.168.60.12/32", "fd00::4/128", "fd01::c/128"],
+                vec![
+                    "10.0.0.4/32",
+                    "192.168.60.12/32",
+                    "fd00::4/128",
+                    "fd01::c/128",
+                ],
+                vec![
+                    "10.0.0.2/32",
+                    "192.168.60.11/32",
+                    "fd00::1/128",
+                    "fd00::2/128",
+                    "fd01::b/128",
+                ],
+                vec![
+                    "10.0.0.4/32",
+                    "192.168.60.12/32",
+                    "fd00::4/128",
+                    "fd01::c/128",
+                ],
+                vec![
+                    "10.0.0.4/32",
+                    "192.168.60.13/32",
+                    "fd00::4/128",
+                    "fd01::c/128",
+                ],
+                vec![
+                    "10.0.0.4/32",
+                    "192.168.60.12/32",
+                    "fd00::4/128",
+                    "fd01::c/128",
+                ],
             ),
             (
                 "tunnel-without-fallback",
@@ -961,8 +1038,19 @@ mod parity_tests {
                     "fd00::4/128",
                     "fd01::b/128",
                 ],
-                vec!["10.0.0.3/32", "192.168.60.11/32", "fd00::2/128", "fd00::3/128", "fd01::b/128"],
-                vec!["10.0.0.4/32", "192.168.60.12/32", "fd00::4/128", "fd01::c/128"],
+                vec![
+                    "10.0.0.3/32",
+                    "192.168.60.11/32",
+                    "fd00::2/128",
+                    "fd00::3/128",
+                    "fd01::b/128",
+                ],
+                vec![
+                    "10.0.0.4/32",
+                    "192.168.60.12/32",
+                    "fd00::4/128",
+                    "fd01::c/128",
+                ],
                 vec!["192.168.60.11/32", "fd01::b/128"],
                 vec!["192.168.60.12/32", "fd01::c/128"],
                 vec!["192.168.60.13/32", "fd01::c/128"],
@@ -972,9 +1060,10 @@ mod parity_tests {
             let key1 = peer_key(1);
             let key2 = peer_key(2);
             let key3 = peer_key(3);
-            let mut reconciler = WireGuardPeerReconciler::new(mode, PeerEndpointSelection::default());
+            let mut reconciler =
+                WireGuardPeerReconciler::new(mode, PeerEndpointSelection::default());
             reconciler.seed_restored_peer(
-                key1.clone(),
+                &key1,
                 [
                     cidr("10.0.0.1/32"),
                     cidr("10.0.0.3/32"),
@@ -988,7 +1077,7 @@ mod parity_tests {
             reconciler.upsert_workload(cidr("10.0.0.1/32"), "k8s1");
             reconciler.upsert_workload(cidr("fd00::1/128"), "k8s1");
             reconciler
-                .update_peer("k8s1", key1.clone(), Some(node1_ipv4), Some(node1_ipv6))
+                .update_peer("k8s1", &key1, Some(node1_ipv4), Some(node1_ipv6))
                 .expect("initial peer restore should succeed");
             let mut by_key = reconciler.allowed_ips_by_public_key();
             assert_cidrs_eq(by_key.remove(&key1).expect("key1 should exist"), &step1);
@@ -1001,11 +1090,11 @@ mod parity_tests {
 
             reconciler.upsert_workload(cidr("10.0.0.4/32"), "k8s2");
             reconciler
-                .update_peer("k8s2", key2.clone(), Some(node2_ipv4), Some(node2_ipv6))
+                .update_peer("k8s2", &key2, Some(node2_ipv4), Some(node2_ipv6))
                 .expect("second peer restore should succeed");
             reconciler.upsert_workload(cidr("fd00::4/128"), "k8s2");
             reconciler
-                .update_peer("k8s1", key1.clone(), Some(node1_ipv4), Some(node1_ipv6))
+                .update_peer("k8s1", &key1, Some(node1_ipv4), Some(node1_ipv6))
                 .expect("refreshing the first peer should succeed");
             by_key = reconciler.allowed_ips_by_public_key();
             assert_cidrs_eq(by_key.remove(&key1).expect("key1 should exist"), &step3);
@@ -1017,28 +1106,29 @@ mod parity_tests {
             assert_cidrs_eq(by_key.remove(&key2).expect("key2 should exist"), &step6);
 
             reconciler
-                .update_peer("k8s2", key3.clone(), Some(node2_ipv4), Some(node2_ipv6))
+                .update_peer("k8s2", &key3, Some(node2_ipv4), Some(node2_ipv6))
                 .expect("public key rotation should succeed");
             by_key = reconciler.allowed_ips_by_public_key();
             assert_cidrs_eq(by_key.remove(&key1).expect("key1 should exist"), &step5);
             assert_cidrs_eq(by_key.remove(&key3).expect("key3 should exist"), &step6);
 
             reconciler
-                .update_peer("k8s2", key3.clone(), Some(node2_ipv4_alt), Some(node2_ipv6))
+                .update_peer("k8s2", &key3, Some(node2_ipv4_alt), Some(node2_ipv6))
                 .expect("node IP change should succeed");
             by_key = reconciler.allowed_ips_by_public_key();
             assert_cidrs_eq(by_key.remove(&key1).expect("key1 should exist"), &step5);
             assert_cidrs_eq(by_key.remove(&key3).expect("key3 should exist"), &step7);
 
             reconciler
-                .update_peer("k8s2", key2.clone(), Some(node2_ipv4), Some(node2_ipv6))
+                .update_peer("k8s2", &key2, Some(node2_ipv4), Some(node2_ipv6))
                 .expect("restoring the original key should succeed");
             by_key = reconciler.allowed_ips_by_public_key();
             assert_cidrs_eq(by_key.remove(&key1).expect("key1 should exist"), &step5);
             assert_cidrs_eq(by_key.remove(&key2).expect("key2 should exist"), &step8);
 
+            let dummy_key = peer_key(0);
             let error = reconciler
-                .update_peer("k8s2", peer_key(0), Some(node2_ipv4_alt), Some(node2_ipv6))
+                .update_peer("k8s2", &dummy_key, Some(node2_ipv4_alt), Some(node2_ipv6))
                 .expect_err("dummy key should be rejected");
             assert!(error.to_string().contains("dummy peer key"), "{name}");
         }
@@ -1149,20 +1239,17 @@ mod parity_tests {
         ];
 
         for (selector, ipv4, ipv6, expected) in cases {
-            match expected {
-                Some((expected_ip, expected_port)) => {
-                    let endpoint = selector
-                        .select_endpoint(ipv4, ipv6)
-                        .expect("endpoint selection should succeed");
-                    assert_eq!(endpoint.ip(), expected_ip);
-                    assert_eq!(endpoint.port(), expected_port);
-                }
-                None => {
-                    let error = selector
-                        .select_endpoint(ipv4, ipv6)
-                        .expect_err("endpoint selection should fail");
-                    assert!(matches!(error, seriousum_core::Error::Wireguard(_)));
-                }
+            if let Some((expected_ip, expected_port)) = expected {
+                let endpoint = selector
+                    .select_endpoint(ipv4, ipv6)
+                    .expect("endpoint selection should succeed");
+                assert_eq!(endpoint.ip(), expected_ip);
+                assert_eq!(endpoint.port(), expected_port);
+            } else {
+                let error = selector
+                    .select_endpoint(ipv4, ipv6)
+                    .expect_err("endpoint selection should fail");
+                assert!(matches!(error, seriousum_core::Error::Wireguard(_)));
             }
         }
     }

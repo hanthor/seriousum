@@ -322,7 +322,9 @@ impl DebugInfo {
 
     /// Returns a component by name.
     pub fn component(&self, name: &str) -> Option<&ComponentDebugInfo> {
-        self.components.iter().find(|component| component.name == name)
+        self.components
+            .iter()
+            .find(|component| component.name == name)
     }
 }
 
@@ -376,20 +378,15 @@ impl BpfMapDump {
 }
 
 /// Verbosity level for policy tracing.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub enum TraceVerbosity {
     /// Minimal trace output.
     Brief,
     /// Default trace output.
+    #[default]
     Normal,
     /// Detailed trace output.
     Detailed,
-}
-
-impl Default for TraceVerbosity {
-    fn default() -> Self {
-        Self::Normal
-    }
 }
 
 /// A single policy trace result entry.

@@ -7,9 +7,7 @@ use std::path::Path;
 
 use ipnet::IpNet;
 
-pub use seriousum_core::config::{
-    AgentConfig, Config as RuntimeConfig, EbpfConfig, NetworkConfig,
-};
+pub use seriousum_core::config::{AgentConfig, Config as RuntimeConfig, EbpfConfig, NetworkConfig};
 
 /// Prefix used for generated environment variable names.
 pub const CILIUM_ENV_PREFIX: &str = "CILIUM_";
@@ -53,7 +51,6 @@ pub const FRAGMENTS_MAP_ENTRIES_DEFAULT: i32 = 8_192;
 /// Default NAT map size (2/3 of full CT size).
 pub const NAT_MAP_ENTRIES_GLOBAL_DEFAULT: i32 =
     ((CT_MAP_ENTRIES_GLOBAL_TCP_DEFAULT + CT_MAP_ENTRIES_GLOBAL_ANY_DEFAULT) * 2) / 3;
-
 
 /// Where a config value came from.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -119,12 +116,7 @@ impl Config {
     }
 
     /// Sets a key to a string value with provenance.
-    pub fn set(
-        &mut self,
-        key: impl Into<String>,
-        value: impl Into<String>,
-        source: ConfigSource,
-    ) {
+    pub fn set(&mut self, key: impl Into<String>, value: impl Into<String>, source: ConfigSource) {
         self.values
             .insert(key.into(), ConfigValue::new(value, source));
     }
@@ -220,7 +212,11 @@ pub enum ConfigError {
     Missing(String),
     /// A stored value could not be parsed.
     #[error("parse error for key {key}={value}: {msg}")]
-    ParseError { key: String, value: String, msg: String },
+    ParseError {
+        key: String,
+        value: String,
+        msg: String,
+    },
     /// A stored value was syntactically valid but semantically rejected.
     #[error("invalid value {value} for key {key}: {reason}")]
     InvalidValue {

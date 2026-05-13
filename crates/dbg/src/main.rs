@@ -8,7 +8,7 @@ use seriousum_dbg::output::{
     print_endpoints_json, print_endpoints_table, print_map_table, print_policies_json,
     print_policies_table, print_services_json, print_services_table,
 };
-use std::process;
+use std::process::ExitCode;
 use tracing::error;
 
 /// Cilium debugging CLI for internal inspection
@@ -221,7 +221,7 @@ enum PolicyCommands {
     Remove { endpoint_id: u16, identity: u32 },
 }
 
-fn main() {
+fn main() -> ExitCode {
     let cli = Cli::parse();
 
     // Initialize tracing
@@ -236,11 +236,11 @@ fn main() {
     }
 
     match execute_command(&cli) {
-        Ok(_) => process::exit(0),
+        Ok(_) => ExitCode::SUCCESS,
         Err(e) => {
             error!("Command failed: {}", e);
             tracing::error!("Error: {}", e);
-            process::exit(1);
+            ExitCode::FAILURE
         }
     }
 }
@@ -426,10 +426,7 @@ fn execute_bpf_auth_command(
             } else {
                 let mut data = std::collections::HashMap::new();
                 for (i, entry) in entries.iter().enumerate() {
-                    data.insert(
-                        i.to_string(),
-                        entry.iter().map(|(_, v)| v.clone()).collect(),
-                    );
+                    data.insert(i.to_string(), entry.values().cloned().collect());
                 }
                 print_map_table(&data, "Index", "Auth Entry");
             }
@@ -454,10 +451,7 @@ fn execute_bpf_bandwidth_command(
             } else {
                 let mut data = std::collections::HashMap::new();
                 for (i, entry) in entries.iter().enumerate() {
-                    data.insert(
-                        i.to_string(),
-                        entry.iter().map(|(_, v)| v.clone()).collect(),
-                    );
+                    data.insert(i.to_string(), entry.values().cloned().collect());
                 }
                 print_map_table(&data, "Index", "Bandwidth Info");
             }
@@ -522,8 +516,7 @@ fn execute_service_command(
                 }
             }
             None => {
-                tracing::error!("Service {} not found", service_id);
-                process::exit(1);
+                return Err(format!("Service {service_id} not found").into());
             }
         },
     }
@@ -569,8 +562,7 @@ fn execute_endpoint_command(
                 }
             }
             None => {
-                tracing::error!("Endpoint {} not found", endpoint_id);
-                process::exit(1);
+                return Err(format!("Endpoint {endpoint_id} not found").into());
             }
         },
 

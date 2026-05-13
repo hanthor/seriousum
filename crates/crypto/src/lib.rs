@@ -1,6 +1,6 @@
 //! Crypto helpers for seriousum.
 
-use std::fmt;
+use std::fmt::{self, Write as _};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -74,7 +74,11 @@ impl SymmetricKey {
 
     /// Encodes the key as a lowercase hex string.
     pub fn to_hex(&self) -> String {
-        self.0.iter().map(|b| format!("{b:02x}")).collect()
+        let mut hex = String::with_capacity(self.0.len() * 2);
+        for byte in &self.0 {
+            let _ = write!(hex, "{byte:02x}");
+        }
+        hex
     }
 
     /// Parses a key from a 64-character hexadecimal string.

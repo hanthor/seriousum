@@ -751,6 +751,7 @@ mod parity_tests {
         id < 256
     }
 
+    #[derive(Clone, Copy)]
     enum IdentityChangeKind {
         Upsert,
         Sync,
@@ -923,9 +924,8 @@ mod parity_tests {
             FakeAuthMap::with_entries(HashMap::new()),
             HashMap::new(),
         );
-        let err = match result {
-            Ok(_) => panic!("duplicate handler should fail"),
-            Err(err) => err,
+        let Err(err) = result else {
+            panic!("duplicate handler should fail");
         };
         assert!(err.contains("multiple handlers for auth type: test-always-fail"));
     }
@@ -1217,11 +1217,11 @@ mod parity_tests {
                 .ok_or_else(|| format!("no certificate for spiffe://spiffe.cilium/identity/{id}"))
         }
 
-        fn validate_identity(&self, id: u32, cert: &TestCertificate) -> bool {
+        fn validate_identity(id: u32, cert: &TestCertificate) -> bool {
             cert.identities.contains(&id)
         }
 
-        fn sni_to_numeric_identity(&self, sni: &str) -> Result<u32, String> {
+        fn sni_to_numeric_identity(sni: &str) -> Result<u32, String> {
             let suffix = ".spiffe.cilium";
             if !sni.ends_with(suffix) {
                 return Err(format!("SNI {sni} does not belong to our trust domain"));
@@ -1243,6 +1243,7 @@ mod parity_tests {
     }
 
     impl MutualAuthHandlerScaffold {
+        #[allow(clippy::unused_self)]
         fn verify_peer_certificate(
             &self,
             id: Option<u32>,
@@ -1265,7 +1266,7 @@ mod parity_tests {
                 }
 
                 if let Some(id) = id
-                    && !self.cert.validate_identity(id, leaf)
+                    && !TestMutualAuthCertProvider::validate_identity(id, leaf)
                 {
                     return Err(String::from("unable to validate SAN"));
                 }
@@ -1280,9 +1281,7 @@ mod parity_tests {
             &self,
             server_name: &str,
         ) -> Result<TestCertificate, String> {
-            let id = self
-                .cert
-                .sni_to_numeric_identity(server_name)
+            let id = TestMutualAuthCertProvider::sni_to_numeric_identity(server_name)
                 .map_err(|err| format!("failed to get identity for SNI {server_name}: {err}"))?;
 
             let Some(local_eps) = &self.endpoint_manager else {
@@ -1402,7 +1401,7 @@ mod parity_tests {
         fn authenticate<A: TestMutualAuthenticator>(
             &mut self,
             authenticator: &mut A,
-            request: TestMutualAuthRequest,
+            request: &TestMutualAuthRequest,
             now: seriousum_core::chrono::DateTime<Utc>,
         ) -> Result<MutualAuthOutcome, String> {
             let key = (request.local_identity, request.remote_identity);
@@ -1423,7 +1422,7 @@ mod parity_tests {
                 },
             );
 
-            match authenticator.authenticate(&request) {
+            match authenticator.authenticate(request) {
                 Ok(response) => {
                     self.entries.insert(
                         key,
@@ -1505,24 +1504,24 @@ mod parity_tests {
 
         assert_eq!(
             handler
-                .verify_peer_certificate(Some(1000), &ca_pool, &[valid.clone()])
+                .verify_peer_certificate(Some(1000), &ca_pool, std::slice::from_ref(&valid))
                 .expect("verification should succeed"),
             not_after
         );
         assert_eq!(
             handler
-                .verify_peer_certificate(None, &ca_pool, &[valid.clone()])
+                .verify_peer_certificate(None, &ca_pool, std::slice::from_ref(&valid))
                 .expect("verification should succeed"),
             not_after
         );
         assert!(
             handler
-                .verify_peer_certificate(Some(1001), &ca_pool, &[valid.clone()])
+                .verify_peer_certificate(Some(1001), &ca_pool, std::slice::from_ref(&valid))
                 .is_err()
         );
         assert!(
             handler
-                .verify_peer_certificate(Some(1000), &ca_pool, &[invalid_ca.clone()])
+                .verify_peer_certificate(Some(1000), &ca_pool, std::slice::from_ref(&invalid_ca))
                 .is_err()
         );
         assert!(
@@ -1630,25 +1629,25 @@ mod parity_tests {
 
         assert_eq!(
             state_machine
-                .authenticate(&mut authenticator, already_authenticated.clone(), now)
+                .authenticate(&mut authenticator, &already_authenticated, now)
                 .expect("already-authenticated flow should short-circuit"),
             MutualAuthOutcome::AlreadyAuthenticated,
         );
         assert_eq!(
             state_machine
-                .authenticate(&mut authenticator, in_progress.clone(), now)
+                .authenticate(&mut authenticator, &in_progress, now)
                 .expect("in-progress flow should short-circuit"),
             MutualAuthOutcome::AuthenticationInProgress,
         );
         assert_eq!(
             state_machine
-                .authenticate(&mut authenticator, expired.clone(), now)
+                .authenticate(&mut authenticator, &expired, now)
                 .expect("expired auth should re-authenticate"),
             MutualAuthOutcome::Authenticated(expired_response.clone()),
         );
         assert_eq!(
             state_machine
-                .authenticate(&mut authenticator, new_entry.clone(), now)
+                .authenticate(&mut authenticator, &new_entry, now)
                 .expect("new auth should authenticate"),
             MutualAuthOutcome::Authenticated(new_response.clone()),
         );

@@ -722,8 +722,10 @@ mod tests {
 
     #[test]
     fn daemon_configuration_rejects_empty_cluster_name() {
-        let mut config = DaemonConfiguration::default();
-        config.cluster_name = String::new();
+        let config = DaemonConfiguration {
+            cluster_name: String::new(),
+            ..DaemonConfiguration::default()
+        };
         assert!(config.validate().is_err());
     }
 

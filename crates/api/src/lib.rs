@@ -292,21 +292,21 @@ pub struct SpecPathItem {
     pub put: Option<String>,
 }
 
-fn lock_mutex<'a, T>(mutex: &'a Mutex<T>) -> MutexGuard<'a, T> {
+fn lock_mutex<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
     match mutex.lock() {
         Ok(guard) => guard,
         Err(err) => err.into_inner(),
     }
 }
 
-fn read_lock<'a, T>(lock: &'a RwLock<T>) -> RwLockReadGuard<'a, T> {
+fn read_lock<T>(lock: &RwLock<T>) -> RwLockReadGuard<'_, T> {
     match lock.read() {
         Ok(guard) => guard,
         Err(err) => err.into_inner(),
     }
 }
 
-fn write_lock<'a, T>(lock: &'a RwLock<T>) -> RwLockWriteGuard<'a, T> {
+fn write_lock<T>(lock: &RwLock<T>) -> RwLockWriteGuard<'_, T> {
     match lock.write() {
         Ok(guard) => guard,
         Err(err) => err.into_inner(),
@@ -433,6 +433,7 @@ pub struct ApiLimiter<M: MetricsApi> {
 
 impl<M: MetricsApi> ApiLimiter<M> {
     /// Creates a new API limiter with rate and burst settings.
+    #[allow(clippy::cast_precision_loss)]
     #[must_use]
     pub fn new(metrics: Arc<M>, rate_limit: f64, burst: usize) -> Self {
         let safe_rate_limit = if rate_limit.is_finite() && rate_limit > 0.0 {

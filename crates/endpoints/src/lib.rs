@@ -817,10 +817,10 @@ mod tests {
         for ns in &["default", "kube-system"] {
             for i in 0..3 {
                 let endpoint = Endpoint::new(
-                    format!("{}/pod-{}", ns, i),
-                    format!("pod-uuid-{}", i),
+                    format!("{ns}/pod-{i}"),
+                    format!("pod-uuid-{i}"),
                     ns.to_string(),
-                    format!("pod-{}", i),
+                    format!("pod-{i}"),
                     HashMap::new(),
                 );
                 cache.add_endpoint(endpoint).await;
@@ -897,8 +897,8 @@ mod tests {
             let _ = manager
                 .on_pod_added(
                     "default".to_string(),
-                    format!("pod-{}", i),
-                    format!("pod-uuid-{}", i),
+                    format!("pod-{i}"),
+                    format!("pod-uuid-{i}"),
                     HashMap::new(),
                 )
                 .await;

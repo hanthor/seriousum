@@ -244,6 +244,6 @@ mod tests {
     fn test_dump_config_map() {
         let config = dump_config_map().unwrap();
         assert!(!config.is_empty());
-        assert!(config.iter().any(|(k, v)| k.contains("ipv4")));
+        assert!(config.iter().any(|(k, _v)| k.contains("ipv4")));
     }
 }
