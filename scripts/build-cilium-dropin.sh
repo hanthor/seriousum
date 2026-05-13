@@ -33,8 +33,8 @@ make_alias cilium seriousum-daemon
 make_alias cilium-dbg seriousum-daemon
 make_alias cilium-cli seriousum-cli
 make_alias operator seriousum-operator
-make_alias hubble seriousum-hubble
-make_alias clustermesh-apiserver seriousum-clustermesh
+make_alias hubble hubble
+make_alias clustermesh-apiserver clustermesh-apiserver
 
 printf 'Created Cilium drop-in aliases:\n'
 printf '  %s\n' \

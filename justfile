@@ -277,6 +277,67 @@ NC := '\033[0m' # No Color
     echo "{{GREEN}}✓ Images ready{{NC}}"
 
 # ============================================================================
+# INTEGRATION TEST SETUP (learned steps)
+# ============================================================================
+
+# Build the ginkgo test.test binary in the upstream Cilium repo
+@ginkgo-build:
+    echo "{{BLUE}}Building ginkgo test binary in {{CILIUM_REPO}}/test...{{NC}}"
+    cd {{CILIUM_REPO}}/test && ginkgo build .
+    echo "{{GREEN}}✓ {{CILIUM_REPO}}/test/test.test built{{NC}}"
+
+# Build the cilium-agent Docker image without BuildKit attestations (required for kind load)
+@build-agent-compat tag=IMAGE_TAG:
+    echo "{{BLUE}}Building cilium-agent image (kind-compatible, no attestations)...{{NC}}"
+    DOCKER_BUILDKIT=0 docker build --platform linux/amd64 \
+        -t localhost/seriousum/cilium-agent:{{tag}} \
+        -f images/cilium-agent.Dockerfile .
+    echo "{{GREEN}}✓ localhost/seriousum/cilium-agent:{{tag}} built{{NC}}"
+
+# Load a pre-built agent image into an existing kind cluster (no cluster recreation)
+@load-agent cluster=KIND_CLUSTER tag=IMAGE_TAG:
+    echo "{{BLUE}}Loading cilium-agent:{{tag}} into kind cluster '{{cluster}}'...{{NC}}"
+    kind load docker-image localhost/seriousum/cilium-agent:{{tag}} --name {{cluster}}
+    echo "{{GREEN}}✓ Image loaded into {{cluster}}{{NC}}"
+
+# Build dropin aliases and ginkgo binary — one-time setup before running tests
+@test-setup:
+    echo "{{BLUE}}Setting up integration test prerequisites...{{NC}}"
+    just ginkgo-build
+    just build
+    ./scripts/build-cilium-dropin.sh target/cilium-dropin
+    echo "{{GREEN}}✓ test-setup complete (ginkgo binary + dropin ready){{NC}}"
+
+# Run ginkgo against an EXISTING cluster (no image build, no cluster recreation)
+# Usage: just run-existing cilium-rust-test K8sAgentFQDNTest
+@run-existing cluster=KIND_CLUSTER focus='K8sAgentFQDNTest' timeout=TEST_TIMEOUT:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    mkdir -p target/cilium-kind
+    kind get kubeconfig --name {{cluster}} > target/cilium-kind/{{cluster}}.kubeconfig
+    export KUBECONFIG="$PWD/target/cilium-kind/{{cluster}}.kubeconfig"
+    export PATH="$PWD/target/cilium-dropin:$PATH"
+    export CNI_INTEGRATION=kind
+    export INTEGRATION_TESTS=true
+    export K8S_VERSION=$(kubectl version -o json 2>/dev/null | python3 -c "import sys,json; v=json.load(sys.stdin)['serverVersion']; print(f\"{v['major']}.{v['minor']}\")" 2>/dev/null || echo "1.33")
+    echo -e "{{BLUE}}Running focus='{{focus}}' against cluster='{{cluster}}'{{NC}}"
+    cd {{CILIUM_REPO}}/test
+    timeout --preserve-status --kill-after=5m {{timeout}} \
+        ./test.test \
+            --ginkgo.focus="{{focus}}" \
+            --ginkgo.v \
+            -- \
+            -cilium.testScope=k8s \
+            -cilium.kubeconfig="$PWD/../../../dev/seriousum/target/cilium-kind/{{cluster}}.kubeconfig" \
+            -cilium.passCLIEnvironment=true \
+            -cilium.image="localhost/seriousum/cilium-agent" \
+            -cilium.tag="{{IMAGE_TAG}}" \
+            -cilium.operator-image="quay.io/cilium/operator-generic" \
+            -cilium.operator-tag="latest" \
+            -cilium.operator-suffix="" \
+            -cilium.holdEnvironment=false
+
+# ============================================================================
 # PARALLEL TESTING & IMPLEMENTATION WORKFLOWS
 # ============================================================================
 # These recipes enable running multiple test suites and implementation tasks
