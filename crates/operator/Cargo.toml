@@ -22,6 +22,9 @@ tokio-util = { version = "0.7", features = ["codec"] }
 # Networking & addressing
 ipnet = { workspace = true }
 
+# HTTP
+axum = "0.7"
+
 # Error handling & logging
 thiserror = "2"
 anyhow = { workspace = true }

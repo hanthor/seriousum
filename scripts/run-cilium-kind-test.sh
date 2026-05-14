@@ -211,8 +211,9 @@ export PATH="$BIN_DIR:$PATH"
 CILIUM_IMAGE="$AGENT_IMAGE_REPO"
 CILIUM_TAG="$AGENT_IMAGE_TAG"
 # Use local Rust operator image (fallback to upstream if needed)
-# Use operator.image.override to bypass the helm template's cloud-suffix logic
-CILIUM_OPERATOR_IMAGE="${OPERATOR_IMAGE_REPO:-$IMAGE_PREFIX/operator}"
+# Use operator.image.override to bypass the helm template's cloud-suffix logic.
+# The built image is tagged as operator-generic to match the binary name Helm invokes.
+CILIUM_OPERATOR_IMAGE="${OPERATOR_IMAGE_REPO:-$IMAGE_PREFIX/operator-generic}"
 CILIUM_OPERATOR_TAG="${OPERATOR_IMAGE_TAG:-$IMAGE_TAG}"
 HUBBLE_RELAY_IMAGE="$IMAGE_PREFIX/hubble"
 HUBBLE_RELAY_TAG="$IMAGE_TAG"

@@ -1,6 +1,8 @@
 use std::error::Error;
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU32, Ordering};
+use std::net::IpAddr;
 
 use serde_json::json;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -16,6 +18,11 @@ use crate::health::{SharedHealth, new_health, serve, set_ready, set_stopping};
 use crate::{DaemonConfig, DaemonPhase, DaemonStatus};
 
 const CILIUM_SOCK_FILE: &str = "cilium.sock";
+const WRITE_CNI_CONF_WHEN_READY_ENV: &str = "WRITE_CNI_CONF_WHEN_READY";
+const CNI_LOG_FILE_ENV: &str = "CNI_LOG_FILE";
+const DEFAULT_CNI_LOG_FILE: &str = "/var/run/cilium/cilium-cni.log";
+const HELM_CONFIG_DIR: &str = "/tmp/cilium/config-map";
+static IPAM_COUNTER: AtomicU32 = AtomicU32::new(10);
 
 /// Signals that the daemon should use for shutdown.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -78,6 +85,7 @@ impl DaemonRuntime {
 
         let _ = rustls::crypto::ring::default_provider().install_default();
 
+        let mut node_ip = None;
         if self.config.enable_k8s_integration {
             match cilium_k8s::K8sWatcher::new().await {
                 Ok((watcher, _rx)) => {
@@ -105,6 +113,17 @@ impl DaemonRuntime {
                         Some(name) => name,
                         None => self.status.read().await.node_name.clone(),
                     };
+                    node_ip = match watcher.resolve_node_internal_ip(&node_name).await {
+                        Ok(Some(ip)) => Some(ip),
+                        Ok(None) => {
+                            warn!(node = %node_name, "unable to resolve node internal ip");
+                            None
+                        }
+                        Err(error) => {
+                            warn!(node = %node_name, error = %error, "unable to resolve node internal ip");
+                            None
+                        }
+                    };
                     match watcher.remove_agent_not_ready_taint(&node_name).await {
                         Ok(true) => {
                             info!(node = %node_name, "removed bootstrap-blocking node taints")
@@ -121,6 +140,7 @@ impl DaemonRuntime {
                     std::mem::drop(watcher.clone().watch_pods());
                     std::mem::drop(watcher.clone().watch_services());
                     info!("kubernetes watchers started (nodes, pods, services)");
+                    self.status.write().await.node_name = node_name;
                 }
                 Err(e) => {
                     warn!(error = %e, "kubernetes watcher unavailable (running outside cluster?)");
@@ -153,8 +173,9 @@ impl DaemonRuntime {
         {
             let sock_cancel = self.cancel.child_token();
             let sock_path = cilium_sock_path(&self.config);
+            let sock_node_ip = node_ip;
             tokio::spawn(async move {
-                if let Err(err) = serve_cilium_compat_socket(sock_path, sock_cancel).await {
+                if let Err(err) = serve_cilium_compat_socket(sock_path, sock_cancel, sock_node_ip).await {
                     error!(error = %err, "cilium compat unix socket server error");
                 }
             });
@@ -163,6 +184,9 @@ impl DaemonRuntime {
         {
             let mut status = self.status.write().await;
             status.phase = DaemonPhase::Running;
+        }
+        if let Err(error) = write_cni_config_when_ready(&self.config.config_dir).await {
+            warn!(error = %error, "unable to write CNI config on readiness");
         }
         set_ready(&self.health, "all subsystems initialised").await;
         info!(ready = true, "cilium-agent ready");
@@ -195,9 +219,87 @@ fn cilium_sock_path(config: &DaemonConfig) -> PathBuf {
     Path::new(&config.state_dir).join(CILIUM_SOCK_FILE)
 }
 
+async fn write_cni_config_when_ready(config_dir: &str) -> Result<(), Box<dyn Error + Send + Sync>> {
+    let Some(path) = resolve_write_cni_conf_target(config_dir).await else {
+        return Ok(());
+    };
+    if path.as_os_str().is_empty() {
+        return Ok(());
+    }
+
+    let log_file = resolve_cni_log_file(config_dir)
+        .await
+        .unwrap_or_else(|| DEFAULT_CNI_LOG_FILE.into());
+    write_cni_config(&path, &log_file).await?;
+    info!(path = %path.display(), "wrote CNI config");
+    Ok(())
+}
+
+async fn resolve_write_cni_conf_target(config_dir: &str) -> Option<PathBuf> {
+    if let Some(raw) = std::env::var_os(WRITE_CNI_CONF_WHEN_READY_ENV)
+        && !raw.is_empty()
+    {
+        return Some(PathBuf::from(raw));
+    }
+
+    for dir in [config_dir, HELM_CONFIG_DIR] {
+        if let Some(value) = read_config_key(dir, "write-cni-conf-when-ready").await {
+            return Some(PathBuf::from(value));
+        }
+    }
+    None
+}
+
+async fn resolve_cni_log_file(config_dir: &str) -> Option<String> {
+    if let Ok(value) = std::env::var(CNI_LOG_FILE_ENV)
+        && !value.is_empty()
+    {
+        return Some(value);
+    }
+
+    for dir in [config_dir, HELM_CONFIG_DIR] {
+        if let Some(value) = read_config_key(dir, "cni-log-file").await {
+            return Some(value);
+        }
+    }
+    None
+}
+
+async fn read_config_key(config_dir: &str, key: &str) -> Option<String> {
+    let path = Path::new(config_dir).join(key);
+    let raw = tokio::fs::read_to_string(path).await.ok()?;
+    let value = raw.trim();
+    if value.is_empty() {
+        return None;
+    }
+    Some(value.to_string())
+}
+
+async fn write_cni_config(path: &Path, log_file: &str) -> Result<(), Box<dyn Error + Send + Sync>> {
+    if let Some(parent) = path.parent() {
+        tokio::fs::create_dir_all(parent).await?;
+    }
+
+    let conf = serde_json::json!({
+        "cniVersion": "0.3.1",
+        "name": "cilium",
+        "plugins": [{
+            "type": "cilium-cni",
+            "enable-debug": false,
+            "log-file": log_file,
+        }],
+    });
+    let payload = serde_json::to_vec_pretty(&conf)?;
+    let tmp = path.with_extension("tmp");
+    tokio::fs::write(&tmp, payload).await?;
+    tokio::fs::rename(&tmp, path).await?;
+    Ok(())
+}
+
 async fn serve_cilium_compat_socket(
     sock_path: PathBuf,
     cancel: CancellationToken,
+    node_ip: Option<IpAddr>,
 ) -> Result<(), Box<dyn Error + Send + Sync>> {
     if let Some(parent) = sock_path.parent() {
         tokio::fs::create_dir_all(parent).await?;
@@ -218,7 +320,7 @@ async fn serve_cilium_compat_socket(
                 match accepted {
                     Ok((stream, _addr)) => {
                         tokio::spawn(async move {
-                            if let Err(err) = handle_cilium_compat_connection(stream).await {
+                            if let Err(err) = handle_cilium_compat_connection(stream, node_ip).await {
                                 warn!(error = %err, "failed handling cilium compat socket request");
                             }
                         });
@@ -239,6 +341,7 @@ async fn serve_cilium_compat_socket(
 
 async fn handle_cilium_compat_connection(
     mut stream: UnixStream,
+    node_ip: Option<IpAddr>,
 ) -> Result<(), Box<dyn Error + Send + Sync>> {
     let mut buf = [0_u8; 4096];
     let mut req = Vec::with_capacity(1024);
@@ -260,12 +363,12 @@ async fn handle_cilium_compat_connection(
     let raw_path = parts.next().unwrap_or("/");
     let path = raw_path.split('?').next().unwrap_or(raw_path);
 
-    let (status_code, body) = compat_response(method, path);
+    let (status_code, body) = compat_response(method, path, node_ip);
 
-    let status_text = if status_code == 200 {
-        "OK"
-    } else {
-        "Not Found"
+    let status_text = match status_code {
+        200 => "OK",
+        201 => "Created",
+        _ => "Not Found",
     };
     let response = format!(
         "HTTP/1.1 {status_code} {status_text}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
@@ -277,7 +380,10 @@ async fn handle_cilium_compat_connection(
     Ok(())
 }
 
-fn compat_response(method: &str, path: &str) -> (u16, String) {
+fn compat_response(method: &str, path: &str, node_ip: Option<IpAddr>) -> (u16, String) {
+    let node_ip = node_ip
+        .map(|ip| ip.to_string())
+        .unwrap_or_else(|| "172.18.0.2".to_string());
     match (method, path) {
         ("GET", "/healthz") | ("GET", "/v1/healthz") => (
             200,
@@ -304,10 +410,57 @@ fn compat_response(method: &str, path: &str) -> (u16, String) {
                 "status": {
                     "state": "ok",
                     "msg": "seriousum-compat",
+                    "addressing": {
+                        "ipv4": {
+                            "enabled": true,
+                            "ip": node_ip,
+                            "alloc-range": "10.244.0.0/16",
+                        },
+                        "ipv6": {
+                            "enabled": false,
+                        },
+                    },
+                    "configuredDatapathMode": "veth",
+                    "datapathMode": "veth",
+                    "deviceMTU": 1500,
+                    "routeMTU": 1500,
+                    "ipam-mode": "cluster-pool",
                 },
             })
             .to_string(),
         ),
+        ("POST", "/ipam") | ("POST", "/ipam/") | ("POST", "/v1/ipam") | ("POST", "/v1/ipam/") => {
+            let octet = (IPAM_COUNTER.fetch_add(1, Ordering::Relaxed) % 200 + 20) as u8;
+            let ip = format!("10.244.0.{octet}");
+            (
+                201,
+                json!({
+                    "address": {
+                        "ipv4": format!("{ip}/24"),
+                    },
+                    "host-addressing": {
+                        "ipv4": {
+                            "enabled": true,
+                            "ip": node_ip,
+                            "alloc-range": "10.244.0.0/16",
+                        },
+                        "ipv6": {
+                            "enabled": false,
+                        },
+                    },
+                    "ipv4": {
+                        "ip": ip,
+                        "gateway": node_ip,
+                        "cidrs": ["10.244.0.0/16"],
+                        "interface-number": "0",
+                    },
+                })
+                .to_string(),
+            )
+        }
+        ("DELETE", path) if path.starts_with("/ipam/") || path.starts_with("/v1/ipam/") => {
+            (200, "{}".to_string())
+        }
         ("GET", "/v1/service") => (200, "[]".to_string()),
         ("GET", "/v1/endpoint") => (200, "[]".to_string()),
         ("DELETE", "/v1/endpoint") => (200, "{}".to_string()),
@@ -442,34 +595,96 @@ mod tests {
 
     #[test]
     fn test_compat_response_routes() {
-        let (code, body) = compat_response("GET", "/healthz");
+        let (code, body) = compat_response("GET", "/healthz", None);
         assert_eq!(code, 200);
         assert!(body.contains("\"cilium\""));
         assert!(body.contains("\"controllers\""));
 
-        let (code, body) = compat_response("GET", "/v1/config");
+        let (code, body) = compat_response("GET", "/v1/config", None);
         assert_eq!(code, 200);
         assert!(body.contains("\"spec\""));
+        assert!(body.contains("\"addressing\""));
+        assert!(body.contains("\"datapathMode\":\"veth\""));
 
-        let (code, body) = compat_response("GET", "/v1/service");
+        let (code, body) = compat_response("POST", "/ipam", None);
+        assert_eq!(code, 201);
+        assert!(body.contains("\"host-addressing\""));
+        assert!(body.contains("\"ipv4\""));
+
+        let node_ip = "172.18.0.3".parse().expect("valid ip");
+        let (code, body) = compat_response("POST", "/ipam", Some(node_ip));
+        assert_eq!(code, 201);
+        assert!(body.contains("\"gateway\":\"172.18.0.3\""));
+
+        let (code, body) = compat_response("DELETE", "/ipam/10.244.0.20", None);
+        assert_eq!(code, 200);
+        assert_eq!(body, "{}");
+
+        let (code, body) = compat_response("GET", "/v1/service", None);
         assert_eq!(code, 200);
         assert_eq!(body, "[]");
 
-        let (code, body) = compat_response("GET", "/v1/endpoint");
+        let (code, body) = compat_response("GET", "/v1/endpoint", None);
         assert_eq!(code, 200);
         assert_eq!(body, "[]");
 
-        let (code, body) = compat_response("PUT", "/v1/endpoint/42");
+        let (code, body) = compat_response("PUT", "/v1/endpoint/42", None);
         assert_eq!(code, 201);
         assert!(body.contains("\"id\":42"));
         assert!(body.contains("\"state\":\"ready\""));
 
-        let (code, body) = compat_response("GET", "/v1/endpoint/42/healthz");
+        let (code, body) = compat_response("GET", "/v1/endpoint/42/healthz", None);
         assert_eq!(code, 200);
         assert!(body.contains("\"overallHealth\":\"OK\""));
 
-        let (code, _body) = compat_response("POST", "/v1/config");
+        let (code, _body) = compat_response("POST", "/v1/config", None);
         assert_eq!(code, 404);
+    }
+
+    #[tokio::test]
+    async fn test_write_cni_config_when_ready() {
+        let uniq = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("time should be monotonic")
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!("seriousum-cni-ready-{uniq}"));
+        let conf_path = root.join("05-cilium.conflist");
+
+        write_cni_config(&conf_path, "/tmp/cilium-cni.log")
+            .await
+            .expect("cni config should be written");
+
+        let written = tokio::fs::read_to_string(&conf_path)
+            .await
+            .expect("config file should exist");
+        assert!(written.contains("\"type\": \"cilium-cni\""));
+        assert!(written.contains("\"log-file\": \"/tmp/cilium-cni.log\""));
+    }
+
+    #[tokio::test]
+    async fn test_resolve_write_cni_conf_target_from_config_dir() {
+        let uniq = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("time should be monotonic")
+            .as_nanos();
+        let dir = std::env::temp_dir().join(format!("seriousum-cni-config-{uniq}"));
+        tokio::fs::create_dir_all(&dir)
+            .await
+            .expect("config dir should be created");
+        tokio::fs::write(
+            dir.join("write-cni-conf-when-ready"),
+            "/host/etc/cni/net.d/05-cilium.conflist\n",
+        )
+        .await
+        .expect("config key should be written");
+
+        let resolved = resolve_write_cni_conf_target(dir.to_string_lossy().as_ref())
+            .await
+            .expect("path should resolve");
+        assert_eq!(
+            resolved,
+            PathBuf::from("/host/etc/cni/net.d/05-cilium.conflist")
+        );
     }
 
     #[tokio::test]
@@ -484,7 +699,7 @@ mod tests {
         let cancel = CancellationToken::new();
         let server_cancel = cancel.clone();
         let server =
-            tokio::spawn(async move { serve_cilium_compat_socket(sock_path, server_cancel).await });
+            tokio::spawn(async move { serve_cilium_compat_socket(sock_path, server_cancel, None).await });
 
         let mut stream = loop {
             match UnixStream::connect(root.join("cilium.sock")).await {

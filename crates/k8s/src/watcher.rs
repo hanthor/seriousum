@@ -1,4 +1,5 @@
 use std::sync::Arc;
+use std::net::IpAddr;
 
 use futures::{StreamExt, TryStreamExt};
 use k8s_openapi::api::core::v1::{Node, Pod, Service};
@@ -104,6 +105,25 @@ impl K8sWatcher {
         }));
         let _updated = api.patch(node_name, &params, &patch).await?;
         Ok(true)
+    }
+
+    /// Resolve the preferred internal IP for the given node.
+    pub async fn resolve_node_internal_ip(&self, node_name: &str) -> Result<Option<IpAddr>> {
+        let api: Api<Node> = Api::all(self.client.clone());
+        let node = api.get(node_name).await?;
+        let Some(status) = node.status else {
+            return Ok(None);
+        };
+
+        for address in status.addresses.unwrap_or_default() {
+            if address.type_ == "InternalIP"
+                && let Ok(ip) = address.address.parse::<IpAddr>()
+            {
+                return Ok(Some(ip));
+            }
+        }
+
+        Ok(None)
     }
 
     /// Start watching nodes in the background.

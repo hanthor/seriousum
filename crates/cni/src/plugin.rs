@@ -4,6 +4,7 @@
 //! Env vars CNI_COMMAND, CNI_CONTAINERID, CNI_NETNS, CNI_IFNAME, CNI_ARGS, CNI_PATH carry context.
 
 use std::io::{self, Read};
+use std::process::Command;
 
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
@@ -158,20 +159,41 @@ pub fn run(ctx: &CniContext) -> Result<String, PluginError> {
         }
         CniCommand::Add => {
             info!(container = %ctx.container_id, netns = %ctx.netns, ifname = %ctx.ifname, "CNI ADD");
-            // TODO(phase3): allocate IP via IPAM, configure veth pair, set up eBPF policy
+            let host_octet = ctx.container_id.bytes().fold(17_u8, |acc, byte| acc.wrapping_add(byte));
+            let pod_octet = if host_octet == u8::MAX { 250 } else { host_octet.saturating_add(1) };
+            let gateway = format!("10.244.255.{host_octet}");
+            let pod_cidr = format!("10.244.255.{pod_octet}/24");
+
+            if let Some(pid) = netns_pid(&ctx.netns) {
+                let host_if = host_ifname(&ctx.container_id);
+                setup_veth_pair(pid, &host_if, &ctx.ifname, &gateway, &pod_cidr)?;
+            }
+
             let result = CniAddResult {
                 cni_version: "1.0.0".to_string(),
-                interfaces: vec![],
-                ips: vec![],
-                routes: vec![],
+                interfaces: vec![serde_json::json!({
+                    "name": ctx.ifname,
+                    "sandbox": ctx.netns,
+                })],
+                ips: vec![serde_json::json!({
+                    "interface": 0,
+                    "address": pod_cidr,
+                    "gateway": gateway,
+                })],
+                routes: vec![serde_json::json!({
+                    "dst": "0.0.0.0/0",
+                    "gw": gateway,
+                })],
                 dns: serde_json::json!({}),
             };
             Ok(serde_json::to_string(&result)?)
         }
         CniCommand::Del => {
             info!(container = %ctx.container_id, netns = %ctx.netns, "CNI DEL");
-            warn!(container = %ctx.container_id, "CNI DEL is a no-op scaffold");
-            // TODO(phase3): release IP, tear down veth pair, remove eBPF policy
+            if !ctx.container_id.is_empty() {
+                let host_if = host_ifname(&ctx.container_id);
+                let _ = run_ip(["link", "del", &host_if]);
+            }
             Ok("{}".to_string())
         }
         CniCommand::Check => {
@@ -181,6 +203,82 @@ pub fn run(ctx: &CniContext) -> Result<String, PluginError> {
             Ok("{}".to_string())
         }
     }
+}
+
+fn netns_pid(netns: &str) -> Option<u32> {
+    let trimmed = netns.trim();
+    let mut parts = trimmed.split('/');
+    match (parts.next(), parts.next(), parts.next(), parts.next()) {
+        (Some(""), Some("proc"), Some(pid), Some("ns")) => pid.parse::<u32>().ok(),
+        _ => None,
+    }
+}
+
+fn host_ifname(container_id: &str) -> String {
+    let suffix: String = container_id
+        .chars()
+        .filter(|ch| ch.is_ascii_hexdigit())
+        .take(8)
+        .collect();
+    format!("lxc{suffix}")
+}
+
+fn setup_veth_pair(
+    pid: u32,
+    host_if: &str,
+    ifname: &str,
+    gateway: &str,
+    pod_cidr: &str,
+) -> Result<(), PluginError> {
+    let _ = run_ip(["link", "del", host_if]);
+    run_ip([
+        "link", "add", host_if, "type", "veth", "peer", "name", ifname,
+    ])?;
+    run_ip(["link", "set", ifname, "netns", &pid.to_string()])?;
+    run_ip(["addr", "add", &format!("{gateway}/24"), "dev", host_if])?;
+    run_ip(["link", "set", host_if, "up"])?;
+
+    run_nsenter(pid, ["ip", "link", "set", "lo", "up"])?;
+    run_nsenter(pid, ["ip", "link", "set", ifname, "up"])?;
+    run_nsenter(pid, ["ip", "addr", "add", pod_cidr, "dev", ifname])?;
+    let _ = run_nsenter(pid, ["ip", "route", "del", "default"]);
+    run_nsenter(
+        pid,
+        ["ip", "route", "add", "default", "via", gateway, "dev", ifname],
+    )?;
+    Ok(())
+}
+
+fn run_ip<const N: usize>(args: [&str; N]) -> Result<(), PluginError> {
+    let output = Command::new("ip")
+        .args(args)
+        .output()
+        .map_err(|error| PluginError::SetupFailed(error.to_string()))?;
+    if output.status.success() {
+        return Ok(());
+    }
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    Err(PluginError::SetupFailed(format!(
+        "ip command failed: {} ({stderr})",
+        output.status
+    )))
+}
+
+fn run_nsenter<const N: usize>(pid: u32, args: [&str; N]) -> Result<(), PluginError> {
+    let mut full_args = vec!["-t".to_string(), pid.to_string(), "-n".to_string()];
+    full_args.extend(args.iter().map(|arg| (*arg).to_string()));
+    let output = Command::new("nsenter")
+        .args(full_args)
+        .output()
+        .map_err(|error| PluginError::SetupFailed(error.to_string()))?;
+    if output.status.success() {
+        return Ok(());
+    }
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    Err(PluginError::SetupFailed(format!(
+        "nsenter command failed: {} ({stderr})",
+        output.status
+    )))
 }
 
 #[cfg(test)]
@@ -197,6 +295,12 @@ mod tests {
             CniCommand::Version
         );
         assert!("INVALID".parse::<CniCommand>().is_err());
+    }
+
+    #[test]
+    fn test_netns_pid_parse() {
+        assert_eq!(netns_pid("/proc/1234/ns/net"), Some(1234));
+        assert_eq!(netns_pid("/var/run/netns/test"), None);
     }
 
     #[test]
@@ -232,6 +336,11 @@ mod tests {
         let result = run(&ctx).unwrap();
         let parsed: serde_json::Value = serde_json::from_str(&result).unwrap();
         assert_eq!(parsed["cniVersion"], "1.0.0");
+        assert_eq!(parsed["interfaces"][0]["name"], "eth0");
+        assert!(parsed["ips"][0]["address"]
+            .as_str()
+            .unwrap()
+            .starts_with("10.244.255."));
     }
 
     #[test]

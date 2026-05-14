@@ -1,5 +1,7 @@
 use clap::Parser;
 use tracing::info;
+use axum::Router;
+use std::net::SocketAddr;
 
 /// Cilium Operator — Kubernetes CRD reconciliation
 #[derive(Debug, Parser)]
@@ -26,6 +28,10 @@ struct Cli {
     _extra: Vec<String>,
 }
 
+async fn healthz() -> &'static str {
+    "OK"
+}
+
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
@@ -38,10 +44,30 @@ async fn main() -> anyhow::Result<()> {
     tracing_subscriber::fmt().with_max_level(level).init();
 
     info!("Starting Cilium operator (config-dir={})", cli.config_dir);
+
+    // Start health check server
+    let health_addr: SocketAddr = "127.0.0.1:9234".parse()?;
+    let app = Router::new()
+        .route("/healthz", axum::routing::get(healthz));
+    
+    let listener = tokio::net::TcpListener::bind(&health_addr).await?;
+    let mut health_task = tokio::spawn(async move {
+        if let Err(e) = axum::serve(listener, app).await {
+            tracing::error!("health server error: {}", e);
+        }
+    });
+
+    info!("Health check server listening on {}", health_addr);
     info!("Operator initialized — waiting for shutdown signal");
 
-    tokio::signal::ctrl_c().await?;
-    info!("Shutting down operator");
+    tokio::select! {
+        _ = tokio::signal::ctrl_c() => {
+            info!("Shutting down operator");
+        }
+        _ = &mut health_task => {
+            info!("Health server exited unexpectedly");
+        }
+    }
 
     Ok(())
 }
