@@ -9,15 +9,13 @@
       "summary": "Track/crate inventory exists, but a complete frozen-release surface inventory is incomplete.",
       "evidence": [
         "docs/parity-matrix.md",
-        "docs/component-porting-compliance.md",
-        "PROJECT_COMPLETION_SUMMARY.md"
+        "docs/component-porting-compliance.md"
       ]
     },
     "implementation_coverage": {
       "status": "yellow",
       "summary": "Strong Rust coverage exists for core tracks, but remaining runtime exceptions prevent a full reimplementation claim.",
       "evidence": [
-        "PROJECT_COMPLETION_SUMMARY.md",
         "docs/component-porting-compliance.md"
       ]
     },

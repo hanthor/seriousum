@@ -1,7 +1,7 @@
-use clap::Parser;
-use tracing::info;
 use axum::Router;
+use clap::Parser;
 use std::net::SocketAddr;
+use tracing::info;
 
 /// Cilium Operator — Kubernetes CRD reconciliation
 #[derive(Debug, Parser)]
@@ -47,9 +47,8 @@ async fn main() -> anyhow::Result<()> {
 
     // Start health check server
     let health_addr: SocketAddr = "127.0.0.1:9234".parse()?;
-    let app = Router::new()
-        .route("/healthz", axum::routing::get(healthz));
-    
+    let app = Router::new().route("/healthz", axum::routing::get(healthz));
+
     let listener = tokio::net::TcpListener::bind(&health_addr).await?;
     let mut health_task = tokio::spawn(async move {
         if let Err(e) = axum::serve(listener, app).await {

@@ -1,0 +1,1 @@
+==> building images with localhost:5000/seriousum and local

@@ -228,7 +228,6 @@ Full report:
 - [docs/INDEX.md](docs/INDEX.md) — documentation index
 
 ### Release / project status
-- [PROJECT_COMPLETION_SUMMARY.md](PROJECT_COMPLETION_SUMMARY.md)
 - [RELEASE_v0.1.0-alpha.md](RELEASE_v0.1.0-alpha.md)
 - [COMPLIANCE_CERTIFICATION.md](COMPLIANCE_CERTIFICATION.md)
 

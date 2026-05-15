@@ -1,8 +1,10 @@
-use std::sync::Arc;
 use std::net::IpAddr;
+use std::sync::Arc;
+use std::time::Duration;
 
 use futures::{StreamExt, TryStreamExt};
-use k8s_openapi::api::core::v1::{Node, Pod, Service};
+use k8s_openapi::api::core::v1::{Endpoints, Node, Pod, Service};
+use k8s_openapi::api::discovery::v1::EndpointSlice;
 use kube::{
     Api, Client,
     api::{Patch, PatchParams},
@@ -47,6 +49,18 @@ pub enum K8sEvent {
     ServiceUpdated(Service),
     /// A service was deleted.
     ServiceDeleted(String),
+    /// An Endpoints object was observed for the first time or reapplied.
+    EndpointsAdded(Endpoints),
+    /// An Endpoints object was updated.
+    EndpointsUpdated(Endpoints),
+    /// An Endpoints object was deleted.
+    EndpointsDeleted(String),
+    /// An EndpointSlice was observed for the first time or reapplied.
+    EndpointSliceAdded(EndpointSlice),
+    /// An EndpointSlice was updated.
+    EndpointSliceUpdated(EndpointSlice),
+    /// An EndpointSlice was deleted.
+    EndpointSliceDeleted(String),
 }
 
 /// Kubernetes watcher that streams resource changes to subscribers.
@@ -126,6 +140,47 @@ impl K8sWatcher {
         Ok(None)
     }
 
+    /// Resolve the preferred IPv4 pod CIDR for the given node.
+    pub async fn resolve_node_ipv4_pod_cidr(&self, node_name: &str) -> Result<Option<String>> {
+        let api: Api<Node> = Api::all(self.client.clone());
+        let node = api.get(node_name).await?;
+        let Some(spec) = node.spec else {
+            return Ok(None);
+        };
+
+        Ok(preferred_ipv4_pod_cidr(&spec))
+    }
+
+    /// List all currently visible pods.
+    pub async fn list_pods(&self) -> Result<Vec<Pod>> {
+        let api: Api<Pod> = Api::all(self.client.clone());
+        Ok(api.list(&Default::default()).await?.items)
+    }
+
+    /// List all currently visible nodes.
+    pub async fn list_nodes(&self) -> Result<Vec<Node>> {
+        let api: Api<Node> = Api::all(self.client.clone());
+        Ok(api.list(&Default::default()).await?.items)
+    }
+
+    /// List all currently visible services.
+    pub async fn list_services(&self) -> Result<Vec<Service>> {
+        let api: Api<Service> = Api::all(self.client.clone());
+        Ok(api.list(&Default::default()).await?.items)
+    }
+
+    /// List all currently visible Endpoints objects.
+    pub async fn list_endpoints(&self) -> Result<Vec<Endpoints>> {
+        let api: Api<Endpoints> = Api::all(self.client.clone());
+        Ok(api.list(&Default::default()).await?.items)
+    }
+
+    /// List all currently visible `EndpointSlice` objects.
+    pub async fn list_endpoint_slices(&self) -> Result<Vec<EndpointSlice>> {
+        let api: Api<EndpointSlice> = Api::all(self.client.clone());
+        Ok(api.list(&Default::default()).await?.items)
+    }
+
     /// Start watching nodes in the background.
     #[must_use]
     pub fn watch_nodes(self: Arc<Self>) -> tokio::task::JoinHandle<()> {
@@ -133,25 +188,28 @@ impl K8sWatcher {
         let tx = self.tx.clone();
         tokio::spawn(async move {
             let api: Api<Node> = Api::all(client);
-            let mut stream = watcher(api, watcher::Config::default())
-                .applied_objects()
-                .boxed();
             loop {
-                match stream.try_next().await {
-                    Ok(Some(node)) => {
-                        let name = node.metadata.name.clone().unwrap_or_default();
-                        debug!(node = %name, "node event");
-                        let _ = tx.send(K8sEvent::NodeAdded(node));
-                    }
-                    Ok(None) => {
-                        info!("node watch stream ended, reconnecting");
-                        break;
-                    }
-                    Err(error) => {
-                        warn!(error = %error, "node watch error");
-                        break;
+                let mut stream = watcher(api.clone(), watcher::Config::default())
+                    .applied_objects()
+                    .boxed();
+                loop {
+                    match stream.try_next().await {
+                        Ok(Some(node)) => {
+                            let name = node.metadata.name.clone().unwrap_or_default();
+                            debug!(node = %name, "node event");
+                            let _ = tx.send(K8sEvent::NodeAdded(node));
+                        }
+                        Ok(None) => {
+                            info!("node watch stream ended, reconnecting");
+                            break;
+                        }
+                        Err(error) => {
+                            warn!(error = %error, "node watch error");
+                            break;
+                        }
                     }
                 }
+                tokio::time::sleep(Duration::from_secs(1)).await;
             }
         })
     }
@@ -163,25 +221,28 @@ impl K8sWatcher {
         let tx = self.tx.clone();
         tokio::spawn(async move {
             let api: Api<Pod> = Api::all(client);
-            let mut stream = watcher(api, watcher::Config::default())
-                .applied_objects()
-                .boxed();
             loop {
-                match stream.try_next().await {
-                    Ok(Some(pod)) => {
-                        let name = pod.metadata.name.clone().unwrap_or_default();
-                        debug!(pod = %name, "pod event");
-                        let _ = tx.send(K8sEvent::PodAdded(pod));
-                    }
-                    Ok(None) => {
-                        info!("pod watch stream ended, reconnecting");
-                        break;
-                    }
-                    Err(error) => {
-                        warn!(error = %error, "pod watch error");
-                        break;
+                let mut stream = watcher(api.clone(), watcher::Config::default())
+                    .applied_objects()
+                    .boxed();
+                loop {
+                    match stream.try_next().await {
+                        Ok(Some(pod)) => {
+                            let name = pod.metadata.name.clone().unwrap_or_default();
+                            debug!(pod = %name, "pod event");
+                            let _ = tx.send(K8sEvent::PodAdded(pod));
+                        }
+                        Ok(None) => {
+                            info!("pod watch stream ended, reconnecting");
+                            break;
+                        }
+                        Err(error) => {
+                            warn!(error = %error, "pod watch error");
+                            break;
+                        }
                     }
                 }
+                tokio::time::sleep(Duration::from_secs(1)).await;
             }
         })
     }
@@ -193,25 +254,94 @@ impl K8sWatcher {
         let tx = self.tx.clone();
         tokio::spawn(async move {
             let api: Api<Service> = Api::all(client);
-            let mut stream = watcher(api, watcher::Config::default())
-                .applied_objects()
-                .boxed();
             loop {
-                match stream.try_next().await {
-                    Ok(Some(service)) => {
-                        let name = service.metadata.name.clone().unwrap_or_default();
-                        debug!(service = %name, "service event");
-                        let _ = tx.send(K8sEvent::ServiceAdded(service));
-                    }
-                    Ok(None) => {
-                        info!("service watch stream ended, reconnecting");
-                        break;
-                    }
-                    Err(error) => {
-                        warn!(error = %error, "service watch error");
-                        break;
+                let mut stream = watcher(api.clone(), watcher::Config::default())
+                    .applied_objects()
+                    .boxed();
+                loop {
+                    match stream.try_next().await {
+                        Ok(Some(service)) => {
+                            let name = service.metadata.name.clone().unwrap_or_default();
+                            debug!(service = %name, "service event");
+                            let _ = tx.send(K8sEvent::ServiceAdded(service));
+                        }
+                        Ok(None) => {
+                            info!("service watch stream ended, reconnecting");
+                            break;
+                        }
+                        Err(error) => {
+                            warn!(error = %error, "service watch error");
+                            break;
+                        }
                     }
                 }
+                tokio::time::sleep(Duration::from_secs(1)).await;
+            }
+        })
+    }
+
+    /// Start watching EndpointSlices in the background.
+    #[must_use]
+    pub fn watch_endpoints(self: Arc<Self>) -> tokio::task::JoinHandle<()> {
+        let client = self.client.clone();
+        let tx = self.tx.clone();
+        tokio::spawn(async move {
+            let api: Api<Endpoints> = Api::all(client);
+            loop {
+                let mut stream = watcher(api.clone(), watcher::Config::default())
+                    .applied_objects()
+                    .boxed();
+                loop {
+                    match stream.try_next().await {
+                        Ok(Some(endpoints)) => {
+                            let name = endpoints.metadata.name.clone().unwrap_or_default();
+                            debug!(endpoints = %name, "endpoints event");
+                            let _ = tx.send(K8sEvent::EndpointsAdded(endpoints));
+                        }
+                        Ok(None) => {
+                            info!("endpoints watch stream ended, reconnecting");
+                            break;
+                        }
+                        Err(error) => {
+                            warn!(error = %error, "endpoints watch error");
+                            break;
+                        }
+                    }
+                }
+                tokio::time::sleep(Duration::from_secs(1)).await;
+            }
+        })
+    }
+
+    /// Start watching EndpointSlices in the background.
+    #[must_use]
+    pub fn watch_endpoint_slices(self: Arc<Self>) -> tokio::task::JoinHandle<()> {
+        let client = self.client.clone();
+        let tx = self.tx.clone();
+        tokio::spawn(async move {
+            let api: Api<EndpointSlice> = Api::all(client);
+            loop {
+                let mut stream = watcher(api.clone(), watcher::Config::default())
+                    .applied_objects()
+                    .boxed();
+                loop {
+                    match stream.try_next().await {
+                        Ok(Some(endpoint_slice)) => {
+                            let name = endpoint_slice.metadata.name.clone().unwrap_or_default();
+                            debug!(endpoint_slice = %name, "endpoint slice event");
+                            let _ = tx.send(K8sEvent::EndpointSliceAdded(endpoint_slice));
+                        }
+                        Ok(None) => {
+                            info!("endpoint slice watch stream ended, reconnecting");
+                            break;
+                        }
+                        Err(error) => {
+                            warn!(error = %error, "endpoint slice watch error");
+                            break;
+                        }
+                    }
+                }
+                tokio::time::sleep(Duration::from_secs(1)).await;
             }
         })
     }
@@ -228,9 +358,24 @@ fn remove_bootstrap_blocking_taints(taints: &mut Vec<k8s_openapi::api::core::v1:
     taints.len() != before
 }
 
+fn preferred_ipv4_pod_cidr(spec: &k8s_openapi::api::core::v1::NodeSpec) -> Option<String> {
+    if let Some(pod_cidr) = &spec.pod_cidr
+        && pod_cidr.contains('.')
+    {
+        return Some(pod_cidr.clone());
+    }
+
+    spec.pod_cidrs
+        .as_deref()
+        .into_iter()
+        .flatten()
+        .find(|pod_cidr| pod_cidr.contains('.'))
+        .cloned()
+}
+
 #[cfg(test)]
 mod tests {
-    use super::remove_bootstrap_blocking_taints;
+    use super::{preferred_ipv4_pod_cidr, remove_bootstrap_blocking_taints};
 
     #[test]
     fn test_remove_bootstrap_blocking_taints() {
@@ -258,6 +403,34 @@ mod tests {
         assert!(remove_bootstrap_blocking_taints(&mut taints));
         assert_eq!(taints.len(), 1);
         assert_eq!(taints[0].key, "dedicated");
+    }
+
+    #[test]
+    fn test_prefers_ipv4_pod_cidr() {
+        let spec = k8s_openapi::api::core::v1::NodeSpec {
+            pod_cidr: Some("10.244.0.0/24".to_string()),
+            pod_cidrs: Some(vec!["fd00::/64".to_string(), "10.244.1.0/24".to_string()]),
+            ..Default::default()
+        };
+
+        assert_eq!(
+            preferred_ipv4_pod_cidr(&spec).as_deref(),
+            Some("10.244.0.0/24")
+        );
+    }
+
+    #[test]
+    fn test_falls_back_to_ipv4_pod_cidrs() {
+        let spec = k8s_openapi::api::core::v1::NodeSpec {
+            pod_cidr: Some("fd00::/64".to_string()),
+            pod_cidrs: Some(vec!["fd00::/64".to_string(), "10.244.1.0/24".to_string()]),
+            ..Default::default()
+        };
+
+        assert_eq!(
+            preferred_ipv4_pod_cidr(&spec).as_deref(),
+            Some("10.244.1.0/24")
+        );
     }
 
     #[test]

@@ -11,7 +11,6 @@ on:
       - 'docs/parity-matrix.md'
       - 'docs/generated/BENCHMARKS.md'
       - 'docs/generated/benchmark-results.json'
-      - 'PROJECT_COMPLETION_SUMMARY.md'
   push:
     branches:
       - main
@@ -24,7 +23,6 @@ on:
       - 'docs/parity-matrix.md'
       - 'docs/generated/BENCHMARKS.md'
       - 'docs/generated/benchmark-results.json'
-      - 'PROJECT_COMPLETION_SUMMARY.md'
 
 jobs:
   parity-proof:

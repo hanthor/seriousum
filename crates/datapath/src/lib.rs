@@ -231,13 +231,13 @@ impl DatapathLoader {
     /// Register standard Cilium eBPF objects.
     pub fn register_standard_objects(&mut self) -> Result<()> {
         let objects = vec![
-            ("bpf_lxc", "bpf_lxc.o"),
-            ("bpf_host", "bpf_host.o"),
-            ("bpf_xdp", "bpf_xdp.o"),
+            ("bpf_lxc", "bpf_lxc"),
+            ("bpf_host", "bpf_host"),
+            ("bpf_xdp", "bpf_xdp"),
         ];
 
-        for (name, filename) in objects {
-            let path = self.bpf_dir.join(filename);
+        for (name, stem) in objects {
+            let path = resolve_standard_object_path(&self.bpf_dir, stem);
             self.register_elf_object(ElfObject::new(name, path))?;
         }
 
@@ -440,6 +440,20 @@ impl DatapathLoader {
     }
 }
 
+fn resolve_standard_object_path(bpf_dir: &Path, stem: &str) -> PathBuf {
+    let object = bpf_dir.join(format!("{stem}.o"));
+    if object.exists() {
+        return object;
+    }
+
+    let source = bpf_dir.join(format!("{stem}.c"));
+    if source.exists() {
+        return source;
+    }
+
+    object
+}
+
 /// Initialize the datapath loader and return a summary.
 pub fn run() -> Result<String> {
     let loader = DatapathLoader::new("/sys/fs/bpf", "/var/run/cilium");
@@ -454,6 +468,14 @@ pub fn run() -> Result<String> {
 mod parity_impl {
     use std::collections::BTreeMap;
     use std::net::{IpAddr, Ipv6Addr};
+
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    pub enum RequestedConnectorMode {
+        Veth,
+        Netkit,
+        NetkitL2,
+        Auto,
+    }
 
     #[derive(Debug, Clone, Copy, PartialEq, Eq)]
     pub enum ConnectorMode {
@@ -478,6 +500,74 @@ mod parity_impl {
         let headroom = wg.0.checked_add(tunnel.0).unwrap_or(0);
         let tailroom = wg.1.checked_add(tunnel.1).unwrap_or(0);
         (headroom, tailroom)
+    }
+
+    #[derive(Debug, Clone, Copy, Default)]
+    pub struct ConnectorFeatureSupport {
+        pub netkit: bool,
+        pub netkit_scrub: bool,
+    }
+
+    #[derive(Debug, Clone, Copy, Default)]
+    pub struct ConnectorOptions {
+        pub enable_bpf_tproxy: bool,
+        pub enable_host_legacy_routing: bool,
+        pub enable_endpoint_routes: bool,
+    }
+
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    pub struct ConnectorConfigDecision {
+        pub operational_mode: ConnectorMode,
+        pub enable_tcx: bool,
+    }
+
+    fn validate_netkit_support(
+        features: ConnectorFeatureSupport,
+        options: ConnectorOptions,
+    ) -> std::result::Result<(), &'static str> {
+        if !features.netkit {
+            return Err("netkit device probe failed");
+        }
+        if options.enable_host_legacy_routing {
+            return Err("netkit devices cannot be used with legacy host routing");
+        }
+        if options.enable_endpoint_routes && !features.netkit_scrub {
+            return Err("netkit driver missing scrub attributes");
+        }
+        if options.enable_bpf_tproxy {
+            return Err("netkit devices cannot be used with BPF TPROXY");
+        }
+        Ok(())
+    }
+
+    pub fn select_connector_config(
+        requested_mode: RequestedConnectorMode,
+        features: ConnectorFeatureSupport,
+        options: ConnectorOptions,
+    ) -> std::result::Result<ConnectorConfigDecision, String> {
+        let operational_mode = match requested_mode {
+            RequestedConnectorMode::Veth => ConnectorMode::Veth,
+            RequestedConnectorMode::Auto => {
+                if validate_netkit_support(features, options).is_ok() {
+                    ConnectorMode::Netkit
+                } else {
+                    ConnectorMode::Veth
+                }
+            }
+            RequestedConnectorMode::Netkit => {
+                validate_netkit_support(features, options).map_err(str::to_owned)?;
+                ConnectorMode::Netkit
+            }
+            RequestedConnectorMode::NetkitL2 => {
+                validate_netkit_support(features, options).map_err(str::to_owned)?;
+                ConnectorMode::NetkitL2
+            }
+        };
+
+        Ok(ConnectorConfigDecision {
+            operational_mode,
+            enable_tcx: use_tuned_buffer_margins(operational_mode),
+        })
     }
 
     pub fn preferred_ipv6_address(device_addresses: &[IpAddr]) -> Option<Ipv6Addr> {
@@ -627,23 +717,179 @@ mod parity_impl {
 #[cfg(test)]
 mod parity_tests {
     use super::parity_impl::{
-        ConnectorMode, DefineMap, NodeDefineConfig, calculate_tuned_buffer_margins,
+        ConnectorConfigDecision, ConnectorFeatureSupport, ConnectorMode, ConnectorOptions,
+        DefineMap, NodeDefineConfig, RequestedConnectorMode, calculate_tuned_buffer_margins,
         collect_node_defines, preferred_ipv6_address, render_defines, render_node_defines,
-        use_tuned_buffer_margins, vlan_filter_macro,
+        select_connector_config, use_tuned_buffer_margins, vlan_filter_macro,
     };
     use std::collections::BTreeMap;
     use std::net::{IpAddr, Ipv6Addr};
 
     // Stubs ported from pkg/datapath/connector/config_test.go.
 
-    // Blocked on kernel feature probes + wireguard/tunnel implementations;
-    // ref pkg/datapath/connector/config_test.go:TestNewConfig.
     #[test]
-    #[cfg_attr(
-        not(feature = "privileged"),
-        ignore = "requires root + BPF kernel; run with: cargo test --features privileged"
-    )]
-    fn parity_test_new_config() {}
+    fn parity_test_new_config() {
+        let tests = [
+            (
+                "veth",
+                RequestedConnectorMode::Veth,
+                ConnectorFeatureSupport::default(),
+                ConnectorOptions::default(),
+                Ok(ConnectorConfigDecision {
+                    operational_mode: ConnectorMode::Veth,
+                    enable_tcx: false,
+                }),
+            ),
+            (
+                "netkit",
+                RequestedConnectorMode::Netkit,
+                ConnectorFeatureSupport {
+                    netkit: true,
+                    netkit_scrub: true,
+                },
+                ConnectorOptions::default(),
+                Ok(ConnectorConfigDecision {
+                    operational_mode: ConnectorMode::Netkit,
+                    enable_tcx: true,
+                }),
+            ),
+            (
+                "netkit-requires-probe",
+                RequestedConnectorMode::Netkit,
+                ConnectorFeatureSupport::default(),
+                ConnectorOptions::default(),
+                Err("netkit device probe failed".to_string()),
+            ),
+            (
+                "netkit-rejects-tproxy",
+                RequestedConnectorMode::Netkit,
+                ConnectorFeatureSupport {
+                    netkit: true,
+                    netkit_scrub: true,
+                },
+                ConnectorOptions {
+                    enable_bpf_tproxy: true,
+                    ..Default::default()
+                },
+                Err("netkit devices cannot be used with BPF TPROXY".to_string()),
+            ),
+            (
+                "netkit-requires-scrub-for-endpoint-routes",
+                RequestedConnectorMode::Netkit,
+                ConnectorFeatureSupport {
+                    netkit: true,
+                    netkit_scrub: false,
+                },
+                ConnectorOptions {
+                    enable_endpoint_routes: true,
+                    ..Default::default()
+                },
+                Err("netkit driver missing scrub attributes".to_string()),
+            ),
+            (
+                "netkit-rejects-legacy-host-routing",
+                RequestedConnectorMode::Netkit,
+                ConnectorFeatureSupport {
+                    netkit: true,
+                    netkit_scrub: true,
+                },
+                ConnectorOptions {
+                    enable_host_legacy_routing: true,
+                    ..Default::default()
+                },
+                Err("netkit devices cannot be used with legacy host routing".to_string()),
+            ),
+            (
+                "netkit-l2",
+                RequestedConnectorMode::NetkitL2,
+                ConnectorFeatureSupport {
+                    netkit: true,
+                    netkit_scrub: true,
+                },
+                ConnectorOptions::default(),
+                Ok(ConnectorConfigDecision {
+                    operational_mode: ConnectorMode::NetkitL2,
+                    enable_tcx: true,
+                }),
+            ),
+            (
+                "auto-falls-back-when-netkit-is-unavailable",
+                RequestedConnectorMode::Auto,
+                ConnectorFeatureSupport::default(),
+                ConnectorOptions::default(),
+                Ok(ConnectorConfigDecision {
+                    operational_mode: ConnectorMode::Veth,
+                    enable_tcx: false,
+                }),
+            ),
+            (
+                "auto-uses-netkit-when-available",
+                RequestedConnectorMode::Auto,
+                ConnectorFeatureSupport {
+                    netkit: true,
+                    netkit_scrub: true,
+                },
+                ConnectorOptions::default(),
+                Ok(ConnectorConfigDecision {
+                    operational_mode: ConnectorMode::Netkit,
+                    enable_tcx: true,
+                }),
+            ),
+            (
+                "auto-falls-back-when-legacy-host-routing-is-enabled",
+                RequestedConnectorMode::Auto,
+                ConnectorFeatureSupport {
+                    netkit: true,
+                    netkit_scrub: true,
+                },
+                ConnectorOptions {
+                    enable_host_legacy_routing: true,
+                    ..Default::default()
+                },
+                Ok(ConnectorConfigDecision {
+                    operational_mode: ConnectorMode::Veth,
+                    enable_tcx: false,
+                }),
+            ),
+            (
+                "auto-falls-back-when-tproxy-is-enabled",
+                RequestedConnectorMode::Auto,
+                ConnectorFeatureSupport {
+                    netkit: true,
+                    netkit_scrub: true,
+                },
+                ConnectorOptions {
+                    enable_bpf_tproxy: true,
+                    ..Default::default()
+                },
+                Ok(ConnectorConfigDecision {
+                    operational_mode: ConnectorMode::Veth,
+                    enable_tcx: false,
+                }),
+            ),
+            (
+                "auto-falls-back-when-endpoint-routes-lack-scrub",
+                RequestedConnectorMode::Auto,
+                ConnectorFeatureSupport {
+                    netkit: true,
+                    netkit_scrub: false,
+                },
+                ConnectorOptions {
+                    enable_endpoint_routes: true,
+                    ..Default::default()
+                },
+                Ok(ConnectorConfigDecision {
+                    operational_mode: ConnectorMode::Veth,
+                    enable_tcx: false,
+                }),
+            ),
+        ];
+
+        for (name, requested_mode, features, options, expected) in tests {
+            let actual = select_connector_config(requested_mode, features, options);
+            assert_eq!(actual, expected, "{name}");
+        }
+    }
 
     #[test]
     fn parity_test_use_tuned_buffer_margins() {
@@ -880,6 +1126,8 @@ return false;"
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::fs;
+    use std::time::{SystemTime, UNIX_EPOCH};
 
     #[test]
     fn test_loader_creation() {
@@ -1103,5 +1351,60 @@ mod tests {
         assert_eq!(TcDirection::Ingress, TcDirection::Ingress);
         assert_eq!(TcDirection::Egress, TcDirection::Egress);
         assert_ne!(TcDirection::Ingress, TcDirection::Egress);
+    }
+
+    #[test]
+    fn test_register_standard_objects_falls_back_to_c_sources() {
+        let tempdir = unique_test_dir("bpf-source-fallback");
+        fs::create_dir_all(&tempdir).expect("create temp dir");
+        fs::write(tempdir.join("bpf_lxc.c"), "").expect("write bpf_lxc.c");
+        fs::write(tempdir.join("bpf_host.c"), "").expect("write bpf_host.c");
+        fs::write(tempdir.join("bpf_xdp.c"), "").expect("write bpf_xdp.c");
+
+        let mut loader = DatapathLoader::new(&tempdir, "/var/run/cilium");
+        loader
+            .register_standard_objects()
+            .expect("register standard objects");
+
+        let registered = loader
+            .elf_objects
+            .iter()
+            .map(|obj| obj.path.file_name().unwrap().to_string_lossy().into_owned())
+            .collect::<Vec<_>>();
+        assert_eq!(registered, vec!["bpf_lxc.c", "bpf_host.c", "bpf_xdp.c"]);
+
+        fs::remove_dir_all(tempdir).expect("remove temp dir");
+    }
+
+    #[test]
+    fn test_register_standard_objects_prefers_compiled_objects() {
+        let tempdir = unique_test_dir("bpf-object-preferred");
+        fs::create_dir_all(&tempdir).expect("create temp dir");
+        fs::write(tempdir.join("bpf_lxc.o"), "").expect("write bpf_lxc.o");
+        fs::write(tempdir.join("bpf_host.o"), "").expect("write bpf_host.o");
+        fs::write(tempdir.join("bpf_xdp.o"), "").expect("write bpf_xdp.o");
+        fs::write(tempdir.join("bpf_lxc.c"), "").expect("write bpf_lxc.c");
+
+        let mut loader = DatapathLoader::new(&tempdir, "/var/run/cilium");
+        loader
+            .register_standard_objects()
+            .expect("register standard objects");
+
+        let registered = loader
+            .elf_objects
+            .iter()
+            .map(|obj| obj.path.file_name().unwrap().to_string_lossy().into_owned())
+            .collect::<Vec<_>>();
+        assert_eq!(registered, vec!["bpf_lxc.o", "bpf_host.o", "bpf_xdp.o"]);
+
+        fs::remove_dir_all(tempdir).expect("remove temp dir");
+    }
+
+    fn unique_test_dir(prefix: &str) -> PathBuf {
+        let nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("system time before unix epoch")
+            .as_nanos();
+        std::env::temp_dir().join(format!("seriousum-{prefix}-{nanos}"))
     }
 }

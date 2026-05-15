@@ -12,6 +12,13 @@ clap = { workspace = true, features = ["derive"] }
 tokio.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+kube.workspace = true
+k8s-openapi.workspace = true
+rustls.workspace = true
+tonic = "0.14.2"
+tonic-health = "0.14.2"
 seriousum_cli = { path = "crates/cli", package = "seriousum-cli" }
 seriousum_daemon = { path = "crates/daemon", package = "cilium-daemon" }
 seriousum_hubble = { path = "crates/hubble", package = "seriousum-hubble" }

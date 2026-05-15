@@ -6,6 +6,7 @@ cd "$ROOT_DIR"
 
 BUILD_SCRIPT="$ROOT_DIR/images/build-cilium-images.sh"
 DROPIN_SCRIPT="$ROOT_DIR/scripts/build-cilium-dropin.sh"
+PREPARE_KUBECTL_SCRIPT="$ROOT_DIR/scripts/prepare-cilium-kubectl.sh"
 CILIUM_REPO=${CILIUM_REPO:-/var/home/james/dev/cilium}
 IMAGE_PREFIX=${IMAGE_PREFIX:-localhost:5000/seriousum}
 IMAGE_TAG=${IMAGE_TAG:-local}
@@ -21,7 +22,8 @@ KIND_BOOTSTRAP=${KIND_BOOTSTRAP:-1}
 KIND_RECREATE_CLUSTER=${KIND_RECREATE_CLUSTER:-1}
 KIND_CONTROLPLANES=${KIND_CONTROLPLANES:-1}
 KIND_WORKERS=${KIND_WORKERS:-1}
-KUBECONFIG_FILE=${KUBECONFIG_FILE:-$ROOT_DIR/target/cilium-kind/$KIND_CLUSTER.kubeconfig}
+KUBECONFIG_FILE=${KUBECONFIG_FILE:-}
+KUBECTL_PATH=${KUBECTL_PATH:-}
 TEST_TIMEOUT=${TEST_TIMEOUT:-2h}
 HOLD_ENVIRONMENT=${HOLD_ENVIRONMENT:-false}
 
@@ -51,11 +53,12 @@ Options:
       --kind-controlplanes N  Control-plane node count for bootstrap
       --kind-workers N        Worker node count for bootstrap
       --kubeconfig-file PATH  Kubeconfig path used by the harness
+      --kubectl-path PATH     Base directory for version-specific kubectl shims
       --test-timeout DURATION Fail the test run after the given wall-clock duration
   -h, --help                 Show this help message
 
 Environment variables:
-  CILIUM_REPO, IMAGE_PREFIX, IMAGE_TAG, AGENT_IMAGE_REPO, AGENT_IMAGE_TAG, BIN_DIR, KIND_CLUSTER, FOCUS, LOAD_INTO_KIND, BUILD_IMAGES, INSTALL_DROPIN, KIND_BOOTSTRAP, KIND_RECREATE_CLUSTER, KIND_CONTROLPLANES, KIND_WORKERS, KUBECONFIG_FILE, TEST_TIMEOUT, HOLD_ENVIRONMENT
+  CILIUM_REPO, IMAGE_PREFIX, IMAGE_TAG, AGENT_IMAGE_REPO, AGENT_IMAGE_TAG, BIN_DIR, KIND_CLUSTER, FOCUS, LOAD_INTO_KIND, BUILD_IMAGES, INSTALL_DROPIN, KIND_BOOTSTRAP, KIND_RECREATE_CLUSTER, KIND_CONTROLPLANES, KIND_WORKERS, KUBECONFIG_FILE, KUBECTL_PATH, TEST_TIMEOUT, HOLD_ENVIRONMENT
 EOF
 }
 
@@ -165,6 +168,14 @@ while [ "$#" -gt 0 ]; do
       KUBECONFIG_FILE=$2
       shift 2
       ;;
+    --kubectl-path)
+      if [ "$#" -lt 2 ]; then
+        printf 'missing value for %s\n' "$1" >&2
+        exit 2
+      fi
+      KUBECTL_PATH=$2
+      shift 2
+      ;;
     --test-timeout)
       if [ "$#" -lt 2 ]; then
         printf 'missing value for %s\n' "$1" >&2
@@ -184,6 +195,14 @@ while [ "$#" -gt 0 ]; do
       ;;
   esac
 done
+
+if [ -z "$KUBECONFIG_FILE" ]; then
+  KUBECONFIG_FILE="$ROOT_DIR/target/cilium-kind/$KIND_CLUSTER.kubeconfig"
+fi
+
+if [ -z "$KUBECTL_PATH" ]; then
+  KUBECTL_PATH="$ROOT_DIR/target/cilium-kind/$KIND_CLUSTER.kubectl-cache"
+fi
 
 export IMAGE_PREFIX IMAGE_TAG
 if [ "$BUILD_IMAGES" = "1" ]; then
@@ -207,6 +226,9 @@ fi
 
 export KUBECONFIG="$KUBECONFIG_FILE"
 export PATH="$BIN_DIR:$PATH"
+mkdir -p "$KUBECTL_PATH"
+K8S_VERSION=${K8S_VERSION:-$(kubectl version -o json | jq -r '.serverVersion | "\(.major).\(.minor)"')}
+"$PREPARE_KUBECTL_SCRIPT" --kubectl-root "$KUBECTL_PATH" --k8s-version "$K8S_VERSION" >/dev/null
 
 CILIUM_IMAGE="$AGENT_IMAGE_REPO"
 CILIUM_TAG="$AGENT_IMAGE_TAG"
@@ -214,7 +236,7 @@ CILIUM_OPERATOR_IMAGE="quay.io/cilium/cilium-ci"
 CILIUM_OPERATOR_TAG="latest"
 HUBBLE_RELAY_IMAGE="$IMAGE_PREFIX/hubble"
 HUBBLE_RELAY_TAG="$IMAGE_TAG"
-CLUSTERMESH_INSTALL_OVERRIDES="image.useDigest=false,operator.image.useDigest=false,hubble.relay.image.useDigest=false,clustermesh.apiserver.image.useDigest=false,clustermesh.apiserver.image.repository=$IMAGE_PREFIX/clustermesh-apiserver,clustermesh.apiserver.image.tag=$IMAGE_TAG,clustermesh.apiserver.image.pullPolicy=IfNotPresent,operator.image.repository=$CILIUM_OPERATOR_IMAGE,operator.image.tag=$CILIUM_OPERATOR_TAG,operator.image.pullPolicy=IfNotPresent,hubble.relay.image.pullPolicy=IfNotPresent"
+CLUSTERMESH_INSTALL_OVERRIDES="image.useDigest=false,image.pullPolicy=IfNotPresent,preflight.image.pullPolicy=IfNotPresent,operator.image.useDigest=false,hubble.relay.image.useDigest=false,clustermesh.apiserver.image.useDigest=false,clustermesh.apiserver.image.repository=$IMAGE_PREFIX/clustermesh-apiserver,clustermesh.apiserver.image.tag=$IMAGE_TAG,clustermesh.apiserver.image.pullPolicy=IfNotPresent,operator.image.pullPolicy=IfNotPresent,operator.image.override=$CILIUM_OPERATOR_IMAGE:$CILIUM_OPERATOR_TAG,hubble.relay.image.pullPolicy=IfNotPresent,kubeProxyReplacement=false"
 
 export CILIUM_IMAGE
 export CILIUM_TAG
@@ -228,7 +250,7 @@ if [ "$LOAD_INTO_KIND" = "1" ]; then
   printf '==> loading images into kind cluster %s\n' "$KIND_CLUSTER"
   kind load docker-image --name "$KIND_CLUSTER" "$CILIUM_IMAGE:$CILIUM_TAG"
   kind load docker-image --name "$KIND_CLUSTER" "$IMAGE_PREFIX/cilium-dbg:$IMAGE_TAG"
-  kind load docker-image --name "$KIND_CLUSTER" "$IMAGE_PREFIX/operator-generic:$IMAGE_TAG"
+  kind load docker-image --name "$KIND_CLUSTER" "$CILIUM_OPERATOR_IMAGE:$CILIUM_OPERATOR_TAG" 2>/dev/null || true
   kind load docker-image --name "$KIND_CLUSTER" "$HUBBLE_RELAY_IMAGE:$HUBBLE_RELAY_TAG"
   kind load docker-image --name "$KIND_CLUSTER" "$IMAGE_PREFIX/clustermesh-apiserver:$IMAGE_TAG"
 fi
@@ -236,7 +258,7 @@ fi
 cd "$CILIUM_REPO/test"
 printf '==> running ginkgo --focus %s\n' "$FOCUS"
 CNI_INTEGRATION=kind \
-K8S_VERSION="$(kubectl version -o json | jq -r '.serverVersion | "\(.major).\(.minor)"')" \
+K8S_VERSION="$K8S_VERSION" \
 NETNEXT="${NETNEXT:-false}" \
 KUBEPROXY="${KUBEPROXY:-1}" \
 NO_CILIUM_ON_NODES="${NO_CILIUM_ON_NODES:-}" \
@@ -244,6 +266,7 @@ INTEGRATION_TESTS=true \
 timeout --preserve-status --kill-after=5m "$TEST_TIMEOUT" ginkgo --focus "$FOCUS" -v -- \
   -cilium.testScope=k8s \
   -cilium.kubeconfig="$KUBECONFIG_FILE" \
+  -cilium.kubectl-path="$KUBECTL_PATH" \
   -cilium.passCLIEnvironment=true \
   -cilium.image="$CILIUM_IMAGE" \
   -cilium.tag="$CILIUM_TAG" \

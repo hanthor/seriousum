@@ -43,7 +43,10 @@ echo ""
 
 # Check 2: Helm overrides configured
 echo "✓ Checking Helm overrides in run-cilium-kind-test.sh..."
-if grep -q 'operator.image.pullPolicy=IfNotPresent' "$ROOT_DIR/scripts/run-cilium-kind-test.sh"; then
+if grep -q 'image.pullPolicy=IfNotPresent' "$ROOT_DIR/scripts/run-cilium-kind-test.sh" && \
+   grep -q 'preflight.image.pullPolicy=IfNotPresent' "$ROOT_DIR/scripts/run-cilium-kind-test.sh" && \
+   grep -q 'operator.image.pullPolicy=IfNotPresent' "$ROOT_DIR/scripts/run-cilium-kind-test.sh" && \
+   grep -q 'kubeProxyReplacement=false' "$ROOT_DIR/scripts/run-cilium-kind-test.sh"; then
   echo "  ✓ Helm overrides configured"
 else
   echo "  ✗ Helm overrides not found"

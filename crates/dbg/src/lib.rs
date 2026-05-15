@@ -12,8 +12,10 @@
 
 use std::collections::HashMap;
 
-use std::io;
+use std::io::{self, Read, Write};
 use std::net::{Ipv4Addr, Ipv6Addr};
+#[cfg(unix)]
+use std::os::unix::net::UnixStream;
 use std::str::FromStr;
 
 use serde::{Deserialize, Serialize};
@@ -524,6 +526,33 @@ pub fn require_root(operation: &str) -> Result<()> {
         )));
     }
     Ok(())
+}
+
+/// Fetch a compat JSON payload from the local cilium socket.
+#[cfg(unix)]
+pub fn compat_get(path: &str) -> Result<String> {
+    let sock_path = std::env::var("CILIUM_SOCK_PATH")
+        .unwrap_or_else(|_| "/var/run/cilium/cilium.sock".to_string());
+    let mut stream = UnixStream::connect(&sock_path)
+        .map_err(|error| Error::ServiceLookupFailed(format!("connect {sock_path}: {error}")))?;
+    let request = format!("GET {path} HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n");
+    stream.write_all(request.as_bytes())?;
+    stream.shutdown(std::net::Shutdown::Write)?;
+
+    let mut response = String::new();
+    stream.read_to_string(&mut response)?;
+    let (_, body) = response
+        .split_once("\r\n\r\n")
+        .ok_or_else(|| Error::ServiceLookupFailed("invalid compat response".to_string()))?;
+    Ok(body.to_string())
+}
+
+/// Fetch a compat JSON payload from the local cilium socket.
+#[cfg(not(unix))]
+pub fn compat_get(_path: &str) -> Result<String> {
+    Err(Error::ServiceLookupFailed(
+        "compat socket is only available on unix".to_string(),
+    ))
 }
 
 #[cfg(test)]

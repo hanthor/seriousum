@@ -19,7 +19,7 @@ pub mod server;
 pub use observer::{FlowCollector, Observer};
 pub use pool::PeerManager;
 pub use queue::PriorityQueue;
-pub use server::RelayServer;
+pub use server::{RelayConfig, RelayServer};
 
 /// Result type for relay operations
 pub type Result<T> = std::result::Result<T, RelayError>;

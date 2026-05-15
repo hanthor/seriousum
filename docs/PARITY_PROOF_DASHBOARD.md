@@ -61,7 +61,6 @@ A full parity claim requires green status across all six evidence pillars:
 ### Current evidence
 - [docs/parity-matrix.md](parity-matrix.md)
 - [docs/component-porting-compliance.md](component-porting-compliance.md)
-- [PROJECT_COMPLETION_SUMMARY.md](../PROJECT_COMPLETION_SUMMARY.md)
 
 ### Gap
 Current inventory is crate- and track-oriented, not a complete frozen-release surface inventory.
@@ -207,5 +206,4 @@ All items below must be green:
 - [docs/parity-matrix.md](parity-matrix.md)
 - [docs/component-porting-compliance.md](component-porting-compliance.md)
 - [docs/generated/BENCHMARKS.md](generated/BENCHMARKS.md)
-- [PROJECT_COMPLETION_SUMMARY.md](../PROJECT_COMPLETION_SUMMARY.md)
 - [COMPLIANCE_CERTIFICATION.md](../COMPLIANCE_CERTIFICATION.md)

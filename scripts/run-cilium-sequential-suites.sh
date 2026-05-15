@@ -12,7 +12,7 @@ IMAGE_PREFIX=${IMAGE_PREFIX:-localhost:5000/seriousum}
 IMAGE_TAG=${IMAGE_TAG:-local}
 KIND_CLUSTER=${KIND_CLUSTER:-kind}
 BIN_DIR=${BIN_DIR:-$ROOT_DIR/target/cilium-dropin}
-KUBECONFIG_FILE=${KUBECONFIG_FILE:-$ROOT_DIR/target/cilium-kind/$KIND_CLUSTER.kubeconfig}
+KUBECONFIG_FILE=${KUBECONFIG_FILE:-}
 TEST_TIMEOUT=${TEST_TIMEOUT:-10m}
 BUILD_IMAGES=${BUILD_IMAGES:-1}
 INSTALL_DROPIN=${INSTALL_DROPIN:-1}
@@ -98,6 +98,10 @@ while [ "$#" -gt 0 ]; do
   esac
 done
 
+if [ -z "$KUBECONFIG_FILE" ]; then
+  KUBECONFIG_FILE="$ROOT_DIR/target/cilium-kind/$KIND_CLUSTER.kubeconfig"
+fi
+
 export KUBECONFIG="$KUBECONFIG_FILE"
 export IMAGE_PREFIX IMAGE_TAG TEST_TIMEOUT
 
@@ -136,7 +140,8 @@ fi
 # Bootstrap cluster once
 if ! kubectl cluster-info &>/dev/null; then
   echo "=== Bootstrapping kind cluster ==="
-  "$CILIUM_REPO/contrib/scripts/kind.sh" &>/dev/null
+  mkdir -p "$(dirname "$KUBECONFIG_FILE")"
+  "$CILIUM_REPO/contrib/scripts/kind.sh" "1" "1" "$KIND_CLUSTER" "" "" "" "" "" "$KUBECONFIG_FILE" &>/dev/null
   echo "✓ Cluster bootstrapped"
 else
   echo "✓ Using existing cluster"

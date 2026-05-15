@@ -391,13 +391,20 @@ run-existing cluster=KIND_CLUSTER focus='K8sAgentChaosTest' timeout=TEST_TIMEOUT
         | python3 -c "import sys,json; v=json.load(sys.stdin)['serverVersion']; print(v['major']+'.'+v['minor'])" \
         2>/dev/null || echo "1.33")
     export K8S_VERSION="$K8S_VER"
+    CRD_ROOT="{{CILIUM_REPO}}/pkg/k8s/apis/cilium.io/client/crds"
+    if [ -d "$CRD_ROOT" ]; then
+        echo "Preinstalling Cilium CRDs from $CRD_ROOT"
+        while IFS= read -r -d '' crd; do
+            kubectl apply -f "$crd" >/dev/null
+        done < <(find "$CRD_ROOT" -type f -name '*.yaml' -print0 | sort -z)
+    fi
     # Put all image settings into HELM_OVERRIDES so they go through cliOverrideOptions
     # (applied last via maps.Copy — always wins over defaultHelmOptions and kindHelmOverrides).
     # This avoids the env-var→defaultHelmOptions double-suffix bug when env vars from prior
     # runs are still exported in the shell.
     # operator.image.override bypasses the chart's "repository-cloud+suffix" logic.
     # The chart appends "-generic" (cloud) automatically, which would double the suffix.
-    HELM_OVERRIDES="image.repository=$IMGPREFIX/cilium-agent,image.tag=$TAG,image.useDigest=false,image.pullPolicy=Never,operator.image.override=$IMGPREFIX/operator-generic:$TAG,operator.image.pullPolicy=Never,hubble.relay.image.repository=$IMGPREFIX/hubble,hubble.relay.image.tag=$TAG,hubble.relay.image.useDigest=false,hubble.relay.image.pullPolicy=Never,clustermesh.apiserver.image.repository=$IMGPREFIX/clustermesh-apiserver,clustermesh.apiserver.image.tag=$TAG,clustermesh.apiserver.image.useDigest=false,clustermesh.apiserver.image.pullPolicy=Never"
+    HELM_OVERRIDES="image.repository=$IMGPREFIX/cilium-agent,image.tag=$TAG,image.useDigest=false,image.pullPolicy=Never,preflight.image.pullPolicy=Never,operator.image.override=$IMGPREFIX/operator-generic:$TAG,operator.image.pullPolicy=Never,hubble.relay.image.repository=$IMGPREFIX/hubble,hubble.relay.image.tag=$TAG,hubble.relay.image.useDigest=false,hubble.relay.image.pullPolicy=Never,clustermesh.apiserver.image.repository=$IMGPREFIX/clustermesh-apiserver,clustermesh.apiserver.image.tag=$TAG,clustermesh.apiserver.image.useDigest=false,clustermesh.apiserver.image.pullPolicy=Never"
     echo "Running focus='{{focus}}' against cluster='{{cluster}}' (k8s $K8S_VER)"
     cd {{CILIUM_REPO}}/test
     timeout --preserve-status --kill-after=5m {{timeout}} \
@@ -417,7 +424,7 @@ run-existing cluster=KIND_CLUSTER focus='K8sAgentChaosTest' timeout=TEST_TIMEOUT
 run-existing-fresh cluster='cilium-ginkgo' focus='K8sAgentChaosTest' timeout=TEST_TIMEOUT agent_port_prefix='234' operator_port_prefix='235':
     just ginkgo-cluster {{cluster}} {{agent_port_prefix}} {{operator_port_prefix}}
     just load-all {{cluster}}
-    just run-existing {{cluster}} {{focus}} {{timeout}}
+    just run-existing {{cluster}} "{{focus}}" {{timeout}}
 
 # ============================================================================
 # PARALLEL TESTING & IMPLEMENTATION WORKFLOWS
@@ -517,9 +524,16 @@ run-upstream cluster=KIND_CLUSTER focus='K8sAgentChaosTest' timeout=TEST_TIMEOUT
         | python3 -c "import sys,json; v=json.load(sys.stdin)['serverVersion']; print(v['major']+'.'+v['minor'])" \
         2>/dev/null || echo "1.33")
     export K8S_VERSION="$K8S_VER"
+    CRD_ROOT="{{CILIUM_REPO}}/pkg/k8s/apis/cilium.io/client/crds"
+    if [ -d "$CRD_ROOT" ]; then
+        echo "Preinstalling Cilium CRDs from $CRD_ROOT"
+        while IFS= read -r -d '' crd; do
+            kubectl apply -f "$crd" >/dev/null
+        done < <(find "$CRD_ROOT" -type f -name '*.yaml' -print0 | sort -z)
+    fi
     # operator.image.override bypasses the Helm chart cloud-suffix logic (same as run-existing).
     # Agent + operator use Never (pre-loaded); hubble-relay uses IfNotPresent (pulls from quay.io).
-    HELM_OVERRIDES="image.repository=$AGENT_IMG,image.tag=$AGENT_TAG,image.useDigest=false,image.pullPolicy=Never,operator.image.override=$OPERATOR_IMG,operator.image.pullPolicy=Never,hubble.relay.image.repository=$HUBBLE_REPO,hubble.relay.image.tag=$HUBBLE_TAG,hubble.relay.image.useDigest=false,hubble.relay.image.pullPolicy=IfNotPresent"
+    HELM_OVERRIDES="image.repository=$AGENT_IMG,image.tag=$AGENT_TAG,image.useDigest=false,image.pullPolicy=Never,preflight.image.pullPolicy=Never,operator.image.override=$OPERATOR_IMG,operator.image.pullPolicy=Never,hubble.relay.image.repository=$HUBBLE_REPO,hubble.relay.image.tag=$HUBBLE_TAG,hubble.relay.image.useDigest=false,hubble.relay.image.pullPolicy=IfNotPresent"
     echo "Running UPSTREAM CILIUM focus='{{focus}}' against cluster='{{cluster}}' (k8s $K8S_VER)"
     echo "  Agent:    $AGENT_IMG:$AGENT_TAG"
     echo "  Operator: $OPERATOR_IMG"
@@ -539,7 +553,7 @@ run-upstream cluster=KIND_CLUSTER focus='K8sAgentChaosTest' timeout=TEST_TIMEOUT
 run-upstream-fresh cluster='cilium-upstream' focus='K8sAgentChaosTest' timeout=TEST_TIMEOUT agent_port_prefix='236' operator_port_prefix='237':
     just ginkgo-cluster {{cluster}} {{agent_port_prefix}} {{operator_port_prefix}}
     just load-upstream {{cluster}}
-    just run-upstream {{cluster}} {{focus}} {{timeout}}
+    just run-upstream {{cluster}} "{{focus}}" {{timeout}}
 
 # Run a test in the background in a detached session (immune to SIGHUP / terminal close).
 # Logs go to target/bg-<focus>-<timestamp>.log

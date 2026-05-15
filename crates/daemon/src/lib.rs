@@ -338,6 +338,7 @@ pub struct Cli {
     /// Additional daemon flags passed by the Cilium Helm chart and scripts.
     /// These are accepted for compatibility and ignored until implemented.
     #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+    #[allow(clippy::pub_underscore_fields)]
     pub _extra: Vec<String>,
 }
 

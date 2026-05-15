@@ -7,7 +7,7 @@ set -e
 
 PROJECT_DIR="/var/home/james/dev/seriousum"
 CILIUM_DIR="/var/home/james/dev/cilium"
-RESULTS_DIR="$PROJECT_DIR/cilium-compliance-results"
+RESULTS_DIR="$PROJECT_DIR/target/cilium-compliance-results"
 REPORT_FILE="$RESULTS_DIR/COMPLETE_COMPLIANCE_REPORT.md"
 
 GREEN='\033[0;32m'

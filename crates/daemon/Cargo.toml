@@ -9,6 +9,7 @@ seriousum-config = { path = "../config" }
 cilium-kvstore = { path = "../kvstore" }
 cilium-k8s = { path = "../k8s" }
 seriousum-crypto = { path = "../crypto" }
+seriousum-datapath = { path = "../datapath" }
 anyhow.workspace = true
 thiserror = "2"
 async-trait = "0.1"
@@ -23,6 +24,8 @@ futures.workspace = true
 once_cell = "1.19"
 dashmap = "6"
 rustls.workspace = true
+ipnet.workspace = true
+k8s-openapi = { workspace = true }
 
 [lints]
 workspace = true
