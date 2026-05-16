@@ -21,6 +21,7 @@ use tokio_util::sync::CancellationToken;
 use tracing::{error, info, warn};
 
 use crate::health::{SharedHealth, new_health, serve, set_ready, set_stopping};
+use crate::loadbalancer::BackendSyncer;
 use crate::{DaemonConfig, DaemonPhase, DaemonStatus};
 
 const CILIUM_SOCK_FILE: &str = "cilium.sock";
@@ -89,6 +90,7 @@ struct CompatState {
     endpoints: HashMap<String, CompatEndpoint>,
     services: HashMap<String, CompatService>,
     service_backends: HashMap<String, Vec<CompatBackend>>,
+    backend_syncer: BackendSyncer,
 }
 
 impl CompatState {
@@ -100,6 +102,7 @@ impl CompatState {
             endpoints: HashMap::new(),
             services: HashMap::new(),
             service_backends: HashMap::new(),
+            backend_syncer: BackendSyncer::new(),
         }
     }
 
@@ -309,8 +312,15 @@ impl CompatState {
 
         self.service_backends.insert(key.clone(), backends.clone());
         if let Some(service) = self.services.get_mut(&key) {
-            service.backends = backends;
+            service.backends = backends.clone();
         }
+        
+        // Sync backends to load balancer maps
+        let backend_tuples: Vec<_> = backends
+            .iter()
+            .map(|b| (b.ip, b.port, b.protocol.as_str()))
+            .collect();
+        self.backend_syncer.sync_backends(&key, &backend_tuples);
     }
 
     fn upsert_endpoints(&mut self, endpoints: &K8sEndpoints) {
@@ -368,8 +378,15 @@ impl CompatState {
 
         self.service_backends.insert(key.clone(), backends.clone());
         if let Some(service) = self.services.get_mut(&key) {
-            service.backends = backends;
+            service.backends = backends.clone();
         }
+        
+        // Sync backends to load balancer maps
+        let backend_tuples: Vec<_> = backends
+            .iter()
+            .map(|b| (b.ip, b.port, b.protocol.as_str()))
+            .collect();
+        self.backend_syncer.sync_backends(&key, &backend_tuples);
     }
 
     fn allocate_endpoint_id(&mut self) -> i64 {

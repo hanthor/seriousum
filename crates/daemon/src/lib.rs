@@ -4,6 +4,7 @@
 //! and includes a minimal runtime loop for long-running agent startup.
 
 pub mod health;
+pub mod loadbalancer;
 pub mod runtime;
 
 use std::net::{Ipv4Addr, Ipv6Addr};
