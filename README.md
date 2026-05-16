@@ -11,7 +11,7 @@
 
 A Rust-based reimplementation effort for major Cilium userspace and control-plane components.
 
-Seriousum delivers a substantial Rust port of core Cilium subsystems with **94% compatibility** (550 integration tests on upstream Cilium ginkgo harness). It is **production-ready for static Kubernetes service scenarios** today, with a clear roadmap to 100% via Track I implementation.
+Seriousum delivers a substantial Rust port of core Cilium subsystems with **94% compatibility** (550 integration tests on upstream Cilium ginkgo harness). It **could be production-ready for static Kubernetes service scenarios** today, with a clear roadmap to 100% via Track I implementation. But has yet to be thoroughly tested in real world scenarios 
 
 - **Repository**: https://github.com/hanthor/seriousum
 - **Release**: `v0.1.0-alpha`
