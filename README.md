@@ -6,8 +6,10 @@
 [![Parity Proof](https://img.shields.io/badge/parity%20proof-production%20ready%20(static)-yellowgreen)](docs/PARITY_PROOF_DASHBOARD.md)
 
 **Published evidence (latest):**
-- **Parity proof**: [docs/PARITY_PROOF_DASHBOARD.md](docs/PARITY_PROOF_DASHBOARD.md) — **94% pass rate on 550 integration tests**
-- **Comprehensive validation**: [docs/COMPREHENSIVE_VALIDATION.md](docs/COMPREHENSIVE_VALIDATION.md) — root cause analysis & roadmap
+- **Integration test benchmarks**: [docs/INTEGRATION_TEST_BENCHMARKS.md](docs/INTEGRATION_TEST_BENCHMARKS.md) — 550 tests, 94% pass rate, component quality breakdown
+- **Parity proof**: [docs/PARITY_PROOF_DASHBOARD.md](docs/PARITY_PROOF_DASHBOARD.md) — production-ready status & roadmap
+- **Comprehensive validation**: [docs/COMPREHENSIVE_VALIDATION.md](docs/COMPREHENSIVE_VALIDATION.md) — root cause analysis & Track I implementation plan
+- **Micro-benchmarks**: [docs/generated/BENCHMARKS.md](docs/generated/BENCHMARKS.md) — hot path comparisons vs upstream Cilium
 
 A Rust-based reimplementation effort for major Cilium userspace and control-plane components.
 
