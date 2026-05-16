@@ -200,7 +200,7 @@ run_seriousum_benches() {
   rm -rf "$REPO_ROOT/target/criterion"
   : > "$OUT_DIR/criterion-raw.txt"
   cargo build --profile bench --benches >/dev/null
-  for bench_name in load_balancer policy_eval ipam fqdn; do
+  for bench_name in load_balancer policy_eval ipam fqdn hubble endpoint identity; do
     local bench_bin
     bench_bin="$(find "$REPO_ROOT/target/release/deps" -maxdepth 1 -type f -name "${bench_name}-*" ! -name '*.d' -printf '%T@ %p\n' | sort -nr | head -1 | cut -d' ' -f2-)"
     if [[ -n "$bench_bin" ]]; then

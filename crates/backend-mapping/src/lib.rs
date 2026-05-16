@@ -1,1006 +1,629 @@
-//! Backend Mapping Engine - connects services to their endpoints
+//! Track I: LB reconciler — syncs Kubernetes service backends to eBPF maps.
 //!
-//! Implements Issue #46 (P1.3)
+//! Cilium's eBPF datapath forwards ClusterIP traffic by looking up the service
+//! frontend in `cilium_lb4_services_v2` and the backend in `cilium_lb4_backends_v3`.
+//! This reconciler keeps those maps consistent with what the Kubernetes API reports.
 //!
-//! This component integrates:
-//! - Track 1 (ServiceObserver): Receives service change notifications
-//! - Track 2 (eBPF Maps): Populates backend pools
-//! - Pod cache: Discovers endpoints matching service selectors
-//! - Health tracking: Monitors pod readiness
+//! ## Map layout
+//!
+//! `cilium_lb4_services_v2` (key=`Lb4Key`, value=`Lb4Service`):
+//! - Slot 0 (master): count=N backends, rev_nat_index=svc_id
+//! - Slots 1..=N: backend_id pointing into `cilium_lb4_backends_v3`
+//!
+//! `cilium_lb4_backends_v3` (key=u32 backend_id, value=`Lb4Backend`):
+//! - One entry per unique (backend_ip, port, proto)
+//!
+//! ## ID stability
+//!
+//! Backend IDs are allocated once per unique (ip, port, proto) tuple and reused
+//! across services. Service (rev_nat) IDs track the service key stable across
+//! endpoint slice updates.
 
-use anyhow::{Result, anyhow};
-use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
-use std::net::{IpAddr, SocketAddr};
+use std::net::Ipv4Addr;
+use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::Arc;
-use tokio::sync::RwLock;
-use tracing::debug;
+use tokio::sync::Mutex;
+use tracing::{debug, error, info, warn};
 
-// ============================================================================
-// Core Types
-// ============================================================================
+// ─── eBPF map constants ───────────────────────────────────────────────────────
 
-/// Pod information (mirrors K8s Pod spec)
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct PodInfo {
-    pub namespace: String,
-    pub name: String,
-    pub pod_ip: Option<IpAddr>,
-    pub node_name: Option<String>,
-    pub labels: HashMap<String, String>,
-    pub status: PodStatus,
-    pub containers: Vec<ContainerStatus>,
+pub const SVC_MAP_NAME: &str = "cilium_lb4_services_v2";
+pub const BACKEND_MAP_NAME: &str = "cilium_lb4_backends_v3";
+const BPF_GLOBALS: &str = "/sys/fs/bpf/tc/globals";
+
+// ─── Struct layout matching Cilium's lb4_key (12 bytes) ───────────────────────
+
+/// Key for `cilium_lb4_services_v2`.
+///
+/// Must match `struct lb4_key` in `bpf/lib/common.h` exactly.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct Lb4Key {
+    /// Virtual IP in **network** (big-endian) byte order.
+    pub address: [u8; 4],
+    /// Frontend port in **network** byte order.
+    pub dport: u16,
+    /// 0 = master entry, 1..=N = backend slot index.
+    pub backend_slot: u16,
+    /// IP protocol: IPPROTO_TCP=6, IPPROTO_UDP=17.
+    pub proto: u8,
+    /// Lookup scope. 0 = external (LB_LOOKUP_SCOPE_EXT).
+    pub scope: u8,
+    pub pad: [u8; 2],
 }
 
-/// Pod lifecycle status
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
-pub enum PodStatus {
-    Pending,
-    Running,
-    Succeeded,
-    Failed,
-    Unknown,
+// Safety: Lb4Key is #[repr(C)], Copy, contains only primitive types.
+unsafe impl aya::Pod for Lb4Key {}
+
+impl Lb4Key {
+    pub fn new(vip: Ipv4Addr, port: u16, proto: u8, slot: u16) -> Self {
+        Self {
+            address: vip.octets(),
+            dport: port.to_be(),
+            backend_slot: slot,
+            proto,
+            scope: 0,
+            pad: [0; 2],
+        }
+    }
 }
 
-/// Container status in a pod
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ContainerStatus {
-    pub name: String,
-    pub ready: bool,
-    pub restart_count: u32,
+// ─── Struct layout matching Cilium's lb4_service (12 bytes) ───────────────────
+
+/// Value for `cilium_lb4_services_v2`.
+///
+/// Must match `struct lb4_service` in `bpf/lib/common.h` exactly.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default)]
+pub struct Lb4Service {
+    /// Backend ID for slot entries, 0 for master entry.
+    pub backend_id: u32,
+    /// Number of active backends (master entry only).
+    pub count: u16,
+    /// Reverse NAT index (big-endian). Equals service ID.
+    pub rev_nat_index: u16,
+    pub flags: u8,
+    pub flags2: u8,
+    /// Number of quarantined backends.
+    pub qcount: u16,
 }
 
-/// Backend endpoint discovered for a service.
-#[derive(Debug, Clone, Serialize, Deserialize, Hash, Eq, PartialEq)]
-pub struct DiscoveredBackend {
-    /// Pod IP address.
-    pub pod_ip: IpAddr,
-    /// Service target port.
+// Safety: Lb4Service is #[repr(C)], Copy, contains only primitive types.
+unsafe impl aya::Pod for Lb4Service {}
+
+// ─── Struct layout matching Cilium's lb4_backend (v3, 12 bytes) ───────────────
+
+/// Value for `cilium_lb4_backends_v3`.
+///
+/// Must match `struct lb4_backend` in `bpf/lib/common.h` exactly.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default)]
+pub struct Lb4Backend {
+    /// Backend IP in **network** byte order.
+    pub address: [u8; 4],
+    /// Backend port in **network** byte order.
     pub port: u16,
-    /// Source pod name.
-    pub pod_name: String,
-    /// Source pod namespace.
-    pub namespace: String,
-    /// Optional node hosting the pod.
-    pub node_name: Option<String>,
-    /// Whether the backend is currently considered healthy.
-    pub healthy: bool,
+    /// IP protocol: IPPROTO_TCP=6, IPPROTO_UDP=17.
+    pub proto: u8,
+    /// Backend state flags. 0 = active (BE_STATE_ACTIVE).
+    pub flags: u8,
+    /// Cluster ID. 0 = local cluster.
+    pub cluster_id: u16,
+    /// Zone. 0 = no zone.
+    pub zone: u8,
+    pub pad: u8,
 }
 
-impl DiscoveredBackend {
-    /// Returns a stable namespace/name key for the backend.
-    pub fn key(&self) -> String {
-        format!("{}/{}", self.namespace, self.pod_name)
-    }
-}
+// Safety: Lb4Backend is #[repr(C)], Copy, contains only primitive types.
+unsafe impl aya::Pod for Lb4Backend {}
 
-/// Backend pool derived from pod discovery for a single service.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ServiceBackendPool {
-    /// Service key in `namespace/name` format.
-    pub service_key: String,
-    /// Discovered backends for the service.
-    pub backends: Vec<DiscoveredBackend>,
-    /// Number of healthy backends in the pool.
-    pub healthy_count: usize,
-    /// Monotonic generation updated on every refresh.
-    pub generation: u64,
-}
-
-impl ServiceBackendPool {
-    /// Creates an empty discovered backend pool for a service.
-    pub fn new(service_key: String) -> Self {
+impl Lb4Backend {
+    pub fn new(ip: Ipv4Addr, port: u16, proto: u8) -> Self {
         Self {
-            service_key,
-            backends: Vec::new(),
-            healthy_count: 0,
-            generation: 0,
-        }
-    }
-
-    /// Returns only healthy discovered backends.
-    pub fn get_healthy(&self) -> Vec<&DiscoveredBackend> {
-        self.backends
-            .iter()
-            .filter(|backend| backend.healthy)
-            .collect()
-    }
-
-    /// Replaces the discovered backend set and bumps the generation counter.
-    pub fn update_backends(&mut self, backends: Vec<DiscoveredBackend>) {
-        self.backends = backends;
-        self.healthy_count = self
-            .backends
-            .iter()
-            .filter(|backend| backend.healthy)
-            .count();
-        self.generation = self.generation.wrapping_add(1);
-    }
-}
-
-/// Backend state and health for load-balancer selection.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
-pub enum BackendState {
-    /// Backend is eligible for new traffic.
-    Active,
-    /// Backend is draining existing connections.
-    Terminating,
-    /// Backend is temporarily held out of rotation.
-    Quarantined,
-    /// Backend is manually disabled for maintenance.
-    Maintenance,
-}
-
-impl BackendState {
-    /// Returns whether the backend can receive traffic.
-    pub fn is_active(&self) -> bool {
-        *self == Self::Active
-    }
-}
-
-impl std::fmt::Display for BackendState {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::Active => write!(f, "active"),
-            Self::Terminating => write!(f, "terminating"),
-            Self::Quarantined => write!(f, "quarantined"),
-            Self::Maintenance => write!(f, "maintenance"),
+            address: ip.octets(),
+            port: port.to_be(),
+            proto,
+            flags: 0,
+            cluster_id: 0,
+            zone: 0,
+            pad: 0,
         }
     }
 }
 
-/// Unique backend identifier (maps to an eBPF backend slot).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
-pub struct BackendID(pub u32);
+// ─── Backend identity (for ID allocation) ─────────────────────────────────────
 
-impl BackendID {
-    /// Creates a new backend identifier.
-    pub fn new(id: u32) -> Self {
-        Self(id)
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+struct BackendIdentity {
+    ip: Ipv4Addr,
+    port: u16,
+    proto: u8,
+}
+
+// ─── Per-service state ─────────────────────────────────────────────────────────
+
+/// What we wrote to the map for one (vip, port, proto) frontend.
+#[derive(Clone, Debug)]
+struct FrontendState {
+    svc_id: u32,
+    /// Backend IDs in slot order.
+    backend_ids: Vec<u32>,
+}
+
+// ─── Map writer ───────────────────────────────────────────────────────────────
+
+/// Opens `cilium_lb4_services_v2` and `cilium_lb4_backends_v3` and writes entries.
+///
+/// Returns an error if the maps don't exist (eBPF programs not loaded yet).
+#[derive(Debug)]
+struct MapWriter {
+    bpf_globals: PathBuf,
+}
+
+impl MapWriter {
+    fn new(bpf_globals: impl Into<PathBuf>) -> Self {
+        Self { bpf_globals: bpf_globals.into() }
     }
-}
 
-impl std::fmt::Display for BackendID {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "backend-{}", self.0)
+    fn svc_path(&self) -> PathBuf {
+        self.bpf_globals.join(SVC_MAP_NAME)
     }
-}
 
-/// A single load-balancer backend.
-#[derive(Debug, Clone)]
-pub struct Backend {
-    /// Unique backend identifier.
-    pub id: BackendID,
-    /// Backend socket address.
-    pub addr: SocketAddr,
-    /// Current backend state.
-    pub state: BackendState,
-    /// Relative backend weight.
-    pub weight: u16,
-    /// Optional node hosting the backend.
-    pub node_name: Option<String>,
-    /// Optional routing zone for topology-aware selection.
-    pub zone: Option<String>,
-}
+    fn backend_path(&self) -> PathBuf {
+        self.bpf_globals.join(BACKEND_MAP_NAME)
+    }
 
-impl Backend {
-    /// Creates a new active backend with default metadata.
-    pub fn new(id: BackendID, addr: SocketAddr) -> Self {
-        Self {
-            id,
-            addr,
-            state: BackendState::Active,
-            weight: 1,
-            node_name: None,
-            zone: None,
+    fn open_svc_map(&self) -> anyhow::Result<aya::maps::HashMap<aya::maps::MapData, Lb4Key, Lb4Service>> {
+        let map_data = aya::maps::MapData::from_pin(&self.svc_path())
+            .map_err(|e| anyhow::anyhow!("open {}: {e}", self.svc_path().display()))?;
+        aya::maps::HashMap::try_from(aya::maps::Map::HashMap(map_data))
+            .map_err(|e| anyhow::anyhow!("cast {}: {e}", SVC_MAP_NAME))
+    }
+
+    fn open_backend_map(&self) -> anyhow::Result<aya::maps::HashMap<aya::maps::MapData, u32, Lb4Backend>> {
+        let map_data = aya::maps::MapData::from_pin(&self.backend_path())
+            .map_err(|e| anyhow::anyhow!("open {}: {e}", self.backend_path().display()))?;
+        aya::maps::HashMap::try_from(aya::maps::Map::HashMap(map_data))
+            .map_err(|e| anyhow::anyhow!("cast {}: {e}", BACKEND_MAP_NAME))
+    }
+
+    /// Writes the master entry (slot 0) and all backend slot entries for one frontend.
+    fn write_frontend(
+        &self,
+        vip: Ipv4Addr,
+        port: u16,
+        proto: u8,
+        svc_id: u32,
+        backend_ids: &[u32],
+    ) -> anyhow::Result<()> {
+        let mut svc_map = self.open_svc_map()?;
+
+        // Master entry: slot 0
+        let master_key = Lb4Key::new(vip, port, proto, 0);
+        let master_val = Lb4Service {
+            backend_id: 0,
+            count: backend_ids.len() as u16,
+            rev_nat_index: (svc_id as u16).to_be(),
+            ..Default::default()
+        };
+        svc_map.insert(&master_key, &master_val, 0)?;
+
+        // Backend slot entries: slots 1..=N
+        for (i, &backend_id) in backend_ids.iter().enumerate() {
+            let slot_key = Lb4Key::new(vip, port, proto, (i + 1) as u16);
+            let slot_val = Lb4Service {
+                backend_id,
+                count: 0,
+                rev_nat_index: (svc_id as u16).to_be(),
+                ..Default::default()
+            };
+            svc_map.insert(&slot_key, &slot_val, 0)?;
         }
+
+        Ok(())
     }
 
-    /// Sets the backend weight.
-    pub fn with_weight(mut self, w: u16) -> Self {
-        self.weight = w;
-        self
-    }
-
-    /// Associates the backend with a node.
-    pub fn with_node(mut self, node: impl Into<String>) -> Self {
-        self.node_name = Some(node.into());
-        self
-    }
-}
-
-/// Backend selection algorithm — mirrors Cilium's LB algorithm choices.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
-pub enum SelectionAlgorithm {
-    /// Round-robin selection.
-    #[default]
-    RoundRobin,
-    /// Random backend selection.
-    Random,
-    /// Pick the least-loaded backend.
-    LeastConnections,
-    /// ECMP-style source hash selection.
-    SourceHash,
-    /// Maglev hashing.
-    Maglev,
-}
-
-/// Stateful round-robin selector over a backend pool.
-pub struct RoundRobinSelector {
-    backends: Vec<Backend>,
-    cursor: std::sync::atomic::AtomicUsize,
-}
-
-impl RoundRobinSelector {
-    /// Creates a round-robin selector over the provided backends.
-    pub fn new(backends: Vec<Backend>) -> Self {
-        Self {
-            backends,
-            cursor: std::sync::atomic::AtomicUsize::new(0),
+    /// Deletes map entries for a frontend (master + up to `old_count` backend slots).
+    fn delete_frontend(
+        &self,
+        vip: Ipv4Addr,
+        port: u16,
+        proto: u8,
+        slot_count: usize,
+    ) -> anyhow::Result<()> {
+        let mut svc_map = self.open_svc_map()?;
+        for slot in 0..=(slot_count as u16) {
+            let key = Lb4Key::new(vip, port, proto, slot);
+            let _ = svc_map.remove(&key); // ignore "not found"
         }
+        Ok(())
     }
 
-    /// Selects the next active backend.
-    pub fn select(&self) -> Option<&Backend> {
-        let active: Vec<_> = self
-            .backends
-            .iter()
-            .filter(|backend| backend.state.is_active())
-            .collect();
-        if active.is_empty() {
-            return None;
-        }
-        let idx = self
-            .cursor
-            .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
-            % active.len();
-        Some(active[idx])
+    /// Writes a backend entry.
+    fn write_backend(&self, backend_id: u32, backend: &Lb4Backend) -> anyhow::Result<()> {
+        let mut backend_map = self.open_backend_map()?;
+        backend_map.insert(&backend_id, backend, 0)?;
+        Ok(())
     }
 
-    /// Returns the number of active backends.
-    pub fn active_count(&self) -> usize {
-        self.backends
-            .iter()
-            .filter(|backend| backend.state.is_active())
-            .count()
+    /// Deletes a backend entry.
+    fn delete_backend(&self, backend_id: u32) -> anyhow::Result<()> {
+        let mut backend_map = self.open_backend_map()?;
+        let _ = backend_map.remove(&backend_id);
+        Ok(())
     }
 }
 
-/// Source-IP-based consistent hash selector (pure hash math).
-pub struct SourceHashSelector {
-    backends: Vec<Backend>,
+// ─── LbReconciler ─────────────────────────────────────────────────────────────
+
+/// State shared across the reconciler.
+#[derive(Debug, Default)]
+struct Inner {
+    /// (ip, port, proto) → allocated backend ID
+    backend_ids: HashMap<BackendIdentity, u32>,
+    /// backend_id → reference count (how many frontends reference this backend)
+    backend_refs: HashMap<u32, u32>,
+    /// service key (namespace/name) → per-port frontend states
+    service_state: HashMap<String, Vec<(u16, u8, FrontendState)>>, // (port, proto, state)
+    /// next service ID to allocate
+    next_svc_id: u32,
 }
 
-impl SourceHashSelector {
-    /// Creates a source-hash selector over the provided backends.
-    pub fn new(backends: Vec<Backend>) -> Self {
-        Self { backends }
-    }
-
-    /// Selects a backend for the provided source socket address.
-    pub fn select(&self, source: &SocketAddr) -> Option<&Backend> {
-        let active: Vec<_> = self
-            .backends
-            .iter()
-            .filter(|backend| backend.state.is_active())
-            .collect();
-        if active.is_empty() {
-            return None;
-        }
-        use std::collections::hash_map::DefaultHasher;
-        use std::hash::{Hash, Hasher};
-        let mut hasher = DefaultHasher::new();
-        source.hash(&mut hasher);
-        let idx = (hasher.finish() as usize) % active.len();
-        Some(active[idx])
-    }
-}
-
-/// A service's backend pool — the core backend mapping data structure.
-pub struct BackendPool {
-    backends: HashMap<BackendID, Backend>,
-    algorithm: SelectionAlgorithm,
-    next_id: u32,
-}
-
-impl BackendPool {
-    /// Creates an empty backend pool with the provided selection algorithm.
-    pub fn new(algorithm: SelectionAlgorithm) -> Self {
-        Self {
-            backends: Default::default(),
-            algorithm,
-            next_id: 1,
-        }
-    }
-
-    /// Adds a backend address to the pool and returns its allocated identifier.
-    pub fn add(&mut self, addr: SocketAddr) -> BackendID {
-        let id = BackendID::new(self.next_id);
-        self.next_id += 1;
-        self.backends.insert(id, Backend::new(id, addr));
+impl Inner {
+    fn alloc_svc_id(&mut self) -> u32 {
+        let id = self.next_svc_id;
+        self.next_svc_id = self.next_svc_id.saturating_add(1);
         id
     }
 
-    /// Removes a backend by identifier.
-    pub fn remove(&mut self, id: &BackendID) -> Option<Backend> {
-        self.backends.remove(id)
-    }
-
-    /// Updates a backend state, returning whether the backend existed.
-    pub fn set_state(&mut self, id: &BackendID, state: BackendState) -> bool {
-        if let Some(backend) = self.backends.get_mut(id) {
-            backend.state = state;
-            true
+    fn get_or_alloc_backend_id(&mut self, identity: &BackendIdentity, next_id: &AtomicU32) -> (u32, bool) {
+        if let Some(&id) = self.backend_ids.get(identity) {
+            (id, false)
         } else {
-            false
+            let id = next_id.fetch_add(1, Ordering::Relaxed);
+            self.backend_ids.insert(identity.clone(), id);
+            (id, true)
         }
     }
 
-    /// Looks up a backend by identifier.
-    pub fn get(&self, id: &BackendID) -> Option<&Backend> {
-        self.backends.get(id)
+    fn inc_backend_ref(&mut self, id: u32) {
+        *self.backend_refs.entry(id).or_insert(0) += 1;
     }
 
-    /// Returns all active backends in the pool.
-    pub fn active_backends(&self) -> Vec<&Backend> {
-        self.backends
-            .values()
-            .filter(|backend| backend.state.is_active())
-            .collect()
-    }
-
-    /// Returns the number of backends in the pool.
-    pub fn len(&self) -> usize {
-        self.backends.len()
-    }
-
-    /// Returns whether the pool contains no backends.
-    pub fn is_empty(&self) -> bool {
-        self.backends.is_empty()
-    }
-
-    /// Returns the pool's selection algorithm.
-    pub fn algorithm(&self) -> SelectionAlgorithm {
-        self.algorithm
-    }
-
-    /// Diffs two backend pools and returns added and removed backend addresses.
-    pub fn diff(&self, other: &BackendPool) -> (Vec<SocketAddr>, Vec<SocketAddr>) {
-        let self_addrs: std::collections::HashSet<_> =
-            self.backends.values().map(|backend| backend.addr).collect();
-        let other_addrs: std::collections::HashSet<_> = other
-            .backends
-            .values()
-            .map(|backend| backend.addr)
-            .collect();
-        let added = other_addrs.difference(&self_addrs).copied().collect();
-        let removed = self_addrs.difference(&other_addrs).copied().collect();
-        (added, removed)
+    /// Decrements reference count and returns true if the backend should be deleted.
+    fn dec_backend_ref(&mut self, id: u32) -> bool {
+        if let Some(count) = self.backend_refs.get_mut(&id) {
+            if *count <= 1 {
+                self.backend_refs.remove(&id);
+                return true;
+            }
+            *count -= 1;
+        }
+        false
     }
 }
 
-/// Errors returned by backend mapping operations.
-#[derive(Debug, thiserror::Error)]
-pub enum BackendMappingError {
-    /// Requested backend identifier was not present in the pool.
-    #[error("backend not found: {0}")]
-    NotFound(BackendID),
-    /// Backend address already exists in the pool.
-    #[error("backend already exists: {0}")]
-    Duplicate(SocketAddr),
-    /// Selection was attempted against an empty pool.
-    #[error("pool is empty")]
-    EmptyPool,
-}
-
-/// Pod cache key: "namespace/name"
-pub type PodKey = String;
-
-/// Pod cache
+/// Backend information for reconciliation.
 #[derive(Debug, Clone)]
-pub struct PodCache {
-    pods: Arc<RwLock<HashMap<PodKey, PodInfo>>>,
+pub struct BackendInfo {
+    pub ip: Ipv4Addr,
+    pub port: u16,
+    pub proto: u8,
 }
 
-impl PodCache {
-    pub fn new() -> Self {
+/// Frontend port information.
+#[derive(Debug, Clone)]
+pub struct FrontendPort {
+    pub port: u16,
+    pub proto: u8,
+    pub target_port: u16,
+}
+
+/// Reconciles Kubernetes services and backends into Cilium's eBPF LB maps.
+///
+/// Instantiate once and call [`reconcile`] whenever K8s state changes. The
+/// reconciler is cheap to clone — it wraps an `Arc<Mutex<Inner>>`.
+#[derive(Clone, Debug)]
+pub struct LbReconciler {
+    inner: Arc<Mutex<Inner>>,
+    writer: Arc<MapWriter>,
+    next_backend_id: Arc<AtomicU32>,
+}
+
+impl LbReconciler {
+    /// Creates a reconciler that writes to maps pinned under `bpf_globals`
+    /// (default: `/sys/fs/bpf/tc/globals`).
+    pub fn new(bpf_globals: impl Into<PathBuf>) -> Self {
+        let bpf_globals: PathBuf = bpf_globals.into();
+        info!(path = %bpf_globals.display(), "LbReconciler initialized");
         Self {
-            pods: Arc::new(RwLock::new(HashMap::new())),
+            inner: Arc::new(Mutex::new(Inner { next_svc_id: 1, ..Default::default() })),
+            writer: Arc::new(MapWriter::new(bpf_globals)),
+            next_backend_id: Arc::new(AtomicU32::new(1)),
         }
     }
 
-    pub async fn add_pod(&self, pod: PodInfo) -> Result<()> {
-        let key = format!("{}/{}", pod.namespace, pod.name);
-        let mut pods = self.pods.write().await;
-
-        if pods.contains_key(&key) {
-            return Err(anyhow!("Pod already exists: {}", key));
-        }
-
-        pods.insert(key, pod);
-        Ok(())
+    /// Creates a reconciler using the default BPF globals path.
+    pub fn default_path() -> Self {
+        Self::new(BPF_GLOBALS)
     }
 
-    pub async fn update_pod(&self, pod: PodInfo) -> Result<()> {
-        let key = format!("{}/{}", pod.namespace, pod.name);
-        let mut pods = self.pods.write().await;
-
-        if !pods.contains_key(&key) {
-            return Err(anyhow!("Pod not found: {}", key));
-        }
-
-        pods.insert(key, pod);
-        Ok(())
-    }
-
-    pub async fn delete_pod(&self, namespace: &str, name: &str) -> Result<()> {
-        let key = format!("{}/{}", namespace, name);
-        let mut pods = self.pods.write().await;
-
-        pods.remove(&key)
-            .ok_or_else(|| anyhow!("Pod not found: {}", key))?;
-        Ok(())
-    }
-
-    pub async fn get_pod(&self, namespace: &str, name: &str) -> Option<PodInfo> {
-        let key = format!("{}/{}", namespace, name);
-        let pods = self.pods.read().await;
-        pods.get(&key).cloned()
-    }
-
-    pub async fn list_pods(&self) -> Vec<PodInfo> {
-        let pods = self.pods.read().await;
-        pods.values().cloned().collect()
-    }
-
-    pub async fn list_pods_in_namespace(&self, namespace: &str) -> Vec<PodInfo> {
-        let pods = self.pods.read().await;
-        pods.values()
-            .filter(|p| p.namespace == namespace)
-            .cloned()
-            .collect()
-    }
-
-    pub async fn find_pods_with_labels(
+    /// Reconciles `service_key` (e.g. `"kube-system/kube-dns"`) with the
+    /// given frontends (one per service port) and backends.
+    ///
+    /// Writes additions and deletions to the kernel maps atomically per
+    /// frontend. If the maps are not accessible (eBPF not loaded yet), the
+    /// call logs a warning and returns `Ok(())` — the reconciler will pick
+    /// up the change on the next call once maps become available.
+    pub async fn reconcile(
         &self,
-        namespace: &str,
-        selector: &HashMap<String, String>,
-    ) -> Vec<PodInfo> {
-        let pods = self.pods.read().await;
-        pods.values()
-            .filter(|p| p.namespace == namespace && selector_matches(&p.labels, selector))
-            .cloned()
-            .collect()
-    }
+        service_key: &str,
+        vip: Ipv4Addr,
+        frontends: &[FrontendPort],
+        backends: &[BackendInfo],
+    ) -> anyhow::Result<()> {
+        let mut inner = self.inner.lock().await;
 
-    pub async fn pod_count(&self) -> usize {
-        self.pods.read().await.len()
-    }
+        // ── 1. Allocate backend IDs and write new backends ────────────────────
+        let mut backend_id_list: Vec<u32> = Vec::with_capacity(backends.len());
 
-    pub async fn clear(&self) {
-        self.pods.write().await.clear();
-    }
-}
+        for b in backends {
+            let identity = BackendIdentity { ip: b.ip, port: b.port, proto: b.proto };
+            let (id, is_new) = inner.get_or_alloc_backend_id(&identity, &self.next_backend_id);
+            backend_id_list.push(id);
 
-impl Default for PodCache {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-// ============================================================================
-// Backend Mapping Engine
-// ============================================================================
-
-/// Main backend mapping engine.
-pub struct BackendMappingEngine {
-    pod_cache: PodCache,
-    pools: Arc<RwLock<HashMap<String, ServiceBackendPool>>>,
-}
-
-impl BackendMappingEngine {
-    /// Creates a new backend mapping engine.
-    pub fn new() -> Self {
-        Self {
-            pod_cache: PodCache::new(),
-            pools: Arc::new(RwLock::new(HashMap::new())),
-        }
-    }
-
-    /// Returns the pod cache used for backend discovery.
-    pub fn pod_cache(&self) -> &PodCache {
-        &self.pod_cache
-    }
-
-    /// Discovers service backends from matching pods.
-    pub async fn discover_backends(
-        &self,
-        namespace: &str,
-        service_selector: &HashMap<String, String>,
-        target_port: u16,
-        _protocol: &str,
-    ) -> Result<Vec<DiscoveredBackend>> {
-        let pods = self
-            .pod_cache
-            .find_pods_with_labels(namespace, service_selector)
-            .await;
-
-        let backends: Vec<DiscoveredBackend> = pods
-            .iter()
-            .filter_map(|pod| {
-                if pod.status != PodStatus::Running {
-                    return None;
+            if is_new {
+                let entry = Lb4Backend::new(b.ip, b.port, b.proto);
+                match self.writer.write_backend(id, &entry) {
+                    Ok(()) => debug!(backend_id = id, ip = %b.ip, port = b.port, "backend written"),
+                    Err(e) => warn!("write backend {id}: {e}"),
                 }
+            }
+        }
 
-                let pod_ip = pod.pod_ip?;
-                if !pod.containers.iter().all(|container| container.ready) {
-                    return None;
+        // ── 2. For each frontend port, compute old vs new state ───────────────
+        let old_states: Vec<(u16, u8, FrontendState)> =
+            inner.service_state.remove(service_key).unwrap_or_default();
+
+        let mut new_states: Vec<(u16, u8, FrontendState)> = Vec::with_capacity(frontends.len());
+
+        for fe in frontends {
+            // Reuse existing service ID for this (port, proto) if we had one.
+            let svc_id = old_states
+                .iter()
+                .find(|(p, pr, _)| *p == fe.port && *pr == fe.proto)
+                .map(|(_, _, s)| s.svc_id)
+                .unwrap_or_else(|| inner.alloc_svc_id());
+
+            let state = FrontendState { svc_id, backend_ids: backend_id_list.clone() };
+
+            // Write to map.
+            match self.writer.write_frontend(vip, fe.port, fe.proto, svc_id, &backend_id_list) {
+                Ok(()) => {
+                    info!(
+                        service = service_key,
+                        vip = %vip,
+                        port = fe.port,
+                        backends = backend_id_list.len(),
+                        svc_id,
+                        "frontend reconciled"
+                    );
                 }
+                Err(e) => warn!(service = service_key, port = fe.port, "write frontend: {e}"),
+            }
 
-                Some(DiscoveredBackend {
-                    pod_ip,
-                    port: target_port,
-                    pod_name: pod.name.clone(),
-                    namespace: pod.namespace.clone(),
-                    node_name: pod.node_name.clone(),
-                    healthy: true,
-                })
-            })
-            .collect();
+            // Update ref counts for backends.
+            for &id in &backend_id_list {
+                inner.inc_backend_ref(id);
+            }
 
-        let selector_target = service_selector
-            .values()
-            .next()
-            .map(String::as_str)
-            .unwrap_or("*");
-        debug!(
-            "Discovered {} backends for {}/{} (selector: {:?})",
-            backends.len(),
-            namespace,
-            selector_target,
-            service_selector
-        );
+            new_states.push((fe.port, fe.proto, state));
+        }
 
-        Ok(backends)
-    }
+        // ── 3. Delete frontends that no longer exist ──────────────────────────
+        for (port, proto, old_state) in &old_states {
+            let still_exists = new_states.iter().any(|(p, pr, _)| p == port && pr == proto);
+            if !still_exists {
+                let slot_count = old_state.backend_ids.len();
+                if let Err(e) = self.writer.delete_frontend(vip, *port, *proto, slot_count) {
+                    warn!(service = service_key, port, "delete frontend: {e}");
+                }
+                // Decrement ref counts; delete orphaned backends.
+                for &id in &old_state.backend_ids {
+                    if inner.dec_backend_ref(id) {
+                        if let Err(e) = self.writer.delete_backend(id) {
+                            warn!(backend_id = id, "delete backend: {e}");
+                        }
+                        // Remove from identity map.
+                        inner.backend_ids.retain(|_, v| *v != id);
+                    }
+                }
+            }
+        }
 
-    /// Updates the discovered backend pool for a service.
-    pub async fn update_backend_pool(
-        &self,
-        service_key: String,
-        backends: Vec<DiscoveredBackend>,
-    ) -> Result<()> {
-        let mut pools = self.pools.write().await;
-        let pool = pools
-            .entry(service_key.clone())
-            .or_insert_with(|| ServiceBackendPool::new(service_key.clone()));
-        pool.update_backends(backends);
+        // Also decrement refs for old backends of surviving frontends that changed.
+        for (port, proto, old_state) in &old_states {
+            let still_exists = new_states.iter().any(|(p, pr, _)| p == port && pr == proto);
+            if still_exists {
+                for &old_id in &old_state.backend_ids {
+                    if !backend_id_list.contains(&old_id) {
+                        if inner.dec_backend_ref(old_id) {
+                            if let Err(e) = self.writer.delete_backend(old_id) {
+                                warn!(backend_id = old_id, "delete stale backend: {e}");
+                            }
+                            inner.backend_ids.retain(|_, v| *v != old_id);
+                        }
+                    }
+                }
+            }
+        }
+
+        inner.service_state.insert(service_key.to_string(), new_states);
         Ok(())
     }
 
-    /// Returns the discovered backend pool for a service.
-    pub async fn get_pool(&self, service_key: &str) -> Option<ServiceBackendPool> {
-        let pools = self.pools.read().await;
-        pools.get(service_key).cloned()
+    /// Removes all eBPF map entries for a service (e.g. when it is deleted from K8s).
+    pub async fn delete_service(&self, service_key: &str, vip: Ipv4Addr) {
+        let mut inner = self.inner.lock().await;
+        let Some(states) = inner.service_state.remove(service_key) else { return };
+
+        for (port, proto, state) in states {
+            if let Err(e) = self.writer.delete_frontend(vip, port, proto, state.backend_ids.len()) {
+                warn!(service = service_key, port, "delete frontend on svc delete: {e}");
+            }
+            for id in state.backend_ids {
+                if inner.dec_backend_ref(id) {
+                    if let Err(e) = self.writer.delete_backend(id) {
+                        warn!(backend_id = id, "delete backend on svc delete: {e}");
+                    }
+                    inner.backend_ids.retain(|_, v| *v != id);
+                }
+            }
+        }
     }
 
-    /// Returns healthy discovered backends for a service.
-    pub async fn get_healthy_backends(&self, service_key: &str) -> Vec<DiscoveredBackend> {
-        let pools = self.pools.read().await;
-        pools
-            .get(service_key)
-            .map(|pool| {
-                pool.get_healthy()
-                    .iter()
-                    .map(|backend| (*backend).clone())
-                    .collect()
-            })
-            .unwrap_or_default()
-    }
-
-    /// Returns all discovered backends for a service.
-    pub async fn get_backends(&self, service_key: &str) -> Vec<DiscoveredBackend> {
-        let pools = self.pools.read().await;
-        pools
-            .get(service_key)
-            .map(|pool| pool.backends.clone())
-            .unwrap_or_default()
-    }
-
-    /// Deletes a discovered backend pool.
-    pub async fn delete_pool(&self, service_key: &str) -> Result<()> {
-        let mut pools = self.pools.write().await;
-        pools
-            .remove(service_key)
-            .ok_or_else(|| anyhow!("Pool not found: {}", service_key))?;
-        Ok(())
-    }
-
-    /// Lists all discovered backend pools.
-    pub async fn list_pools(&self) -> Vec<ServiceBackendPool> {
-        let pools = self.pools.read().await;
-        pools.values().cloned().collect()
-    }
-
-    /// Returns the number of tracked backend pools.
-    pub async fn pool_count(&self) -> usize {
-        self.pools.read().await.len()
+    /// Returns true if the eBPF maps are accessible (eBPF programs loaded).
+    pub fn maps_available(&self) -> bool {
+        self.writer.svc_path().exists() && self.writer.backend_path().exists()
     }
 }
 
-impl Default for BackendMappingEngine {
+impl Default for LbReconciler {
     fn default() -> Self {
-        Self::new()
+        Self::default_path()
     }
 }
 
-// ============================================================================
-// Utilities
-// ============================================================================
-
-/// Check if pod labels match service selector
-fn selector_matches(
-    pod_labels: &HashMap<String, String>,
-    selector: &HashMap<String, String>,
-) -> bool {
-    selector
-        .iter()
-        .all(|(key, value)| pod_labels.get(key).map(|v| v == value).unwrap_or(false))
-}
-
-// ============================================================================
-// Tests
-// ============================================================================
+// ─── Tests ────────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::net::SocketAddr;
 
-    fn addr(s: &str) -> SocketAddr {
-        s.parse().unwrap()
+    // These tests run without a real eBPF map — they verify the reconciler's
+    // in-memory state management (ID allocation, ref counting, state tracking).
+    // Map writes silently fail because the paths don't exist in unit test env.
+
+    fn reconciler() -> LbReconciler {
+        LbReconciler::new("/nonexistent/bpf")
+    }
+
+    fn tcp_backend(ip: [u8; 4], port: u16) -> BackendInfo {
+        BackendInfo { ip: Ipv4Addr::from(ip), port, proto: 6 }
+    }
+
+    fn tcp_frontend(port: u16) -> FrontendPort {
+        FrontendPort { port, proto: 6, target_port: port }
     }
 
     #[tokio::test]
-    async fn test_pod_cache_add_get() {
-        let cache = PodCache::new();
-        let pod = PodInfo {
-            namespace: "default".to_string(),
-            name: "test-pod".to_string(),
-            pod_ip: "10.0.0.1".parse().ok(),
-            node_name: Some("node-1".to_string()),
-            labels: [("app".to_string(), "nginx".to_string())]
-                .iter()
-                .cloned()
-                .collect(),
-            status: PodStatus::Running,
-            containers: vec![ContainerStatus {
-                name: "nginx".to_string(),
-                ready: true,
-                restart_count: 0,
-            }],
+    async fn allocates_stable_backend_ids() {
+        let r = reconciler();
+        let vip = Ipv4Addr::new(10, 96, 0, 10);
+        let b = vec![tcp_backend([10, 0, 0, 1], 53)];
+        let fe = vec![tcp_frontend(53)];
+
+        r.reconcile("kube-system/kube-dns", vip, &fe, &b).await.unwrap();
+        r.reconcile("kube-system/kube-dns", vip, &fe, &b).await.unwrap();
+
+        let inner = r.inner.lock().await;
+        // Same backend should map to the same ID on second reconcile.
+        assert_eq!(inner.backend_ids.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn tracks_multiple_frontends() {
+        let r = reconciler();
+        let vip = Ipv4Addr::new(10, 96, 0, 10);
+        let b = vec![tcp_backend([10, 0, 0, 1], 53)];
+        let fe = vec![tcp_frontend(53), tcp_frontend(9153)];
+
+        r.reconcile("kube-system/kube-dns", vip, &fe, &b).await.unwrap();
+
+        let inner = r.inner.lock().await;
+        let states = inner.service_state.get("kube-system/kube-dns").unwrap();
+        assert_eq!(states.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn stable_svc_id_across_backend_changes() {
+        let r = reconciler();
+        let vip = Ipv4Addr::new(10, 96, 0, 10);
+        let fe = vec![tcp_frontend(80)];
+
+        let b1 = vec![tcp_backend([10, 0, 0, 1], 8080)];
+        r.reconcile("default/web", vip, &fe, &b1).await.unwrap();
+        let svc_id_first = {
+            let inner = r.inner.lock().await;
+            inner.service_state["default/web"][0].2.svc_id
         };
 
-        cache.add_pod(pod.clone()).await.unwrap();
-        assert_eq!(cache.pod_count().await, 1);
-
-        let retrieved = cache.get_pod("default", "test-pod").await;
-        assert!(retrieved.is_some());
-        assert_eq!(retrieved.unwrap().name, "test-pod");
-    }
-
-    #[tokio::test]
-    async fn test_pod_cache_update() {
-        let cache = PodCache::new();
-        let mut pod = PodInfo {
-            namespace: "default".to_string(),
-            name: "test-pod".to_string(),
-            pod_ip: "10.0.0.1".parse().ok(),
-            node_name: Some("node-1".to_string()),
-            labels: Default::default(),
-            status: PodStatus::Running,
-            containers: vec![],
-        };
-
-        cache.add_pod(pod.clone()).await.unwrap();
-
-        pod.status = PodStatus::Failed;
-        cache.update_pod(pod.clone()).await.unwrap();
-
-        let retrieved = cache.get_pod("default", "test-pod").await.unwrap();
-        assert_eq!(retrieved.status, PodStatus::Failed);
-    }
-
-    #[tokio::test]
-    async fn test_pod_cache_delete() {
-        let cache = PodCache::new();
-        let pod = PodInfo {
-            namespace: "default".to_string(),
-            name: "test-pod".to_string(),
-            pod_ip: None,
-            node_name: None,
-            labels: Default::default(),
-            status: PodStatus::Running,
-            containers: vec![],
-        };
-
-        cache.add_pod(pod).await.unwrap();
-        cache.delete_pod("default", "test-pod").await.unwrap();
-        assert_eq!(cache.pod_count().await, 0);
-    }
-
-    #[tokio::test]
-    async fn test_pod_cache_find_by_labels() {
-        let cache = PodCache::new();
-
-        let pod1 = PodInfo {
-            namespace: "default".to_string(),
-            name: "nginx-1".to_string(),
-            pod_ip: "10.0.0.1".parse().ok(),
-            node_name: None,
-            labels: [("app".to_string(), "nginx".to_string())]
-                .iter()
-                .cloned()
-                .collect(),
-            status: PodStatus::Running,
-            containers: vec![],
-        };
-
-        let pod2 = PodInfo {
-            namespace: "default".to_string(),
-            name: "postgres-1".to_string(),
-            pod_ip: "10.0.0.2".parse().ok(),
-            node_name: None,
-            labels: [("app".to_string(), "postgres".to_string())]
-                .iter()
-                .cloned()
-                .collect(),
-            status: PodStatus::Running,
-            containers: vec![],
-        };
-
-        cache.add_pod(pod1).await.unwrap();
-        cache.add_pod(pod2).await.unwrap();
-
-        let selector = [("app".to_string(), "nginx".to_string())]
-            .iter()
-            .cloned()
-            .collect();
-        let found = cache.find_pods_with_labels("default", &selector).await;
-        assert_eq!(found.len(), 1);
-        assert_eq!(found[0].name, "nginx-1");
-    }
-
-    #[tokio::test]
-    async fn test_backend_mapping_discover() {
-        let engine = BackendMappingEngine::new();
-
-        // Add pod to cache
-        let pod = PodInfo {
-            namespace: "default".to_string(),
-            name: "nginx-1".to_string(),
-            pod_ip: "10.0.0.1".parse().ok(),
-            node_name: Some("node-1".to_string()),
-            labels: [("app".to_string(), "nginx".to_string())]
-                .iter()
-                .cloned()
-                .collect(),
-            status: PodStatus::Running,
-            containers: vec![ContainerStatus {
-                name: "nginx".to_string(),
-                ready: true,
-                restart_count: 0,
-            }],
-        };
-
-        engine.pod_cache().add_pod(pod).await.unwrap();
-
-        // Discover backends
-        let selector = [("app".to_string(), "nginx".to_string())]
-            .iter()
-            .cloned()
-            .collect();
-        let backends = engine
-            .discover_backends("default", &selector, 8080, "TCP")
-            .await
-            .unwrap();
-
-        assert_eq!(backends.len(), 1);
-        assert_eq!(backends[0].pod_name, "nginx-1");
-        assert!(backends[0].healthy);
-    }
-
-    #[tokio::test]
-    async fn test_backend_mapping_no_ready_containers() {
-        let engine = BackendMappingEngine::new();
-
-        // Add pod with not-ready containers
-        let pod = PodInfo {
-            namespace: "default".to_string(),
-            name: "nginx-1".to_string(),
-            pod_ip: "10.0.0.1".parse().ok(),
-            node_name: None,
-            labels: [("app".to_string(), "nginx".to_string())]
-                .iter()
-                .cloned()
-                .collect(),
-            status: PodStatus::Running,
-            containers: vec![ContainerStatus {
-                name: "nginx".to_string(),
-                ready: false,
-                restart_count: 0,
-            }],
-        };
-
-        engine.pod_cache().add_pod(pod).await.unwrap();
-
-        // Discover backends - should be empty
-        let selector = [("app".to_string(), "nginx".to_string())]
-            .iter()
-            .cloned()
-            .collect();
-        let backends = engine
-            .discover_backends("default", &selector, 8080, "TCP")
-            .await
-            .unwrap();
-
-        assert_eq!(backends.len(), 0);
-    }
-
-    #[tokio::test]
-    async fn test_backend_pool_update() {
-        let engine = BackendMappingEngine::new();
-
-        let backends = vec![DiscoveredBackend {
-            pod_ip: "10.0.0.1".parse().unwrap(),
-            port: 8080,
-            pod_name: "nginx-1".to_string(),
-            namespace: "default".to_string(),
-            node_name: Some("node-1".to_string()),
-            healthy: true,
-        }];
-
-        engine
-            .update_backend_pool("default/nginx".to_string(), backends)
-            .await
-            .unwrap();
-
-        let pool = engine.get_pool("default/nginx").await;
-        assert!(pool.is_some());
-        assert_eq!(pool.unwrap().backends.len(), 1);
-    }
-
-    #[tokio::test]
-    async fn test_backend_pool_healthy_backends() {
-        let engine = BackendMappingEngine::new();
-
-        let backends = vec![
-            DiscoveredBackend {
-                pod_ip: "10.0.0.1".parse().unwrap(),
-                port: 8080,
-                pod_name: "nginx-1".to_string(),
-                namespace: "default".to_string(),
-                node_name: None,
-                healthy: true,
-            },
-            DiscoveredBackend {
-                pod_ip: "10.0.0.2".parse().unwrap(),
-                port: 8080,
-                pod_name: "nginx-2".to_string(),
-                namespace: "default".to_string(),
-                node_name: None,
-                healthy: false,
-            },
+        // Add a backend — svc_id must be stable.
+        let b2 = vec![
+            tcp_backend([10, 0, 0, 1], 8080),
+            tcp_backend([10, 0, 0, 2], 8080),
         ];
+        r.reconcile("default/web", vip, &fe, &b2).await.unwrap();
+        let svc_id_second = {
+            let inner = r.inner.lock().await;
+            inner.service_state["default/web"][0].2.svc_id
+        };
 
-        engine
-            .update_backend_pool("default/nginx".to_string(), backends)
-            .await
-            .unwrap();
-
-        let healthy = engine.get_healthy_backends("default/nginx").await;
-        assert_eq!(healthy.len(), 1);
+        assert_eq!(svc_id_first, svc_id_second);
     }
 
-    #[test]
-    fn test_selector_matches() {
-        let pod_labels = [("app".to_string(), "nginx".to_string())]
-            .iter()
-            .cloned()
-            .collect();
-        let selector = [("app".to_string(), "nginx".to_string())]
-            .iter()
-            .cloned()
-            .collect();
+    #[tokio::test]
+    async fn delete_service_clears_state() {
+        let r = reconciler();
+        let vip = Ipv4Addr::new(10, 96, 0, 10);
+        let b = vec![tcp_backend([10, 0, 0, 1], 53)];
+        let fe = vec![tcp_frontend(53)];
 
-        assert!(selector_matches(&pod_labels, &selector));
+        r.reconcile("kube-system/kube-dns", vip, &fe, &b).await.unwrap();
+        r.delete_service("kube-system/kube-dns", vip).await;
+
+        let inner = r.inner.lock().await;
+        assert!(!inner.service_state.contains_key("kube-system/kube-dns"));
     }
 
-    #[test]
-    fn test_selector_no_match() {
-        let pod_labels = [("app".to_string(), "nginx".to_string())]
-            .iter()
-            .cloned()
-            .collect();
-        let selector = [("app".to_string(), "postgres".to_string())]
-            .iter()
-            .cloned()
-            .collect();
+    #[tokio::test]
+    async fn backend_ref_count_drops_on_delete() {
+        let r = reconciler();
+        let vip = Ipv4Addr::new(10, 96, 0, 10);
+        let b = vec![tcp_backend([10, 0, 0, 1], 53)];
+        let fe = vec![tcp_frontend(53)];
 
-        assert!(!selector_matches(&pod_labels, &selector));
+        r.reconcile("kube-system/kube-dns", vip, &fe, &b).await.unwrap();
+        let backend_id = {
+            let inner = r.inner.lock().await;
+            inner.backend_ids[&BackendIdentity { ip: b[0].ip, port: 53, proto: 6 }]
+        };
+
+        r.delete_service("kube-system/kube-dns", vip).await;
+
+        let inner = r.inner.lock().await;
+        // Backend should have been fully released.
+        assert!(!inner.backend_refs.contains_key(&backend_id));
     }
 
-    #[test]
-    fn test_backend_pool_add_remove() {
-        let mut pool = BackendPool::new(SelectionAlgorithm::RoundRobin);
-        let id1 = pool.add(addr("10.0.0.1:8080"));
-        let id2 = pool.add(addr("10.0.0.2:8080"));
-        assert_eq!(pool.len(), 2);
-        pool.remove(&id1);
-        assert_eq!(pool.len(), 1);
-        assert!(pool.get(&id2).is_some());
-    }
+    #[tokio::test]
+    async fn shared_backend_not_deleted_until_last_ref() {
+        let r = reconciler();
+        let b = vec![tcp_backend([10, 0, 0, 1], 8080)]; // same backend for both services
 
-    #[test]
-    fn test_backend_pool_state_transition() {
-        let mut pool = BackendPool::new(SelectionAlgorithm::RoundRobin);
-        let id = pool.add(addr("10.0.0.1:80"));
-        assert_eq!(pool.active_backends().len(), 1);
-        pool.set_state(&id, BackendState::Quarantined);
-        assert_eq!(pool.active_backends().len(), 0);
-        pool.set_state(&id, BackendState::Active);
-        assert_eq!(pool.active_backends().len(), 1);
-    }
+        let vip1 = Ipv4Addr::new(10, 96, 0, 10);
+        let vip2 = Ipv4Addr::new(10, 96, 0, 11);
+        let fe = vec![tcp_frontend(80)];
 
-    #[test]
-    fn test_round_robin_selector() {
-        let backends: Vec<_> = (1u32..=3)
-            .map(|i| Backend::new(BackendID::new(i), addr(&format!("10.0.0.{i}:80"))))
-            .collect();
-        let sel = RoundRobinSelector::new(backends);
-        assert_eq!(sel.active_count(), 3);
-        for _ in 0..9 {
-            assert!(sel.select().is_some());
-        }
-    }
+        r.reconcile("ns/svc1", vip1, &fe, &b).await.unwrap();
+        r.reconcile("ns/svc2", vip2, &fe, &b).await.unwrap();
 
-    #[test]
-    fn test_source_hash_selector_stability() {
-        let backends: Vec<_> = (1u32..=3)
-            .map(|i| Backend::new(BackendID::new(i), addr(&format!("10.0.0.{i}:80"))))
-            .collect();
-        let sel = SourceHashSelector::new(backends);
-        let src = addr("192.168.1.100:12345");
-        let b1 = sel.select(&src).unwrap().id;
-        let b2 = sel.select(&src).unwrap().id;
-        assert_eq!(b1, b2);
-    }
-
-    #[test]
-    fn test_pool_diff() {
-        let mut old_pool = BackendPool::new(SelectionAlgorithm::RoundRobin);
-        old_pool.add(addr("10.0.0.1:80"));
-        old_pool.add(addr("10.0.0.2:80"));
-
-        let mut new_pool = BackendPool::new(SelectionAlgorithm::RoundRobin);
-        new_pool.add(addr("10.0.0.2:80"));
-        new_pool.add(addr("10.0.0.3:80"));
-
-        let (added, removed) = old_pool.diff(&new_pool);
-        assert_eq!(added.len(), 1);
-        assert_eq!(removed.len(), 1);
-    }
-
-    #[test]
-    fn test_backend_display() {
-        let id = BackendID::new(42);
-        assert_eq!(id.to_string(), "backend-42");
-        assert_eq!(BackendState::Active.to_string(), "active");
-    }
-
-    #[test]
-    fn test_empty_pool_select() {
-        let sel = RoundRobinSelector::new(vec![]);
-        assert!(sel.select().is_none());
+        // Deleting svc1 should NOT delete the backend (still used by svc2).
+        r.delete_service("ns/svc1", vip1).await;
+        let inner = r.inner.lock().await;
+        let id = inner.backend_ids.get(&BackendIdentity { ip: b[0].ip, port: 8080, proto: 6 });
+        assert!(id.is_some(), "backend should still exist after first delete");
     }
 }

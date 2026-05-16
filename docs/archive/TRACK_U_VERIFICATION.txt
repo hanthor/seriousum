@@ -238,7 +238,7 @@ CODE QUALITY METRICS
 TRACKED MODULES
 ================================================================================
 
-Module Path: /var/home/james/dev/seriousum/crates/cli/src/
+Module Path: ~/dev/seriousum/crates/cli/src/
 
 Files:
   ✅ lib.rs                 (1,421 LOC) - Main CLI and integration

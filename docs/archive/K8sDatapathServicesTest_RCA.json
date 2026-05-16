@@ -1,7 +1,7 @@
 {
   "analysis_timestamp": "2026-05-11T16:48:30+05:30",
   "test_name": "K8sDatapathServicesTest",
-  "test_cluster_kubeconfig": "/var/home/james/dev/seriousum/target/cilium-kind/kind.kubeconfig",
+  "test_cluster_kubeconfig": "~/dev/seriousum/target/cilium-kind/kind.kubeconfig",
   "root_cause_summary": "CRITICAL: Cilium agent (CNI plugin) failed to start, preventing all pod networking. The test failed at cluster bootstrap stage before any service-level testing could occur.",
   "severity": "CRITICAL",
   "blocking_issue": true,

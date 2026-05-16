@@ -1,16 +1,16 @@
 ---
 name: cilium-porting
 description: Port a Cilium Go package to Rust. Use when assigned a Track issue (A–X) from the seriousum porting roadmap (GitHub issue #46). Provides step-by-step porting workflow, Go→Rust translation patterns, Cilium-specific idioms, and test validation instructions. Triggers on any task mentioning "port", "Track [A-X]", a pkg/* Go path, or a crates/* target.
-compatibility: Requires /var/home/james/dev/cilium (Go source) and /var/home/james/dev/seriousum (Rust workspace). rustc 1.95+, cargo, kind, kubectl, helm.
+compatibility: Requires ~/dev/cilium (Go source) and ~/dev/seriousum (Rust workspace). rustc 1.95+, cargo, kind, kubectl, helm.
 ---
 
 # Cilium Porting Skill
 
 ## Paths
 
-- Go source root: `/var/home/james/dev/cilium`
-- Rust workspace:  `/var/home/james/dev/seriousum`
-- Porting guide:   `/var/home/james/dev/seriousum/PORTING.md`
+- Go source root: `~/dev/cilium`
+- Rust workspace:  `~/dev/seriousum`
+- Porting guide:   `~/dev/seriousum/PORTING.md`
 - Track issues:    https://github.com/hanthor/seriousum/issues (see #46 for map)
 
 ---
@@ -19,7 +19,7 @@ compatibility: Requires /var/home/james/dev/cilium (Go source) and /var/home/jam
 
 ```bash
 # Read every non-test .go file in the target package
-find /var/home/james/dev/cilium/<pkg> -name "*.go" ! -name "*_test.go" | sort
+find ~/dev/cilium/<pkg> -name "*.go" ! -name "*_test.go" | sort
 ```
 
 For each file:
@@ -75,7 +75,7 @@ For each file:
 ## Step 3 — Set up the target crate
 
 ```bash
-cd /var/home/james/dev/seriousum
+cd ~/dev/seriousum
 
 # Check what's already scaffolded
 cat crates/<crate>/src/lib.rs
@@ -178,7 +178,7 @@ fn test_bpf_map_real() { ... }
 ## Step 6 — Verify compilation and tests
 
 ```bash
-cd /var/home/james/dev/seriousum
+cd ~/dev/seriousum
 
 # Check only the target crate (fast)
 cargo check -p <crate-name>
@@ -208,7 +208,7 @@ Use the `cilium-test` skill to validate against the real Cilium test harness:
 
 Or manually:
 ```bash
-cd /var/home/james/dev/seriousum
+cd ~/dev/seriousum
 ./scripts/run-cilium-kind-test.sh --focus "<FocusForThisTrack>" --timeout 45m
 ```
 
@@ -228,7 +228,7 @@ Focus groups per track:
 ## Step 8 — Open a PR
 
 ```bash
-cd /var/home/james/dev/seriousum
+cd ~/dev/seriousum
 
 # Create branch named after the track
 git checkout -b port/track-<letter>-<name>

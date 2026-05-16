@@ -1,99 +1,57 @@
-//! Minimal Track I implementation: sync discovered service backends to eBPF maps
-//! 
-//! This module provides basic service backend map synchronization for DNS and L7 support.
-//! It's a pragmatic stub implementation that tracks service/backend changes.
+//! Track I: daemon-side LB reconciler shim.
+//!
+//! Wraps [`backend_mapping::LbReconciler`] so that `runtime.rs` can call a
+//! single async method whenever Kubernetes services or endpoint slices change.
 
-use std::collections::HashMap;
 use std::net::Ipv4Addr;
+use backend_mapping::{BackendInfo, FrontendPort, LbReconciler};
+use tracing::warn;
 
-/// Backend discovery tracker
-#[derive(Debug, Default)]
-pub struct BackendSyncer {
-    /// Cached backends: (service_key) -> [(backend_ip, backend_port, protocol)]
-    synced_backends: HashMap<String, Vec<(u32, u16, u8)>>,
-}
+pub use backend_mapping::LbReconciler as BackendSyncer;
 
-impl BackendSyncer {
-    pub fn new() -> Self {
-        Self {
-            synced_backends: HashMap::new(),
-        }
-    }
+/// Convenience shim called from `CompatState::upsert_endpoint_slice` and
+/// `CompatState::upsert_endpoints`.
+///
+/// Converts the daemon's internal `CompatService` and `CompatBackend` types
+/// into the types expected by [`LbReconciler::reconcile`] and fires the
+/// reconciler on a spawned Tokio task so callers don't have to be async.
+pub fn reconcile_service(
+    reconciler: &LbReconciler,
+    service_key: &str,
+    cluster_ip: Option<Ipv4Addr>,
+    frontends: Vec<(u16, u8)>,    // (port, proto)
+    backends: Vec<(Ipv4Addr, u16, u8)>, // (ip, port, proto)
+) {
+    let Some(vip) = cluster_ip else {
+        return; // headless service — nothing to reconcile
+    };
 
-    /// Sync backends for a service
-    /// Returns true if backends changed
-    pub fn sync_backends(
-        &mut self,
-        service_key: &str,
-        backends: &[(Ipv4Addr, u16, &str)],
-    ) -> bool {
-        let new_backends: Vec<_> = backends
-            .iter()
-            .map(|(ip, port, protocol)| {
-                (
-                    u32::from_be_bytes(ip.octets()),
-                    *port,
-                    protocol_to_u8(protocol),
-                )
-            })
-            .collect();
+    let reconciler = reconciler.clone();
+    let service_key = service_key.to_string();
 
-        let old = self.synced_backends.get(service_key).cloned();
-        let changed = old.as_ref() != Some(&new_backends);
+    let fe: Vec<FrontendPort> = frontends
+        .into_iter()
+        .map(|(port, proto)| FrontendPort { port, proto, target_port: port })
+        .collect();
 
-        if changed {
-            self.synced_backends
-                .insert(service_key.to_string(), new_backends);
-            // TODO: Actually write to eBPF maps here
-            tracing::debug!(
+    let be: Vec<BackendInfo> = backends
+        .into_iter()
+        .map(|(ip, port, proto)| BackendInfo { ip, port, proto })
+        .collect();
+
+    tokio::spawn(async move {
+        if !reconciler.maps_available() {
+            warn!(
                 service = service_key,
-                backend_count = old.as_ref().map(|b| b.len()).unwrap_or(0),
-                new_count = self.synced_backends[service_key].len(),
-                "backends synced"
+                svc_map = backend_mapping::SVC_MAP_NAME,
+                backend_map = backend_mapping::BACKEND_MAP_NAME,
+                "eBPF LB maps not yet available — will retry on next endpoint update"
             );
+            return;
         }
 
-        changed
-    }
-}
-
-fn protocol_to_u8(protocol: &str) -> u8 {
-    match protocol {
-        "TCP" => 6,
-        "UDP" => 17,
-        "SCTP" => 132,
-        _ => 0,
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_backend_syncer_detects_changes() {
-        let mut syncer = BackendSyncer::new();
-        let backends = vec![(Ipv4Addr::new(10, 0, 0, 1), 8080u16, "TCP")];
-
-        // First sync should be detected as change
-        assert!(syncer.sync_backends("test/service", &backends));
-
-        // Same backends should not be detected as change
-        assert!(!syncer.sync_backends("test/service", &backends));
-
-        // Different backends should be detected as change
-        let new_backends = vec![
-            (Ipv4Addr::new(10, 0, 0, 1), 8080u16, "TCP"),
-            (Ipv4Addr::new(10, 0, 0, 2), 8080u16, "TCP"),
-        ];
-        assert!(syncer.sync_backends("test/service", &new_backends));
-    }
-
-    #[test]
-    fn test_protocol_conversion() {
-        assert_eq!(protocol_to_u8("TCP"), 6);
-        assert_eq!(protocol_to_u8("UDP"), 17);
-        assert_eq!(protocol_to_u8("SCTP"), 132);
-        assert_eq!(protocol_to_u8("UNKNOWN"), 0);
-    }
+        if let Err(e) = reconciler.reconcile(&service_key, vip, &fe, &be).await {
+            warn!(service = service_key, "LB reconcile failed: {e}");
+        }
+    });
 }

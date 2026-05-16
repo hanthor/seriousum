@@ -176,37 +176,37 @@ Full report:
 <!-- BENCHMARK_START -->
 ## 📊 Benchmarks
 
-> Last run: **2026-05-12 05:47 UTC** · commit `ecd9499`
+> Last run: **2026-05-16 07:48 UTC** · commit `aaf891e`
 > Published comparison report: [docs/generated/BENCHMARKS.md](docs/generated/BENCHMARKS.md)
 
 | Metric | Seriousum | Cilium | Relative |
 |---|---:|---:|---:|
-| Agent binary size | **2725 KB** | 126612 KB | -97.8% |
-| Selector match hit | **36.87 ns** | 4.14 ns | 8.91x |
-| Selector match miss | **12.77 ns** | 4.11 ns | 3.11x |
-| Policy resolve no-match | **25.07 µs** | 1.32 ms | 0.02x |
-| IP allocator hot path | **139.66 ns** | 381.80 ns | 0.37x |
-| ServiceName construction | **21.07 ns** | 33.44 ns | 0.63x |
-| FQDN lookup | **46.34 ns** | 3.29 µs | 0.01x |
-| FQDN JSON marshal 100 | **2.90 µs** | 136.36 µs | 0.02x |
+| Agent binary size | **2725 KB** | 126686 KB | -97.8% |
+| Selector match hit | **35.82 ns** | 4.13 ns | 8.67x |
+| Selector match miss | **11.48 ns** | 4.12 ns | 2.79x |
+| Policy resolve no-match | **14.50 µs** | 1.36 ms | 0.01x |
+| IP allocator hot path | **140.96 ns** | 345.60 ns | 0.41x |
+| ServiceName construction | **24.01 ns** | 32.91 ns | 0.73x |
+| FQDN lookup | **51.91 ns** | 3.23 µs | 0.02x |
+| FQDN JSON marshal 100 | **3.23 µs** | 150.20 µs | 0.02x |
 
 ### Seriousum micro-benchmarks
 
 | Benchmark | Median |
 |---|---:|
-| LB round-robin (8 backends) | 4.10 ns |
-| LB consistent hash (8 backends) | 7.02 ns |
-| Policy eval (1 policy) | 5.59 µs |
-| Policy eval (100 policies) | 11.54 µs |
-| Selector match (hit) | 36.87 ns |
-| Selector match (miss) | 12.77 ns |
-| IPAM alloc warm pool | 139.66 ns |
-| IPAM alloc + release ×1000 | 3.17 ms |
-| ServiceName display | 35.03 ns |
-| Load balancer upsert 1 | 1.58 µs |
-| Load balancer upsert 100 | 29.21 µs |
-| FQDN update | 184.01 ns |
-| FQDN selector string | 64.63 ns |
+| LB round-robin (8 backends) | N/A |
+| LB consistent hash (8 backends) | N/A |
+| Policy eval (1 policy) | 286.86 ns |
+| Policy eval (100 policies) | 31.70 µs |
+| Selector match (hit) | 35.82 ns |
+| Selector match (miss) | 11.48 ns |
+| IPAM alloc warm pool | 140.96 ns |
+| IPAM alloc + release ×1000 | 3.11 ms |
+| ServiceName display | 34.52 ns |
+| Load balancer upsert 1 | N/A |
+| Load balancer upsert 100 | N/A |
+| FQDN update | 137.46 ns |
+| FQDN selector string | 64.25 ns |
 
 > System startup / memory / CPU status: **pending-kind-capable-runner**
 

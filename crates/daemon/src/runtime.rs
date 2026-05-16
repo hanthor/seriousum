@@ -21,7 +21,7 @@ use tokio_util::sync::CancellationToken;
 use tracing::{error, info, warn};
 
 use crate::health::{SharedHealth, new_health, serve, set_ready, set_stopping};
-use crate::loadbalancer::BackendSyncer;
+use crate::loadbalancer::{reconcile_service, BackendSyncer};
 use crate::{DaemonConfig, DaemonPhase, DaemonStatus};
 
 const CILIUM_SOCK_FILE: &str = "cilium.sock";
@@ -102,7 +102,7 @@ impl CompatState {
             endpoints: HashMap::new(),
             services: HashMap::new(),
             service_backends: HashMap::new(),
-            backend_syncer: BackendSyncer::new(),
+            backend_syncer: BackendSyncer::default_path(),
         }
     }
 
@@ -314,13 +314,19 @@ impl CompatState {
         if let Some(service) = self.services.get_mut(&key) {
             service.backends = backends.clone();
         }
-        
-        // Sync backends to load balancer maps
-        let backend_tuples: Vec<_> = backends
+
+        // Reconcile into eBPF LB maps.
+        let cluster_ip = self.services.get(&key).and_then(|s| s.cluster_ip);
+        let frontends: Vec<(u16, u8)> = self
+            .services
+            .get(&key)
+            .map(|s| s.ports.iter().map(|p| (p.port, protocol_to_u8(&p.protocol))).collect())
+            .unwrap_or_default();
+        let be_tuples: Vec<(Ipv4Addr, u16, u8)> = backends
             .iter()
-            .map(|b| (b.ip, b.port, b.protocol.as_str()))
+            .map(|b| (b.ip, b.port, protocol_to_u8(&b.protocol)))
             .collect();
-        self.backend_syncer.sync_backends(&key, &backend_tuples);
+        reconcile_service(&self.backend_syncer, &key, cluster_ip, frontends, be_tuples);
     }
 
     fn upsert_endpoints(&mut self, endpoints: &K8sEndpoints) {
@@ -380,13 +386,19 @@ impl CompatState {
         if let Some(service) = self.services.get_mut(&key) {
             service.backends = backends.clone();
         }
-        
-        // Sync backends to load balancer maps
-        let backend_tuples: Vec<_> = backends
+
+        // Reconcile into eBPF LB maps.
+        let cluster_ip = self.services.get(&key).and_then(|s| s.cluster_ip);
+        let frontends: Vec<(u16, u8)> = self
+            .services
+            .get(&key)
+            .map(|s| s.ports.iter().map(|p| (p.port, protocol_to_u8(&p.protocol))).collect())
+            .unwrap_or_default();
+        let be_tuples: Vec<(Ipv4Addr, u16, u8)> = backends
             .iter()
-            .map(|b| (b.ip, b.port, b.protocol.as_str()))
+            .map(|b| (b.ip, b.port, protocol_to_u8(&b.protocol)))
             .collect();
-        self.backend_syncer.sync_backends(&key, &backend_tuples);
+        reconcile_service(&self.backend_syncer, &key, cluster_ip, frontends, be_tuples);
     }
 
     fn allocate_endpoint_id(&mut self) -> i64 {
@@ -1271,6 +1283,14 @@ fn backend_matches_service_port(
 
 fn port_protocol(protocol: Option<&String>) -> String {
     protocol.cloned().unwrap_or_else(|| "TCP".to_string())
+}
+
+fn protocol_to_u8(protocol: &str) -> u8 {
+    match protocol {
+        "UDP" => 17,
+        "SCTP" => 132,
+        _ => 6, // TCP and anything else
+    }
 }
 
 fn compat_target_port(target_port: Option<&IntOrString>) -> Option<CompatTargetPort> {

@@ -147,14 +147,14 @@ bash scripts/run-cilium-kind-test.sh \
 ### Requirements
 
 - Linux host with kind/Docker support
-- Upstream Cilium checkout at `/var/home/james/dev/cilium`
+- Upstream Cilium checkout at `~/dev/cilium`
 - 8+ GB RAM, 4+ CPU cores
 - 45 minutes per focus group
 - ~8 hours for all 11 groups
 
 ### Test harness source
 
-- Upstream: `/var/home/james/dev/cilium/test/ginkgo`
+- Upstream: `~/dev/cilium/test/ginkgo`
 - Test suites: Unmodified upstream code
 - No Seriousum-specific patches
 - Full compatibility validation

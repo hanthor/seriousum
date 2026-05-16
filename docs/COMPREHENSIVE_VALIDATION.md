@@ -158,7 +158,7 @@ When eBPF datapath tries to load-balance to the service, it can't find the backe
 ### Reproducibility
 Commands to re-run validation:
 ```bash
-cd /var/home/james/dev/seriousum
+cd ~/dev/seriousum
 
 # Build release binaries
 cargo build --release --locked
@@ -172,7 +172,7 @@ docker build -f images/cilium-agent.Dockerfile -t seriousum-agent:dev .
   --timeout 30m
 
 # View results
-cat /var/home/james/dev/cilium/test/k8s-1.33.xml
+cat ~/dev/cilium/test/k8s-1.33.xml
 ```
 
 ## Sign-Off

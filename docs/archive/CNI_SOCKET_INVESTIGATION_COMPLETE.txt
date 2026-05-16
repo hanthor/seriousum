@@ -227,7 +227,7 @@ DIAGNOSTIC SCRIPT
 
 When cluster is running, execute comprehensive diagnosis:
 
-  cd /var/home/james/dev/seriousum
+  cd ~/dev/seriousum
   bash scripts/diagnose-cni-socket-timing.sh
   
   This will generate: cni-socket-timing-report.txt

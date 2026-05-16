@@ -197,7 +197,7 @@ Recommended Actions:
      - /tmp/pi-worktree-61b43c9a-0/crates/datapath/src/lib.rs (681 LOC)
 
   2. Merge to main:
-     - Apply implementation to /var/home/james/dev/seriousum/crates/datapath/
+     - Apply implementation to ~/dev/seriousum/crates/datapath/
      - Run cargo test --workspace
      - Commit and push
 

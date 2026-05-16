@@ -208,18 +208,18 @@ just test-parallel  # Run 3 focus groups simultaneously
 
 ## Go source reference
 
-The upstream Go source is at `/var/home/james/dev/cilium`.  
+The upstream Go source is at `~/dev/cilium`.  
 Always read it before implementing a type — behaviour must match exactly.
 
 ```bash
 # Find Go source for a concept
-grep -r "type ServiceID" /var/home/james/dev/cilium/pkg --include="*.go" -l
+grep -r "type ServiceID" ~/dev/cilium/pkg --include="*.go" -l
 
 # Read a package
-ls /var/home/james/dev/cilium/pkg/loadbalancer/
+ls ~/dev/cilium/pkg/loadbalancer/
 
 # Count LOC in a package
-find /var/home/james/dev/cilium/pkg/policy -name "*.go" ! -name "*_test.go" | xargs wc -l | tail -1
+find ~/dev/cilium/pkg/policy -name "*.go" ! -name "*_test.go" | xargs wc -l | tail -1
 ```
 
 ---

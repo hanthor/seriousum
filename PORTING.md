@@ -44,7 +44,7 @@ Read `AGENTS.md` first for project layout. Then come back here for the detailed 
 ## 2. Reading Go source
 
 ```bash
-CILIUM=/var/home/james/dev/cilium
+CILIUM=~/dev/cilium
 
 # List all non-test files in a package
 find $CILIUM/pkg/identity -name "*.go" ! -name "*_test.go" | sort
@@ -702,7 +702,7 @@ After implementing a track, validate against the upstream Cilium integration tes
 ### Quick validation (one focus group)
 
 ```bash
-cd /var/home/james/dev/seriousum
+cd ~/dev/seriousum
 
 # 1. Build
 cargo build --release --locked

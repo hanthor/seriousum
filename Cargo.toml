@@ -164,6 +164,18 @@ harness = false
 name = "fqdn"
 harness = false
 
+[[bench]]
+name = "hubble"
+harness = false
+
+[[bench]]
+name = "endpoint"
+harness = false
+
+[[bench]]
+name = "identity"
+harness = false
+
 [dev-dependencies]
 criterion = { version = "0.5", features = ["html_reports", "async_tokio"] }
 tokio = { version = "1", features = ["full"] }
@@ -171,6 +183,11 @@ seriousum-loadbalancer = { path = "crates/loadbalancer" }
 seriousum-policy = { package = "cilium-policy", path = "crates/policy" }
 seriousum-endpoints = { path = "crates/endpoints" }
 seriousum-fqdn = { path = "crates/fqdn" }
+seriousum-hubble = { path = "crates/hubble" }
+seriousum-core = { path = "crates/core" }
+seriousum-endpoint = { package = "cilium-endpoint", path = "crates/endpoint" }
+seriousum-identity = { path = "crates/identity" }
+ipnet = { workspace = true }
 serde_json = { workspace = true }
 
 [workspace.lints.clippy]

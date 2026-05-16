@@ -5,6 +5,7 @@ edition.workspace = true
 
 [dependencies]
 seriousum-core = { workspace = true }
+backend-mapping = { path = "../backend-mapping" }
 seriousum-config = { path = "../config" }
 cilium-kvstore = { path = "../kvstore" }
 cilium-k8s = { path = "../k8s" }

@@ -11,10 +11,10 @@ Validates seriousum Rust code against the upstream Cilium ginkgo test harness.
 ## Paths
 
 ```
-Rust workspace:        /var/home/james/dev/seriousum
-Cilium Go source:      /var/home/james/dev/cilium   (upstream test suite lives here)
-Test runner script:    /var/home/james/dev/seriousum/scripts/run-cilium-kind-test.sh
-Justfile recipes:      /var/home/james/dev/seriousum/justfile
+Rust workspace:        ~/dev/seriousum
+Cilium Go source:      ~/dev/cilium   (upstream test suite lives here)
+Test runner script:    ~/dev/seriousum/scripts/run-cilium-kind-test.sh
+Justfile recipes:      ~/dev/seriousum/justfile
 ```
 
 ---
@@ -22,7 +22,7 @@ Justfile recipes:      /var/home/james/dev/seriousum/justfile
 ## Quick Start — Run a single focus group
 
 ```bash
-cd /var/home/james/dev/seriousum
+cd ~/dev/seriousum
 
 # 1. Build the Rust agent image
 cargo build --release --locked
@@ -69,7 +69,7 @@ The script handles everything: creates a kind cluster, loads the image, installs
 ### Build & load the image
 
 ```bash
-cd /var/home/james/dev/seriousum
+cd ~/dev/seriousum
 
 # Release build (fast image, ~2.6 MB)
 cargo build --release --locked
@@ -125,7 +125,7 @@ kubectl -n kube-system get pods -l app.kubernetes.io/part-of=cilium
 
 ```bash
 # Check out upstream Cilium (or use local copy)
-CILIUM_SRC=/var/home/james/dev/cilium
+CILIUM_SRC=~/dev/cilium
 
 cd $CILIUM_SRC/test
 
@@ -161,7 +161,7 @@ export CILIUM_NO_IPV6_OUTSIDE=true
 ### Run multiple focus groups in parallel (3 clusters)
 
 ```bash
-cd /var/home/james/dev/seriousum
+cd ~/dev/seriousum
 
 # Runs f01, f02, f03 on 3 separate kind clusters simultaneously
 ./scripts/run-parallel-test-suites.sh f01 f02 f03
@@ -259,7 +259,7 @@ After implementing a track, run the corresponding focus group:
 TRACK=F   # e.g. policy engine
 FOCUS="K8sAgentPolicyTest"
 
-cd /var/home/james/dev/seriousum
+cd ~/dev/seriousum
 cargo build --release --locked
 docker build -f images/cilium-agent.Dockerfile -t seriousum-agent:dev .
 
