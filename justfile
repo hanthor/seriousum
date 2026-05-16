@@ -391,13 +391,11 @@ run-existing cluster=KIND_CLUSTER focus='K8sAgentChaosTest' timeout=TEST_TIMEOUT
         | python3 -c "import sys,json; v=json.load(sys.stdin)['serverVersion']; print(v['major']+'.'+v['minor'])" \
         2>/dev/null || echo "1.33")
     export K8S_VERSION="$K8S_VER"
-    CRD_ROOT="{{CILIUM_REPO}}/pkg/k8s/apis/cilium.io/client/crds"
-    if [ -d "$CRD_ROOT" ]; then
-        echo "Preinstalling Cilium CRDs from $CRD_ROOT"
-        while IFS= read -r -d '' crd; do
-            kubectl apply -f "$crd" >/dev/null
-        done < <(find "$CRD_ROOT" -type f -name '*.yaml' -print0 | sort -z)
-    fi
+    # CRDs are now embedded in the Helm chart templates (templates/*-crd.yaml) and will be
+    # installed/reinstalled by Helm on each test run. Do not preinstall via kubectl here,
+    # as that would create CRDs without Helm ownership labels, causing `helm template --validate`
+    # to fail with an ownership conflict when CleanupCiliumComponents hasn't finished deleting
+    # them before Helm runs.
     # Put all image settings into HELM_OVERRIDES so they go through cliOverrideOptions
     # (applied last via maps.Copy — always wins over defaultHelmOptions and kindHelmOverrides).
     # This avoids the env-var→defaultHelmOptions double-suffix bug when env vars from prior
@@ -530,6 +528,8 @@ run-upstream cluster=KIND_CLUSTER focus='K8sAgentChaosTest' timeout=TEST_TIMEOUT
         while IFS= read -r -d '' crd; do
             kubectl apply -f "$crd" >/dev/null
         done < <(find "$CRD_ROOT" -type f -name '*.yaml' -print0 | sort -z)
+        kubectl wait --for=condition=Established crd/ciliumendpoints.cilium.io --timeout=30s >/dev/null 2>&1 || \
+            kubectl apply -f "$CRD_ROOT/v2/ciliumendpoints.yaml" >/dev/null 2>&1 || true
     fi
     # operator.image.override bypasses the Helm chart cloud-suffix logic (same as run-existing).
     # Agent + operator use Never (pre-loaded); hubble-relay uses IfNotPresent (pulls from quay.io).

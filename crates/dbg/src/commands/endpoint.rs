@@ -13,11 +13,19 @@ struct CompatEndpoint {
     status: CompatEndpointStatus,
 }
 
+#[derive(Debug, Clone, Deserialize, Default)]
+struct CompatEndpointIdentity {
+    #[serde(default)]
+    id: i64,
+}
+
 #[derive(Debug, Clone, Deserialize)]
 struct CompatEndpointStatus {
     state: String,
     #[serde(default)]
     networking: CompatEndpointNetworking,
+    #[serde(default)]
+    identity: CompatEndpointIdentity,
 }
 
 #[derive(Debug, Clone, Deserialize, Default)]
@@ -48,11 +56,16 @@ pub fn list_endpoints() -> Result<Vec<Endpoint>> {
                 .iter()
                 .find_map(|address| address.ipv4.as_deref())
                 .and_then(|address| address.parse::<Ipv4Addr>().ok());
+            let identity = if endpoint.status.identity.id != 0 {
+                Some(crate::NumericIdentity(endpoint.status.identity.id as u32))
+            } else {
+                None
+            };
             Ok(Endpoint {
                 id: EndpointId(endpoint.id),
                 ipv4,
                 ipv6: None,
-                identity: None,
+                identity,
                 state: endpoint.status.state,
                 labels: HashMap::new(),
             })

@@ -68,9 +68,8 @@ pub fn list_services() -> Result<Vec<Service>> {
             Ok(Service {
                 id: ServiceId(id),
                 frontend: format!(
-                    "{}:{}/{}",
-                    realized.frontend_address.ip,
-                    realized.frontend_address.port,
+                    "{}/{}",
+                    join_host_port(&realized.frontend_address.ip, realized.frontend_address.port),
                     realized.frontend_address.protocol
                 ),
                 service_type: realized.flags.service_type,
@@ -78,7 +77,7 @@ pub fn list_services() -> Result<Vec<Service>> {
                     .backend_addresses
                     .into_iter()
                     .map(|backend| ServiceBackend {
-                        address: format!("{}:{}", backend.ip, backend.port),
+                        address: join_host_port(&backend.ip, backend.port),
                         port: backend.port,
                         state: if backend.state.is_empty() {
                             "active".to_string()
@@ -98,22 +97,33 @@ pub fn list_services_json_raw() -> Result<String> {
     compat_get("/v1/service")
 }
 
+fn join_host_port(ip: &str, port: u16) -> String {
+    if ip.contains(':') {
+        format!("[{}]:{}", ip, port)
+    } else {
+        format!("{}:{}", ip, port)
+    }
+}
+
 /// Return a synthesized raw JSON map matching `cilium-dbg bpf lb list -o json`.
 pub fn list_lb_json_raw() -> Result<String> {
     let mut map: HashMap<String, Vec<String>> = HashMap::new();
     for service in compat_services()? {
         let realized = service.status.realized;
         let key = format!(
-            "{}:{}/{}",
-            realized.frontend_address.ip,
-            realized.frontend_address.port,
+            "{}/{}",
+            join_host_port(&realized.frontend_address.ip, realized.frontend_address.port),
             realized.frontend_address.protocol.to_ascii_uppercase()
         );
-        let backends = realized
-            .backend_addresses
-            .into_iter()
-            .map(|backend| format!("{}:{}", backend.ip, backend.port))
-            .collect::<Vec<_>>();
+        let backends = if realized.backend_addresses.is_empty() {
+            vec!["0.0.0.0:0".to_string()]
+        } else {
+            realized
+                .backend_addresses
+                .into_iter()
+                .map(|backend| join_host_port(&backend.ip, backend.port))
+                .collect::<Vec<_>>()
+        };
         map.insert(key, backends);
     }
     serde_json::to_string(&map).map_err(Into::into)

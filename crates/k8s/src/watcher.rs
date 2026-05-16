@@ -73,7 +73,85 @@ impl K8sWatcher {
     /// Create a new watcher with an in-cluster or kubeconfig client.
     pub async fn new() -> Result<(Self, tokio::sync::broadcast::Receiver<K8sEvent>)> {
         let client = Client::try_default().await?;
-        Ok(Self::from_client(client))
+        let (watcher, rx) = Self::from_client(client);
+        watcher.ensure_cilium_endpoint_crd().await;
+        Ok((watcher, rx))
+    }
+
+    /// Ensure the CiliumEndpoint CRD exists. Applied idempotently — safe to call
+    /// on every agent startup. If the CRD is already present, this is a no-op.
+    async fn ensure_cilium_endpoint_crd(&self) {
+        use kube::api::{DynamicObject, Patch, PatchParams};
+        use kube::core::ApiResource;
+
+        let crd_ar = ApiResource {
+            group: "apiextensions.k8s.io".to_string(),
+            version: "v1".to_string(),
+            api_version: "apiextensions.k8s.io/v1".to_string(),
+            kind: "CustomResourceDefinition".to_string(),
+            plural: "customresourcedefinitions".to_string(),
+        };
+        let crd_api: kube::Api<DynamicObject> = kube::Api::all_with(self.client.clone(), &crd_ar);
+
+        let crd_body: DynamicObject = match serde_json::from_value(serde_json::json!({
+            "apiVersion": "apiextensions.k8s.io/v1",
+            "kind": "CustomResourceDefinition",
+            "metadata": {
+                "name": "ciliumendpoints.cilium.io",
+                "labels": {"app.kubernetes.io/part-of": "cilium"}
+            },
+            "spec": {
+                "group": "cilium.io",
+                "names": {
+                    "categories": ["cilium","ciliumpolicy"],
+                    "kind": "CiliumEndpoint",
+                    "listKind": "CiliumEndpointList",
+                    "plural": "ciliumendpoints",
+                    "shortNames": ["cep","ciliumep"],
+                    "singular": "ciliumendpoint"
+                },
+                "scope": "Namespaced",
+                "versions": [{
+                    "name": "v2",
+                    "served": true,
+                    "storage": true,
+                    "additionalPrinterColumns": [
+                        {"jsonPath": ".status.id", "name": "Security Identity", "type": "integer"},
+                        {"jsonPath": ".status.state", "name": "Endpoint State", "type": "string"},
+                        {"jsonPath": ".status.networking.addressing[0].ipv4", "name": "IPv4", "type": "string"},
+                        {"jsonPath": ".status.networking.addressing[0].ipv6", "name": "IPv6", "type": "string"}
+                    ],
+                    "schema": {
+                        "openAPIV3Schema": {
+                            "description": "CiliumEndpoint is the status of a Cilium policy rule",
+                            "type": "object",
+                            "properties": {
+                                "apiVersion": {"type": "string"},
+                                "kind": {"type": "string"},
+                                "metadata": {"type": "object"},
+                                "status": {
+                                    "type": "object",
+                                    "x-kubernetes-preserve-unknown-fields": true
+                                }
+                            }
+                        }
+                    },
+                    "subresources": {}
+                }]
+            }
+        })) {
+            Ok(v) => v,
+            Err(e) => { warn!("CRD body build failed: {e}"); return; }
+        };
+
+        match crd_api.patch(
+            "ciliumendpoints.cilium.io",
+            &PatchParams::apply("seriousum-agent").force(),
+            &Patch::Apply(crd_body),
+        ).await {
+            Ok(_) => info!("CiliumEndpoint CRD ensured"),
+            Err(e) => warn!("CiliumEndpoint CRD ensure failed: {e}"),
+        }
     }
 
     /// Create from an existing client.
@@ -344,6 +422,81 @@ impl K8sWatcher {
                 tokio::time::sleep(Duration::from_secs(1)).await;
             }
         })
+    }
+
+    /// Create or update a CiliumEndpoint CR for the given pod.
+    ///
+    /// Cilium's integration tests verify that each managed pod has a CiliumEndpoint
+    /// resource so they can inspect endpoint identity and networking state. This
+    /// creates a minimal CiliumEndpoint with `state: ready` using server-side apply
+    /// for the main object and a separate status subresource patch.
+    pub async fn upsert_cilium_endpoint(
+        &self,
+        namespace: &str,
+        pod_name: &str,
+        pod_ip: &str,
+        endpoint_id: i64,
+    ) -> Result<()> {
+        use kube::api::{DynamicObject, Patch, PatchParams};
+        use kube::core::ApiResource;
+
+        info!(pod = pod_name, namespace, ip = pod_ip, "creating CiliumEndpoint");
+
+        let ar = ApiResource {
+            group: "cilium.io".to_string(),
+            version: "v2".to_string(),
+            api_version: "cilium.io/v2".to_string(),
+            kind: "CiliumEndpoint".to_string(),
+            plural: "ciliumendpoints".to_string(),
+        };
+
+        let api: kube::Api<DynamicObject> =
+            kube::Api::namespaced_with(self.client.clone(), namespace, &ar);
+
+        // The CiliumEndpoint CRD has no status subresource (subresources: {}),
+        // so status can be set directly via SSA on the main resource.
+        let body: DynamicObject = serde_json::from_value(serde_json::json!({
+            "apiVersion": "cilium.io/v2",
+            "kind": "CiliumEndpoint",
+            "metadata": {
+                "name": pod_name,
+                "namespace": namespace,
+            },
+            "status": {
+                "id": endpoint_id,
+                "state": "ready",
+                "networking": {"addressing": [{"ipv4": pod_ip}]},
+                "identity": {"id": endpoint_id, "labels": []}
+            }
+        }))
+        .map_err(|e| WatcherError::Init(e.to_string()))?;
+
+        // Retry up to 10 times with 1-second backoff in case the CRD hasn't propagated yet.
+        let mut last_err = None;
+        for attempt in 0..10u32 {
+            match api.patch(
+                pod_name,
+                &PatchParams::apply("seriousum-agent").force(),
+                &Patch::Apply(body.clone()),
+            ).await {
+                Ok(_) => {
+                    info!(pod = pod_name, namespace, "CiliumEndpoint created");
+                    return Ok(());
+                }
+                Err(e) => {
+                    let msg = e.to_string();
+                    // Retry on "not found" / "page not found" which means CRD not registered yet.
+                    if msg.contains("page not found") || msg.contains("not found") {
+                        debug!(pod = pod_name, attempt, "CRD not ready, retrying");
+                        last_err = Some(e);
+                        tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
+                    } else {
+                        return Err(WatcherError::Client(e));
+                    }
+                }
+            }
+        }
+        Err(WatcherError::Client(last_err.unwrap()))
     }
 }
 

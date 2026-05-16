@@ -53,7 +53,7 @@ struct CompatService {
     id: i64,
     namespace: String,
     name: String,
-    cluster_ip: Option<Ipv4Addr>,
+    cluster_ip: Option<IpAddr>,
     ports: Vec<CompatServicePort>,
     backends: Vec<CompatBackend>,
     service_type: String,
@@ -75,7 +75,7 @@ enum CompatTargetPort {
 
 #[derive(Debug, Clone)]
 struct CompatBackend {
-    ip: Ipv4Addr,
+    ip: IpAddr,
     port: u16,
     protocol: String,
     node_name: Option<String>,
@@ -207,7 +207,7 @@ impl CompatState {
             .cluster_ip
             .as_deref()
             .filter(|cluster_ip| !cluster_ip.is_empty() && *cluster_ip != "None")
-            .and_then(|cluster_ip| cluster_ip.parse::<Ipv4Addr>().ok());
+            .and_then(|cluster_ip| cluster_ip.parse::<IpAddr>().ok());
         let Some(cluster_ip) = cluster_ip else {
             self.services.remove(&key);
             return;
@@ -294,7 +294,7 @@ impl CompatState {
                             .unwrap_or(&[])
                             .iter()
                             .filter_map(|port| {
-                                let ip = address.parse::<Ipv4Addr>().ok()?;
+                                let ip = address.parse::<IpAddr>().ok()?;
                                 let backend_port = u16::try_from(port.port?).ok()?;
                                 Some(CompatBackend {
                                     ip,
@@ -315,8 +315,9 @@ impl CompatState {
             service.backends = backends.clone();
         }
 
-        // Reconcile into eBPF LB maps.
-        let cluster_ip = self.services.get(&key).and_then(|s| s.cluster_ip);
+        // Reconcile into eBPF LB maps (IPv4 only — eBPF lb4 maps don't handle IPv6).
+        let cluster_ip = self.services.get(&key).and_then(|s| s.cluster_ip)
+            .and_then(|ip| if let IpAddr::V4(v4) = ip { Some(v4) } else { None });
         let frontends: Vec<(u16, u8)> = self
             .services
             .get(&key)
@@ -324,7 +325,7 @@ impl CompatState {
             .unwrap_or_default();
         let be_tuples: Vec<(Ipv4Addr, u16, u8)> = backends
             .iter()
-            .map(|b| (b.ip, b.port, protocol_to_u8(&b.protocol)))
+            .filter_map(|b| if let IpAddr::V4(v4) = b.ip { Some((v4, b.port, protocol_to_u8(&b.protocol))) } else { None })
             .collect();
         reconcile_service(&self.backend_syncer, &key, cluster_ip, frontends, be_tuples);
     }
@@ -358,7 +359,7 @@ impl CompatState {
                     .unwrap_or(&[])
                     .iter()
                     .flat_map(|address| {
-                        let Some(ip) = address.ip.parse::<Ipv4Addr>().ok() else {
+                        let Some(ip) = address.ip.parse::<IpAddr>().ok() else {
                             return Vec::new();
                         };
                         subset
@@ -387,8 +388,9 @@ impl CompatState {
             service.backends = backends.clone();
         }
 
-        // Reconcile into eBPF LB maps.
-        let cluster_ip = self.services.get(&key).and_then(|s| s.cluster_ip);
+        // Reconcile into eBPF LB maps (IPv4 only — eBPF lb4 maps don't handle IPv6).
+        let cluster_ip = self.services.get(&key).and_then(|s| s.cluster_ip)
+            .and_then(|ip| if let IpAddr::V4(v4) = ip { Some(v4) } else { None });
         let frontends: Vec<(u16, u8)> = self
             .services
             .get(&key)
@@ -396,7 +398,7 @@ impl CompatState {
             .unwrap_or_default();
         let be_tuples: Vec<(Ipv4Addr, u16, u8)> = backends
             .iter()
-            .map(|b| (b.ip, b.port, protocol_to_u8(&b.protocol)))
+            .filter_map(|b| if let IpAddr::V4(v4) = b.ip { Some((v4, b.port, protocol_to_u8(&b.protocol))) } else { None })
             .collect();
         reconcile_service(&self.backend_syncer, &key, cluster_ip, frontends, be_tuples);
     }
@@ -612,6 +614,7 @@ impl DaemonRuntime {
                     let status = Arc::clone(&self.status);
                     let local_node_name = node_name.clone();
                     let event_cancel = self.cancel.child_token();
+                    let watcher_for_events = Arc::clone(&watcher);
                     tokio::spawn(async move {
                         loop {
                             tokio::select! {
@@ -621,12 +624,32 @@ impl DaemonRuntime {
                                 event = rx.recv() => {
                                     match event {
                                         Ok(cilium_k8s::K8sEvent::PodAdded(pod) | cilium_k8s::K8sEvent::PodUpdated(pod)) => {
-                                            let endpoint_count = {
+                                            let (endpoint_count, ep_info) = {
                                                 let mut compat_state = compat_state.write().await;
                                                 compat_state.upsert_pod(&local_node_name, &pod);
-                                                compat_state.endpoint_count()
+                                                let key = format!(
+                                                    "{}/{}",
+                                                    pod.metadata.namespace.as_deref().unwrap_or("default"),
+                                                    pod.metadata.name.as_deref().unwrap_or("")
+                                                );
+                                                let ep_info = compat_state.endpoints.get(&key).map(|ep| {
+                                                    (ep.namespace.clone(), ep.name.clone(), ep.pod_ip, ep.id)
+                                                });
+                                                (compat_state.endpoint_count(), ep_info)
                                             };
                                             status.write().await.endpoint_count = endpoint_count;
+                                            // Create CiliumEndpoint CR so integration tests can verify
+                                            // endpoint identity via `kubectl get cep`.
+                                            if let Some((ns, name, Some(ip), id)) = ep_info {
+                                                let w = Arc::clone(&watcher_for_events);
+                                                tokio::spawn(async move {
+                                                    if let Err(e) = w.upsert_cilium_endpoint(
+                                                        &ns, &name, &ip.to_string(), id,
+                                                    ).await {
+                                                        warn!(pod = %name, error = %e, "failed to upsert CiliumEndpoint");
+                                                    }
+                                                });
+                                            }
                                         }
                                         Ok(cilium_k8s::K8sEvent::NodeAdded(node) | cilium_k8s::K8sEvent::NodeUpdated(node)) => {
                                             sync_remote_node_route(&node, &local_node_name);
@@ -1075,11 +1098,52 @@ fn next_compat_ipv4(cidr: &str) -> Ipv4Addr {
 }
 
 fn endpoints_response(compat_state: &CompatState) -> String {
-    let endpoints: Vec<_> = compat_state
+    // Pod endpoints.
+    let mut endpoints: Vec<_> = compat_state
         .list_endpoints()
         .into_iter()
         .map(|endpoint| endpoint_json(endpoint, "ready"))
         .collect();
+
+    // Synthetic host endpoint — every Cilium node requires one with identity 1
+    // (ReservedIdentityHost) in "ready" state so integration tests pass their
+    // preflight host-EP regeneration check.
+    let node_ip = compat_state
+        .list_endpoints()
+        .first()
+        .and_then(|ep| {
+            // Approximate node IP: take the pod CIDR's .1 address
+            ep.pod_ip.map(|ip| {
+                let o = ip.octets();
+                Ipv4Addr::new(o[0], o[1], o[2], 1).to_string()
+            })
+        })
+        .unwrap_or_else(|| "0.0.0.0".to_string());
+
+    endpoints.push(json!({
+        "id": 0xFFFF_i64,
+        "status": {
+            "state": "ready",
+            "identity": {
+                "id": 1_i64,  // reserved:host
+                "labels": ["reserved:host"]
+            },
+            "networking": {
+                "addressing": [{"ipv4": node_ip}]
+            },
+            "health": {
+                "bpf": "OK",
+                "connected": true,
+                "overallHealth": "OK",
+                "policy": "OK"
+            },
+            "labels": {
+                "derived": ["reserved:host"],
+                "security-relevant": ["reserved:host"]
+            }
+        }
+    }));
+
     serde_json::to_string(&endpoints).unwrap_or_else(|_| "[]".to_string())
 }
 
@@ -1140,6 +1204,12 @@ fn endpoint_json(endpoint: &CompatEndpoint, state: &str) -> serde_json::Value {
         "id": endpoint.id,
         "status": {
             "state": state,
+            "identity": {
+                // Offset by 10000 to avoid colliding with Cilium reserved identities 1-16
+                // (identity 1 = reserved:host, used by the synthetic host endpoint).
+                "id": endpoint.id.saturating_add(10000),
+                "labels": []
+            },
             "external-identifiers": {
                 "k8s-namespace": endpoint.namespace,
                 "k8s-pod-name": endpoint.name,
@@ -1197,10 +1267,11 @@ fn service_json_for_port(
     port: Option<&CompatServicePort>,
     service_id: i64,
 ) -> serde_json::Value {
+    let ip_str = service.cluster_ip.map(|ip| ip.to_string()).unwrap_or_default();
     let frontend = port
         .map(|port| {
             json!({
-                "ip": service.cluster_ip.map(|ip| ip.to_string()).unwrap_or_default(),
+                "ip": ip_str,
                 "port": port.port,
                 "protocol": protocol_name(&port.protocol),
                 "scope": "external",
@@ -1208,7 +1279,7 @@ fn service_json_for_port(
         })
         .unwrap_or_else(|| {
             json!({
-                "ip": service.cluster_ip.map(|ip| ip.to_string()).unwrap_or_default(),
+                "ip": ip_str,
                 "protocol": "any",
                 "scope": "external",
             })
@@ -1304,10 +1375,7 @@ fn compat_target_port(target_port: Option<&IntOrString>) -> Option<CompatTargetP
 }
 
 fn protocol_name(protocol: &str) -> &'static str {
-    match protocol {
-        "UDP" => "udp",
-        _ => "tcp",
-    }
+    if protocol.eq_ignore_ascii_case("UDP") { "UDP" } else { "TCP" }
 }
 
 fn sync_remote_node_route(node: &Node, local_node_name: &str) {

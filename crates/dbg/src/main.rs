@@ -344,7 +344,7 @@ fn execute_command(cli: &Cli) -> Result<(), Box<dyn std::error::Error>> {
         }
 
         Commands::Endpoint { command } => {
-            execute_endpoint_command(command, is_json)?;
+            execute_endpoint_command(command, is_json, jsonpath_expr)?;
         }
 
         Commands::Policy { command } => {
@@ -647,14 +647,85 @@ fn execute_service_command(
     Ok(())
 }
 
+/// Minimal jsonpath evaluator for endpoint list.
+///
+/// Handles the subset used by Cilium integration tests:
+///   {[?(@.status.identity.id==N)].FIELD}  → field from matching endpoints
+///   {[?(@.id==N)].FIELD}                  → field from endpoint with given ID
+fn apply_endpoint_jsonpath(expr: &str, endpoints: &[serde_json::Value]) -> String {
+    // Strip outer braces and quotes if present: '{...}' → ...
+    let expr = expr.trim_matches(['{', '}', '\'', '"'].as_ref()).trim();
+
+    // Parse [?(@.FILTER_PATH==VALUE)].FIELD_PATH
+    // Example: [?(@.status.identity.id==1)].status.state
+    let filter_start = match expr.find("[?(@.") {
+        Some(i) => i + 5,  // skip "[?(@."
+        None => return String::new(),
+    };
+    let eq_pos = match expr[filter_start..].find("==") {
+        Some(i) => filter_start + i,
+        None => return String::new(),
+    };
+    let filter_path = &expr[filter_start..eq_pos];
+    let after_eq = &expr[eq_pos + 2..];
+    let close_pos = match after_eq.find(")]") {
+        Some(i) => i,
+        None => return String::new(),
+    };
+    let filter_val_str = &after_eq[..close_pos];
+    let filter_val: i64 = match filter_val_str.parse() {
+        Ok(v) => v,
+        Err(_) => return String::new(),
+    };
+    // Field path after )]. — `after_eq` starts after `==`, so:
+    // after_eq = "VALUE)].FIELD_PATH"
+    // We already found close_pos = position of )]  in after_eq.
+    // After )], there's a '.' then the field path.
+    // So field_path starts at: after_eq[close_pos + 2 + 1..] = after_eq[close_pos+3..]
+    let after_bracket = &after_eq[close_pos + 2..]; // skip )]
+    let field_path = after_bracket.trim_start_matches('.');
+
+    let results: Vec<String> = endpoints.iter()
+        .filter(|ep| json_get_i64(ep, filter_path) == Some(filter_val))
+        .filter_map(|ep| json_get_str(ep, field_path))
+        .collect();
+
+    results.join(" ")
+}
+
+fn json_get_i64(val: &serde_json::Value, path: &str) -> Option<i64> {
+    let mut cur = val;
+    for part in path.split('.') {
+        cur = cur.get(part)?;
+    }
+    cur.as_i64()
+}
+
+fn json_get_str(val: &serde_json::Value, path: &str) -> Option<String> {
+    let mut cur = val;
+    for part in path.split('.') {
+        cur = cur.get(part)?;
+    }
+    Some(cur.as_str().unwrap_or(&cur.to_string()).to_string())
+}
+
 fn execute_endpoint_command(
     cmd: &EndpointCommands,
     is_json: bool,
+    jsonpath_expr: Option<&str>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     match cmd {
         EndpointCommands::List => {
             if is_json {
                 write_stdout(&endpoint::list_endpoints_json_raw()?)?;
+            } else if let Some(expr) = jsonpath_expr {
+                // Minimal jsonpath: handle {[?(@.status.identity.id==N)].status.state}
+                // and {[?(@.status.identity.id==N)].id} patterns used by ginkgo tests.
+                let raw = endpoint::list_endpoints_json_raw()?;
+                let endpoints: Vec<serde_json::Value> =
+                    serde_json::from_str(&raw).unwrap_or_default();
+                let result = apply_endpoint_jsonpath(expr, &endpoints);
+                write_stdout(&result)?;
             } else {
                 let endpoints = endpoint::list_endpoints()?;
                 print_endpoints_table(&endpoints);
