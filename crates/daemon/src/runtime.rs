@@ -151,7 +151,8 @@ impl CompatState {
             .status
             .as_ref()
             .and_then(|status| status.pod_ip.as_deref())
-            .and_then(|ip| ip.parse::<Ipv4Addr>().ok());
+            .and_then(|ip| ip.parse::<IpAddr>().ok())
+            .and_then(|ip| if let IpAddr::V4(v4) = ip { Some(v4) } else { None });
         let Some(pod_ip) = pod_ip else {
             self.endpoints.remove(&key);
             return;

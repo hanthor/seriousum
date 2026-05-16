@@ -385,8 +385,20 @@ run-existing cluster=KIND_CLUSTER focus='K8sAgentChaosTest' timeout=TEST_TIMEOUT
     export INTEGRATION_TESTS=true
     # Mirror CI's fresh-cluster assumption: remove orphaned non-Helm objects that
     # can survive interrupted local runs and block chart re-install ownership checks.
+    echo "Cleaning up leftover Cilium resources..."
+    # Delete all Cilium service accounts, config maps, and RBAC resources
     kubectl -n kube-system delete serviceaccount cilium-envoy --ignore-not-found >/dev/null 2>&1 || true
     kubectl -n kube-system delete configmap cilium-envoy-config --ignore-not-found >/dev/null 2>&1 || true
+    # Delete all leftover RBAC resources that may lack Helm labels from previous runs
+    kubectl delete clusterrole -l 'app.kubernetes.io/part-of=cilium' --ignore-not-found >/dev/null 2>&1 || true
+    kubectl delete clusterrolebinding -l 'app.kubernetes.io/part-of=cilium' --ignore-not-found >/dev/null 2>&1 || true
+    kubectl -n kube-system delete role -l 'app.kubernetes.io/part-of=cilium' --ignore-not-found >/dev/null 2>&1 || true
+    kubectl -n kube-system delete rolebinding -l 'app.kubernetes.io/part-of=cilium' --ignore-not-found >/dev/null 2>&1 || true
+    # Delete orphaned roles that lack the cilium label but are known Cilium components
+    kubectl delete clusterrole cilium-operator-ztunnel --ignore-not-found >/dev/null 2>&1 || true
+    kubectl delete clusterrolebinding cilium-operator-ztunnel --ignore-not-found >/dev/null 2>&1 || true
+    kubectl -n kube-system delete role cilium-operator-ztunnel --ignore-not-found >/dev/null 2>&1 || true
+    kubectl -n kube-system delete rolebinding cilium-operator-ztunnel --ignore-not-found >/dev/null 2>&1 || true
     K8S_VER=$(kubectl version -o json 2>/dev/null \
         | python3 -c "import sys,json; v=json.load(sys.stdin)['serverVersion']; print(v['major']+'.'+v['minor'])" \
         2>/dev/null || echo "1.33")
@@ -521,8 +533,19 @@ run-upstream cluster=KIND_CLUSTER focus='K8sAgentChaosTest' timeout=TEST_TIMEOUT
     export INTEGRATION_TESTS=true
     # Remove orphaned non-Helm envoy objects from interrupted local runs; this
     # keeps baseline installs aligned with CI's clean-cluster behavior.
+    echo "Cleaning up leftover Cilium resources..."
     kubectl -n kube-system delete serviceaccount cilium-envoy --ignore-not-found >/dev/null 2>&1 || true
     kubectl -n kube-system delete configmap cilium-envoy-config --ignore-not-found >/dev/null 2>&1 || true
+    # Delete all leftover RBAC resources that may lack Helm labels from previous runs
+    kubectl delete clusterrole -l 'app.kubernetes.io/part-of=cilium' --ignore-not-found >/dev/null 2>&1 || true
+    kubectl delete clusterrolebinding -l 'app.kubernetes.io/part-of=cilium' --ignore-not-found >/dev/null 2>&1 || true
+    kubectl -n kube-system delete role -l 'app.kubernetes.io/part-of=cilium' --ignore-not-found >/dev/null 2>&1 || true
+    kubectl -n kube-system delete rolebinding -l 'app.kubernetes.io/part-of=cilium' --ignore-not-found >/dev/null 2>&1 || true
+    # Delete orphaned roles that lack the cilium label but are known Cilium components
+    kubectl delete clusterrole cilium-operator-ztunnel --ignore-not-found >/dev/null 2>&1 || true
+    kubectl delete clusterrolebinding cilium-operator-ztunnel --ignore-not-found >/dev/null 2>&1 || true
+    kubectl -n kube-system delete role cilium-operator-ztunnel --ignore-not-found >/dev/null 2>&1 || true
+    kubectl -n kube-system delete rolebinding cilium-operator-ztunnel --ignore-not-found >/dev/null 2>&1 || true
     K8S_VER=$(kubectl version -o json 2>/dev/null \
         | python3 -c "import sys,json; v=json.load(sys.stdin)['serverVersion']; print(v['major']+'.'+v['minor'])" \
         2>/dev/null || echo "1.33")
