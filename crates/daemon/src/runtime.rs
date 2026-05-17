@@ -411,6 +411,60 @@ impl CompatState {
         reconcile_service(&self.backend_syncer, &key, cluster_ip, frontends, be_tuples);
     }
 
+    fn delete_service(&mut self, service_key: &str) {
+        // Extract cluster IP and frontends before removing service
+        let cluster_ip = self.services.get(service_key)
+            .and_then(|s| s.cluster_ip)
+            .and_then(|ip| if let IpAddr::V4(v4) = ip { Some(v4) } else { None });
+
+        // Remove from in-memory state
+        self.services.remove(service_key);
+        self.service_backends.remove(service_key);
+
+        // Trigger eBPF reconciliation for cleanup
+        if let Some(vip) = cluster_ip {
+            let reconciler = self.backend_syncer.clone();
+            let service_key = service_key.to_string();
+            tokio::spawn(async move {
+                reconciler.delete_service(&service_key, vip).await;
+            });
+        }
+    }
+
+    fn delete_endpoint_slice(&mut self, service_key: &str) {
+        // Remove from in-memory state
+        self.service_backends.remove(service_key);
+
+        // Reconcile to clear the service if backends are now empty
+        if let Some(service) = self.services.get(service_key) {
+            if let Some(IpAddr::V4(vip)) = service.cluster_ip {
+                let frontends: Vec<(u16, u8)> = service
+                    .ports
+                    .iter()
+                    .map(|p| (p.port, protocol_to_u8(&p.protocol)))
+                    .collect();
+                reconcile_service(&self.backend_syncer, service_key, Some(vip), frontends, vec![]);
+            }
+        }
+    }
+
+    fn delete_endpoints(&mut self, service_key: &str) {
+        // Remove from in-memory state
+        self.service_backends.remove(service_key);
+
+        // Reconcile to clear the service if backends are now empty
+        if let Some(service) = self.services.get(service_key) {
+            if let Some(IpAddr::V4(vip)) = service.cluster_ip {
+                let frontends: Vec<(u16, u8)> = service
+                    .ports
+                    .iter()
+                    .map(|p| (p.port, protocol_to_u8(&p.protocol)))
+                    .collect();
+                reconcile_service(&self.backend_syncer, service_key, Some(vip), frontends, vec![]);
+            }
+        }
+    }
+
     fn allocate_endpoint_id(&mut self) -> i64 {
         let id = self.next_endpoint_id;
         self.next_endpoint_id = self.next_endpoint_id.saturating_add(1);
@@ -672,11 +726,20 @@ impl DaemonRuntime {
                                         Ok(cilium_k8s::K8sEvent::ServiceAdded(service) | cilium_k8s::K8sEvent::ServiceUpdated(service)) => {
                                             compat_state.write().await.upsert_service(&service);
                                         }
+                                        Ok(cilium_k8s::K8sEvent::ServiceDeleted(service_key)) => {
+                                            compat_state.write().await.delete_service(&service_key);
+                                        }
                                         Ok(cilium_k8s::K8sEvent::EndpointsAdded(endpoints) | cilium_k8s::K8sEvent::EndpointsUpdated(endpoints)) => {
                                             compat_state.write().await.upsert_endpoints(&endpoints);
                                         }
+                                        Ok(cilium_k8s::K8sEvent::EndpointsDeleted(service_key)) => {
+                                            compat_state.write().await.delete_endpoints(&service_key);
+                                        }
                                         Ok(cilium_k8s::K8sEvent::EndpointSliceAdded(endpoint_slice) | cilium_k8s::K8sEvent::EndpointSliceUpdated(endpoint_slice)) => {
                                             compat_state.write().await.upsert_endpoint_slice(&endpoint_slice);
+                                        }
+                                        Ok(cilium_k8s::K8sEvent::EndpointSliceDeleted(service_key)) => {
+                                            compat_state.write().await.delete_endpoint_slice(&service_key);
                                         }
                                         Ok(_) => {}
                                         Err(tokio::sync::broadcast::error::RecvError::Lagged(skipped)) => {
