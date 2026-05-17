@@ -5,6 +5,7 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::Mutex;
 
 use ipnet::Ipv4Net;
 use k8s_openapi::api::core::v1::{Endpoints as K8sEndpoints, Node, Pod, Service};
@@ -21,7 +22,7 @@ use tokio_util::sync::CancellationToken;
 use tracing::{debug, error, info, warn};
 
 use crate::health::{SharedHealth, new_health, serve, set_ready, set_stopping};
-use crate::loadbalancer::{reconcile_service, BackendSyncer};
+use crate::loadbalancer::{reconcile_service, BackendSyncer, PendingReconcile};
 use crate::{DaemonConfig, DaemonPhase, DaemonStatus};
 
 const CILIUM_SOCK_FILE: &str = "cilium.sock";
@@ -82,7 +83,7 @@ struct CompatBackend {
     port_name: Option<String>,
 }
 
-#[derive(Debug, Default)]
+#[derive(Debug)]
 struct CompatState {
     node_name: String,
     next_endpoint_id: i64,
@@ -91,6 +92,7 @@ struct CompatState {
     services: HashMap<String, CompatService>,
     service_backends: HashMap<String, Vec<CompatBackend>>,
     backend_syncer: BackendSyncer,
+    pending_reconciles: Arc<Mutex<Vec<PendingReconcile>>>,
 }
 
 impl CompatState {
@@ -103,6 +105,7 @@ impl CompatState {
             services: HashMap::new(),
             service_backends: HashMap::new(),
             backend_syncer: BackendSyncer::default_path(),
+            pending_reconciles: Arc::new(Mutex::new(Vec::new())),
         }
     }
 
@@ -270,7 +273,7 @@ impl CompatState {
             .iter()
             .filter_map(|b| if let IpAddr::V4(v4) = b.ip { Some((v4, b.port, protocol_to_u8(&b.protocol))) } else { None })
             .collect();
-        reconcile_service(&self.backend_syncer, &key, cluster_ip_v4, frontends, be_tuples);
+        reconcile_service(&self.backend_syncer, &key, cluster_ip_v4, frontends, be_tuples, self.pending_reconciles.clone());
     }
 
     fn upsert_endpoint_slice(&mut self, endpoint_slice: &EndpointSlice) {
@@ -347,7 +350,7 @@ impl CompatState {
             .iter()
             .filter_map(|b| if let IpAddr::V4(v4) = b.ip { Some((v4, b.port, protocol_to_u8(&b.protocol))) } else { None })
             .collect();
-        reconcile_service(&self.backend_syncer, &key, cluster_ip, frontends, be_tuples);
+        reconcile_service(&self.backend_syncer, &key, cluster_ip, frontends, be_tuples, self.pending_reconciles.clone());
     }
 
     fn upsert_endpoints(&mut self, endpoints: &K8sEndpoints) {
@@ -420,7 +423,7 @@ impl CompatState {
             .iter()
             .filter_map(|b| if let IpAddr::V4(v4) = b.ip { Some((v4, b.port, protocol_to_u8(&b.protocol))) } else { None })
             .collect();
-        reconcile_service(&self.backend_syncer, &key, cluster_ip, frontends, be_tuples);
+        reconcile_service(&self.backend_syncer, &key, cluster_ip, frontends, be_tuples, self.pending_reconciles.clone());
     }
 
     fn delete_service(&mut self, service_key: &str) {
@@ -455,7 +458,7 @@ impl CompatState {
                     .iter()
                     .map(|p| (p.port, protocol_to_u8(&p.protocol)))
                     .collect();
-                reconcile_service(&self.backend_syncer, service_key, Some(vip), frontends, vec![]);
+                reconcile_service(&self.backend_syncer, service_key, Some(vip), frontends, vec![], self.pending_reconciles.clone());
             }
         }
     }
@@ -472,7 +475,7 @@ impl CompatState {
                     .iter()
                     .map(|p| (p.port, protocol_to_u8(&p.protocol)))
                     .collect();
-                reconcile_service(&self.backend_syncer, service_key, Some(vip), frontends, vec![]);
+                reconcile_service(&self.backend_syncer, service_key, Some(vip), frontends, vec![], self.pending_reconciles.clone());
             }
         }
     }
@@ -487,6 +490,31 @@ impl CompatState {
         let id = self.next_service_id;
         self.next_service_id = self.next_service_id.saturating_add(1);
         id
+    }
+
+    /// Drains and reconciles all pending services that were queued while eBPF maps were unavailable.
+    fn drain_pending_reconciles(&mut self) {
+        let pending = self.pending_reconciles.lock().ok()
+            .and_then(|mut guard| {
+                if guard.is_empty() {
+                    None
+                } else {
+                    Some(guard.drain(..).collect::<Vec<_>>())
+                }
+            })
+            .unwrap_or_default();
+
+        for pending in pending {
+            reconcile_service(
+                &self.backend_syncer,
+                &pending.service_key,
+                pending.cluster_ip,
+                pending.frontends,
+                pending.backends,
+                self.pending_reconciles.clone(),
+            );
+            info!(service = pending.service_key, "reconciled pending service after datapath init");
+        }
     }
 }
 
@@ -822,6 +850,9 @@ impl DaemonRuntime {
 
         if let Err(error) = initialise_datapath(&self.config) {
             warn!(error = %error, "datapath initialisation did not complete");
+        } else {
+            // Drain any pending reconciliations that were queued while eBPF maps were unavailable
+            self.compat_state.write().await.drain_pending_reconciles();
         }
 
         {
