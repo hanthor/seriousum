@@ -1718,7 +1718,9 @@ mod tests {
         let (code, body) =
             compat_response("GET", "/v1/endpoint", &default_addressing, &compat_state);
         assert_eq!(code, 200);
-        assert_eq!(body, "[]");
+        // Expect synthetic host endpoint (id 65535 = 0xFFFF)
+        assert!(body.contains("\"id\":65535"));
+        assert!(body.contains("\"reserved:host\""));
 
         let (code, body) =
             compat_response("PUT", "/v1/endpoint/42", &default_addressing, &compat_state);
@@ -1740,8 +1742,8 @@ mod tests {
         assert_eq!(code, 404);
     }
 
-    #[test]
-    fn test_compat_state_tracks_local_pods_and_services() {
+    #[tokio::test]
+    async fn test_compat_state_tracks_local_pods_and_services() {
         let mut compat_state = CompatState::new("kind-control-plane".to_string());
         let pod = Pod {
             metadata: k8s_openapi::apimachinery::pkg::apis::meta::v1::ObjectMeta {
@@ -1825,13 +1827,13 @@ mod tests {
 
         let services = services_response(&compat_state);
         assert!(services.contains("\"10.96.0.10\""));
-        assert!(services.contains("\"udp\""));
+        assert!(services.contains("\"UDP\""));
         assert!(services.contains("\"10.244.0.53\""));
         assert!(services.contains("\"state\":\"active\""));
     }
 
-    #[test]
-    fn test_compat_state_tracks_service_backends_from_endpoints() {
+    #[tokio::test]
+    async fn test_compat_state_tracks_service_backends_from_endpoints() {
         let mut compat_state = CompatState::new("kind-control-plane".to_string());
         let service = Service {
             metadata: k8s_openapi::apimachinery::pkg::apis::meta::v1::ObjectMeta {
