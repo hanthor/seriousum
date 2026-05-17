@@ -226,7 +226,7 @@ impl CompatState {
             .get(&key)
             .map(|service| service.id)
             .unwrap_or_else(|| self.allocate_service_id());
-        let ports = spec
+        let ports: Vec<CompatServicePort> = spec
             .ports
             .as_deref()
             .unwrap_or(&[])
@@ -245,20 +245,32 @@ impl CompatState {
         let backends = self.service_backends.get(&key).cloned().unwrap_or_default();
 
         self.services.insert(
-            key,
+            key.clone(),
             CompatService {
                 id,
                 namespace: namespace.to_string(),
                 name: name.to_string(),
                 cluster_ip: Some(cluster_ip),
-                ports,
-                backends,
+                ports: ports.clone(),
+                backends: backends.clone(),
                 service_type: spec
                     .type_
                     .clone()
                     .unwrap_or_else(|| "ClusterIP".to_string()),
             },
         );
+
+        // Trigger eBPF reconciliation (idempotent — handles the case where nothing changed).
+        let cluster_ip_v4 = if let IpAddr::V4(v4) = cluster_ip { Some(v4) } else { None };
+        let frontends: Vec<(u16, u8)> = ports
+            .iter()
+            .map(|p| (p.port, protocol_to_u8(&p.protocol)))
+            .collect();
+        let be_tuples: Vec<(Ipv4Addr, u16, u8)> = backends
+            .iter()
+            .filter_map(|b| if let IpAddr::V4(v4) = b.ip { Some((v4, b.port, protocol_to_u8(&b.protocol))) } else { None })
+            .collect();
+        reconcile_service(&self.backend_syncer, &key, cluster_ip_v4, frontends, be_tuples);
     }
 
     fn upsert_endpoint_slice(&mut self, endpoint_slice: &EndpointSlice) {
