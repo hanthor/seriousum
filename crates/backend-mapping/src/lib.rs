@@ -133,6 +133,28 @@ impl Lb4Backend {
     }
 }
 
+// ─── Reverse NAT map (cilium_lb4_reverse_nat) ─────────────────────────────────
+
+/// Key for `cilium_lb4_reverse_nat` — maps ServiceID back to frontend VIP+port.
+/// Size: 2 bytes
+#[repr(C)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct RevNat4Key {
+    pub key: u16,  // ServiceID in network byte order
+}
+unsafe impl aya::Pod for RevNat4Key {}
+
+/// Value for `cilium_lb4_reverse_nat` — frontend VIP + port for return traffic rewriting.
+/// Size: 8 bytes
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default)]
+pub struct RevNat4Value {
+    pub address: [u8; 4],  // frontend VIP in network byte order
+    pub port: u16,          // frontend port in network byte order
+    pub pad: [u8; 2],
+}
+unsafe impl aya::Pod for RevNat4Value {}
+
 // ─── Backend identity (for ID allocation) ─────────────────────────────────────
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
@@ -173,6 +195,10 @@ impl MapWriter {
 
     fn backend_path(&self) -> PathBuf {
         self.bpf_globals.join(BACKEND_MAP_NAME)
+    }
+
+    fn revnat_path(&self) -> PathBuf {
+        self.bpf_globals.join("cilium_lb4_reverse_nat")
     }
 
     fn open_svc_map(&self) -> anyhow::Result<aya::maps::HashMap<aya::maps::MapData, Lb4Key, Lb4Service>> {
@@ -252,6 +278,32 @@ impl MapWriter {
     fn delete_backend(&self, backend_id: u32) -> anyhow::Result<()> {
         let mut backend_map = self.open_backend_map()?;
         let _ = backend_map.remove(&backend_id);
+        Ok(())
+    }
+
+    fn open_revnat_map(&self) -> anyhow::Result<aya::maps::HashMap<aya::maps::MapData, RevNat4Key, RevNat4Value>> {
+        let map_data = aya::maps::MapData::from_pin(&self.revnat_path())
+            .map_err(|e| anyhow::anyhow!("open {}: {e}", self.revnat_path().display()))?;
+        aya::maps::HashMap::try_from(aya::maps::Map::HashMap(map_data))
+            .map_err(|e| anyhow::anyhow!("cast cilium_lb4_reverse_nat: {e}"))
+    }
+
+    fn write_revnat(&self, svc_id: u32, vip: Ipv4Addr, port: u16) -> anyhow::Result<()> {
+        let mut revnat_map = self.open_revnat_map()?;
+        let key = RevNat4Key { key: svc_id.to_be() as u16 };
+        let value = RevNat4Value {
+            address: vip.octets(),
+            port: port.to_be(),
+            pad: [0; 2],
+        };
+        revnat_map.insert(key, value, 0)?;
+        Ok(())
+    }
+
+    fn delete_revnat(&self, svc_id: u32) -> anyhow::Result<()> {
+        let mut revnat_map = self.open_revnat_map()?;
+        let key = RevNat4Key { key: svc_id.to_be() as u16 };
+        let _ = revnat_map.remove(&key);
         Ok(())
     }
 }
@@ -410,6 +462,11 @@ impl LbReconciler {
                         svc_id,
                         "frontend reconciled"
                     );
+
+                    // Write reverse NAT entry for return traffic rewriting.
+                    if let Err(e) = self.writer.write_revnat(svc_id, vip, fe.port) {
+                        warn!(service = service_key, port = fe.port, "write revnat: {e}");
+                    }
                 }
                 Err(e) => warn!(service = service_key, port = fe.port, "write frontend: {e}"),
             }
@@ -473,6 +530,10 @@ impl LbReconciler {
             if let Err(e) = self.writer.delete_frontend(vip, port, proto, state.backend_ids.len()) {
                 warn!(service = service_key, port, "delete frontend on svc delete: {e}");
             }
+            // Delete reverse NAT entry.
+            if let Err(e) = self.writer.delete_revnat(state.svc_id) {
+                warn!(service = service_key, svc_id = state.svc_id, "delete revnat on svc delete: {e}");
+            }
             for id in state.backend_ids {
                 if inner.dec_backend_ref(id) {
                     if let Err(e) = self.writer.delete_backend(id) {
@@ -486,7 +547,7 @@ impl LbReconciler {
 
     /// Returns true if the eBPF maps are accessible (eBPF programs loaded).
     pub fn maps_available(&self) -> bool {
-        self.writer.svc_path().exists() && self.writer.backend_path().exists()
+        self.writer.svc_path().exists() && self.writer.backend_path().exists() && self.writer.revnat_path().exists()
     }
 }
 
