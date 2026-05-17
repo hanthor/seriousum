@@ -18,7 +18,7 @@ use tokio::signal;
 use tokio::signal::unix::{SignalKind, signal as unix_signal};
 use tokio::sync::RwLock;
 use tokio_util::sync::CancellationToken;
-use tracing::{error, info, warn};
+use tracing::{debug, error, info, warn};
 
 use crate::health::{SharedHealth, new_health, serve, set_ready, set_stopping};
 use crate::loadbalancer::{reconcile_service, BackendSyncer};
@@ -138,22 +138,28 @@ impl CompatState {
             .unwrap_or("default");
         let key = format!("{namespace}/{name}");
         let Some(spec) = pod.spec.as_ref() else {
+            debug!(pod = %name, namespace, "pod has no spec");
             self.endpoints.remove(&key);
             return;
         };
-        if spec.host_network.unwrap_or(false) || spec.node_name.as_deref() != Some(local_node_name)
-        {
+        let pod_node = spec.node_name.as_deref();
+        if spec.host_network.unwrap_or(false) {
+            debug!(pod = %name, namespace, "pod uses host network");
+            self.endpoints.remove(&key);
+            return;
+        }
+        if pod_node != Some(local_node_name) {
+            debug!(pod = %name, namespace, pod_node, local_node_name, "pod on different node");
             self.endpoints.remove(&key);
             return;
         }
 
-        let pod_ip = pod
-            .status
-            .as_ref()
-            .and_then(|status| status.pod_ip.as_deref())
+        let pod_ip_str = pod.status.as_ref().and_then(|status| status.pod_ip.as_deref());
+        let pod_ip = pod_ip_str
             .and_then(|ip| ip.parse::<IpAddr>().ok())
             .and_then(|ip| if let IpAddr::V4(v4) = ip { Some(v4) } else { None });
         let Some(pod_ip) = pod_ip else {
+            debug!(pod = %name, namespace, pod_ip = ?pod_ip_str, "no valid pod IP");
             self.endpoints.remove(&key);
             return;
         };
@@ -170,6 +176,7 @@ impl CompatState {
             .get(&key)
             .map(|endpoint| endpoint.id)
             .unwrap_or_else(|| self.allocate_endpoint_id());
+        info!(pod = %name, namespace, pod_ip = %pod_ip, endpoint_id = id, "upserted endpoint");
         self.endpoints.insert(
             key,
             CompatEndpoint {
@@ -641,15 +648,22 @@ impl DaemonRuntime {
                                             status.write().await.endpoint_count = endpoint_count;
                                             // Create CiliumEndpoint CR so integration tests can verify
                                             // endpoint identity via `kubectl get cep`.
-                                            if let Some((ns, name, Some(ip), id)) = ep_info {
+                                            if let Some((ns, name, Some(ip), id)) = &ep_info {
                                                 let w = Arc::clone(&watcher_for_events);
+                                                let ns = ns.clone();
+                                                let name = name.clone();
+                                                let ip_str = ip.to_string();
+                                                let endpoint_id = *id;
+                                                debug!(pod = %name, endpoint_id, "spawning CiliumEndpoint creation");
                                                 tokio::spawn(async move {
                                                     if let Err(e) = w.upsert_cilium_endpoint(
-                                                        &ns, &name, &ip.to_string(), id,
+                                                        &ns, &name, &ip_str, endpoint_id,
                                                     ).await {
                                                         warn!(pod = %name, error = %e, "failed to upsert CiliumEndpoint");
                                                     }
                                                 });
+                                            } else {
+                                                debug!("pod not in endpoints or missing IP after upsert");
                                             }
                                         }
                                         Ok(cilium_k8s::K8sEvent::NodeAdded(node) | cilium_k8s::K8sEvent::NodeUpdated(node)) => {
