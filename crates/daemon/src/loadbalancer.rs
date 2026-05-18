@@ -87,6 +87,7 @@ pub fn reconcile_service(
 
 /// Queue a pending reconciliation for later (when maps become available).
 /// Called by reconcile_service when maps are not yet available.
+#[allow(clippy::needless_pass_by_value)]
 pub fn queue_pending_reconcile(
     pending_queue: Arc<Mutex<Vec<PendingReconcile>>>,
     service_key: String,

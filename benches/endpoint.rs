@@ -58,7 +58,8 @@ fn bench_endpoint_regen(c: &mut Criterion) {
                 .unwrap();
             ep.set_state(EndpointState::Regenerating, "start").unwrap();
             ep.set_state(EndpointState::Ready, "done").unwrap();
-            black_box(ep.policy_revision += 1)
+            ep.policy_revision += 1;
+            black_box(())
         })
     });
 }
