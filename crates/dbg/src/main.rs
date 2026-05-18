@@ -659,7 +659,7 @@ fn apply_endpoint_jsonpath(expr: &str, endpoints: &[serde_json::Value]) -> Strin
     // Parse [?(@.FILTER_PATH==VALUE)].FIELD_PATH
     // Example: [?(@.status.identity.id==1)].status.state
     let filter_start = match expr.find("[?(@.") {
-        Some(i) => i + 5,  // skip "[?(@."
+        Some(i) => i + 5, // skip "[?(@."
         None => return String::new(),
     };
     let eq_pos = match expr[filter_start..].find("==") {
@@ -685,7 +685,8 @@ fn apply_endpoint_jsonpath(expr: &str, endpoints: &[serde_json::Value]) -> Strin
     let after_bracket = &after_eq[close_pos + 2..]; // skip )]
     let field_path = after_bracket.trim_start_matches('.');
 
-    let results: Vec<String> = endpoints.iter()
+    let results: Vec<String> = endpoints
+        .iter()
         .filter(|ep| json_get_i64(ep, filter_path) == Some(filter_val))
         .filter_map(|ep| json_get_str(ep, field_path))
         .collect();

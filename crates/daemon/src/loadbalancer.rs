@@ -3,10 +3,10 @@
 //! Wraps [`backend_mapping::LbReconciler`] so that `runtime.rs` can call a
 //! single async method whenever Kubernetes services or endpoint slices change.
 
+use backend_mapping::{BackendInfo, FrontendPort, LbReconciler};
 use std::net::Ipv4Addr;
 use std::sync::Arc;
 use std::sync::Mutex;
-use backend_mapping::{BackendInfo, FrontendPort, LbReconciler};
 use tracing::{info, warn};
 
 pub use backend_mapping::LbReconciler as BackendSyncer;
@@ -16,8 +16,8 @@ pub use backend_mapping::LbReconciler as BackendSyncer;
 pub struct PendingReconcile {
     pub service_key: String,
     pub cluster_ip: Option<Ipv4Addr>,
-    pub frontends: Vec<(u16, u8)>,  // (port, proto)
-    pub backends: Vec<(Ipv4Addr, u16, u8)>,  // (ip, port, proto)
+    pub frontends: Vec<(u16, u8)>,          // (port, proto)
+    pub backends: Vec<(Ipv4Addr, u16, u8)>, // (ip, port, proto)
 }
 
 /// Convenience shim called from `CompatState::upsert_endpoint_slice` and
@@ -33,7 +33,7 @@ pub fn reconcile_service(
     reconciler: &LbReconciler,
     service_key: &str,
     cluster_ip: Option<Ipv4Addr>,
-    frontends: Vec<(u16, u8)>,    // (port, proto)
+    frontends: Vec<(u16, u8)>,          // (port, proto)
     backends: Vec<(Ipv4Addr, u16, u8)>, // (ip, port, proto)
     pending_queue: Arc<Mutex<Vec<PendingReconcile>>>,
 ) {
@@ -48,7 +48,11 @@ pub fn reconcile_service(
 
     let fe: Vec<FrontendPort> = frontends
         .into_iter()
-        .map(|(port, proto)| FrontendPort { port, proto, target_port: port })
+        .map(|(port, proto)| FrontendPort {
+            port,
+            proto,
+            target_port: port,
+        })
         .collect();
 
     let be: Vec<BackendInfo> = backends

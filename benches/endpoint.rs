@@ -18,10 +18,13 @@ fn make_endpoint(id: u16) -> Endpoint {
 }
 
 fn bring_up(ep: &mut Endpoint) {
-    ep.set_state(EndpointState::WaitingForIdentity, "init").unwrap();
+    ep.set_state(EndpointState::WaitingForIdentity, "init")
+        .unwrap();
     ep.set_identity(1000 + ep.id.0 as u32);
-    ep.set_state(EndpointState::WaitingToRegenerate, "got identity").unwrap();
-    ep.set_state(EndpointState::Regenerating, "start regen").unwrap();
+    ep.set_state(EndpointState::WaitingToRegenerate, "got identity")
+        .unwrap();
+    ep.set_state(EndpointState::Regenerating, "start regen")
+        .unwrap();
     ep.set_state(EndpointState::Ready, "done").unwrap();
 }
 
@@ -51,7 +54,8 @@ fn bench_endpoint_regen(c: &mut Criterion) {
         bring_up(&mut ep);
 
         b.iter(|| {
-            ep.set_state(EndpointState::WaitingToRegenerate, "policy update").unwrap();
+            ep.set_state(EndpointState::WaitingToRegenerate, "policy update")
+                .unwrap();
             ep.set_state(EndpointState::Regenerating, "start").unwrap();
             ep.set_state(EndpointState::Ready, "done").unwrap();
             black_box(ep.policy_revision += 1)

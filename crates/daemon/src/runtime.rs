@@ -4,8 +4,8 @@ use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::Mutex;
+use std::sync::atomic::{AtomicU32, Ordering};
 
 use ipnet::Ipv4Net;
 use k8s_openapi::api::core::v1::{Endpoints as K8sEndpoints, Node, Pod, Service};
@@ -22,7 +22,7 @@ use tokio_util::sync::CancellationToken;
 use tracing::{debug, error, info, warn};
 
 use crate::health::{SharedHealth, new_health, serve, set_ready, set_stopping};
-use crate::loadbalancer::{reconcile_service, BackendSyncer, PendingReconcile};
+use crate::loadbalancer::{BackendSyncer, PendingReconcile, reconcile_service};
 use crate::{DaemonConfig, DaemonPhase, DaemonStatus};
 
 const CILIUM_SOCK_FILE: &str = "cilium.sock";
@@ -157,10 +157,19 @@ impl CompatState {
             return;
         }
 
-        let pod_ip_str = pod.status.as_ref().and_then(|status| status.pod_ip.as_deref());
+        let pod_ip_str = pod
+            .status
+            .as_ref()
+            .and_then(|status| status.pod_ip.as_deref());
         let pod_ip = pod_ip_str
             .and_then(|ip| ip.parse::<IpAddr>().ok())
-            .and_then(|ip| if let IpAddr::V4(v4) = ip { Some(v4) } else { None });
+            .and_then(|ip| {
+                if let IpAddr::V4(v4) = ip {
+                    Some(v4)
+                } else {
+                    None
+                }
+            });
         let Some(pod_ip) = pod_ip else {
             debug!(pod = %name, namespace, pod_ip = ?pod_ip_str, "no valid pod IP");
             self.endpoints.remove(&key);
@@ -264,16 +273,33 @@ impl CompatState {
         );
 
         // Trigger eBPF reconciliation (idempotent — handles the case where nothing changed).
-        let cluster_ip_v4 = if let IpAddr::V4(v4) = cluster_ip { Some(v4) } else { None };
+        let cluster_ip_v4 = if let IpAddr::V4(v4) = cluster_ip {
+            Some(v4)
+        } else {
+            None
+        };
         let frontends: Vec<(u16, u8)> = ports
             .iter()
             .map(|p| (p.port, protocol_to_u8(&p.protocol)))
             .collect();
         let be_tuples: Vec<(Ipv4Addr, u16, u8)> = backends
             .iter()
-            .filter_map(|b| if let IpAddr::V4(v4) = b.ip { Some((v4, b.port, protocol_to_u8(&b.protocol))) } else { None })
+            .filter_map(|b| {
+                if let IpAddr::V4(v4) = b.ip {
+                    Some((v4, b.port, protocol_to_u8(&b.protocol)))
+                } else {
+                    None
+                }
+            })
             .collect();
-        reconcile_service(&self.backend_syncer, &key, cluster_ip_v4, frontends, be_tuples, self.pending_reconciles.clone());
+        reconcile_service(
+            &self.backend_syncer,
+            &key,
+            cluster_ip_v4,
+            frontends,
+            be_tuples,
+            self.pending_reconciles.clone(),
+        );
     }
 
     fn upsert_endpoint_slice(&mut self, endpoint_slice: &EndpointSlice) {
@@ -339,18 +365,45 @@ impl CompatState {
         }
 
         // Reconcile into eBPF LB maps (IPv4 only — eBPF lb4 maps don't handle IPv6).
-        let cluster_ip = self.services.get(&key).and_then(|s| s.cluster_ip)
-            .and_then(|ip| if let IpAddr::V4(v4) = ip { Some(v4) } else { None });
+        let cluster_ip = self
+            .services
+            .get(&key)
+            .and_then(|s| s.cluster_ip)
+            .and_then(|ip| {
+                if let IpAddr::V4(v4) = ip {
+                    Some(v4)
+                } else {
+                    None
+                }
+            });
         let frontends: Vec<(u16, u8)> = self
             .services
             .get(&key)
-            .map(|s| s.ports.iter().map(|p| (p.port, protocol_to_u8(&p.protocol))).collect())
+            .map(|s| {
+                s.ports
+                    .iter()
+                    .map(|p| (p.port, protocol_to_u8(&p.protocol)))
+                    .collect()
+            })
             .unwrap_or_default();
         let be_tuples: Vec<(Ipv4Addr, u16, u8)> = backends
             .iter()
-            .filter_map(|b| if let IpAddr::V4(v4) = b.ip { Some((v4, b.port, protocol_to_u8(&b.protocol))) } else { None })
+            .filter_map(|b| {
+                if let IpAddr::V4(v4) = b.ip {
+                    Some((v4, b.port, protocol_to_u8(&b.protocol)))
+                } else {
+                    None
+                }
+            })
             .collect();
-        reconcile_service(&self.backend_syncer, &key, cluster_ip, frontends, be_tuples, self.pending_reconciles.clone());
+        reconcile_service(
+            &self.backend_syncer,
+            &key,
+            cluster_ip,
+            frontends,
+            be_tuples,
+            self.pending_reconciles.clone(),
+        );
     }
 
     fn upsert_endpoints(&mut self, endpoints: &K8sEndpoints) {
@@ -412,25 +465,60 @@ impl CompatState {
         }
 
         // Reconcile into eBPF LB maps (IPv4 only — eBPF lb4 maps don't handle IPv6).
-        let cluster_ip = self.services.get(&key).and_then(|s| s.cluster_ip)
-            .and_then(|ip| if let IpAddr::V4(v4) = ip { Some(v4) } else { None });
+        let cluster_ip = self
+            .services
+            .get(&key)
+            .and_then(|s| s.cluster_ip)
+            .and_then(|ip| {
+                if let IpAddr::V4(v4) = ip {
+                    Some(v4)
+                } else {
+                    None
+                }
+            });
         let frontends: Vec<(u16, u8)> = self
             .services
             .get(&key)
-            .map(|s| s.ports.iter().map(|p| (p.port, protocol_to_u8(&p.protocol))).collect())
+            .map(|s| {
+                s.ports
+                    .iter()
+                    .map(|p| (p.port, protocol_to_u8(&p.protocol)))
+                    .collect()
+            })
             .unwrap_or_default();
         let be_tuples: Vec<(Ipv4Addr, u16, u8)> = backends
             .iter()
-            .filter_map(|b| if let IpAddr::V4(v4) = b.ip { Some((v4, b.port, protocol_to_u8(&b.protocol))) } else { None })
+            .filter_map(|b| {
+                if let IpAddr::V4(v4) = b.ip {
+                    Some((v4, b.port, protocol_to_u8(&b.protocol)))
+                } else {
+                    None
+                }
+            })
             .collect();
-        reconcile_service(&self.backend_syncer, &key, cluster_ip, frontends, be_tuples, self.pending_reconciles.clone());
+        reconcile_service(
+            &self.backend_syncer,
+            &key,
+            cluster_ip,
+            frontends,
+            be_tuples,
+            self.pending_reconciles.clone(),
+        );
     }
 
     fn delete_service(&mut self, service_key: &str) {
         // Extract cluster IP and frontends before removing service
-        let cluster_ip = self.services.get(service_key)
+        let cluster_ip = self
+            .services
+            .get(service_key)
             .and_then(|s| s.cluster_ip)
-            .and_then(|ip| if let IpAddr::V4(v4) = ip { Some(v4) } else { None });
+            .and_then(|ip| {
+                if let IpAddr::V4(v4) = ip {
+                    Some(v4)
+                } else {
+                    None
+                }
+            });
 
         // Remove from in-memory state
         self.services.remove(service_key);
@@ -458,7 +546,14 @@ impl CompatState {
                     .iter()
                     .map(|p| (p.port, protocol_to_u8(&p.protocol)))
                     .collect();
-                reconcile_service(&self.backend_syncer, service_key, Some(vip), frontends, vec![], self.pending_reconciles.clone());
+                reconcile_service(
+                    &self.backend_syncer,
+                    service_key,
+                    Some(vip),
+                    frontends,
+                    vec![],
+                    self.pending_reconciles.clone(),
+                );
             }
         }
     }
@@ -475,7 +570,14 @@ impl CompatState {
                     .iter()
                     .map(|p| (p.port, protocol_to_u8(&p.protocol)))
                     .collect();
-                reconcile_service(&self.backend_syncer, service_key, Some(vip), frontends, vec![], self.pending_reconciles.clone());
+                reconcile_service(
+                    &self.backend_syncer,
+                    service_key,
+                    Some(vip),
+                    frontends,
+                    vec![],
+                    self.pending_reconciles.clone(),
+                );
             }
         }
     }
@@ -494,7 +596,10 @@ impl CompatState {
 
     /// Drains and reconciles all pending services that were queued while eBPF maps were unavailable.
     fn drain_pending_reconciles(&mut self) {
-        let pending = self.pending_reconciles.lock().ok()
+        let pending = self
+            .pending_reconciles
+            .lock()
+            .ok()
             .and_then(|mut guard| {
                 if guard.is_empty() {
                     None
@@ -513,7 +618,10 @@ impl CompatState {
                 pending.backends,
                 self.pending_reconciles.clone(),
             );
-            info!(service = pending.service_key, "reconciled pending service after datapath init");
+            info!(
+                service = pending.service_key,
+                "reconciled pending service after datapath init"
+            );
         }
     }
 }
@@ -1388,7 +1496,10 @@ fn service_json_for_port(
     port: Option<&CompatServicePort>,
     service_id: i64,
 ) -> serde_json::Value {
-    let ip_str = service.cluster_ip.map(|ip| ip.to_string()).unwrap_or_default();
+    let ip_str = service
+        .cluster_ip
+        .map(|ip| ip.to_string())
+        .unwrap_or_default();
     let frontend = port
         .map(|port| {
             json!({
@@ -1496,7 +1607,11 @@ fn compat_target_port(target_port: Option<&IntOrString>) -> Option<CompatTargetP
 }
 
 fn protocol_name(protocol: &str) -> &'static str {
-    if protocol.eq_ignore_ascii_case("UDP") { "UDP" } else { "TCP" }
+    if protocol.eq_ignore_ascii_case("UDP") {
+        "UDP"
+    } else {
+        "TCP"
+    }
 }
 
 fn sync_remote_node_route(node: &Node, local_node_name: &str) {

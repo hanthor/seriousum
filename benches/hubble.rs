@@ -26,7 +26,12 @@ fn make_flow(i: usize, verdict: Verdict) -> Flow {
         verdict,
         drop_reason: 0,
         source: Endpoint {
-            ip: Some(IpAddr::V4(Ipv4Addr::new(10, 0, (i / 256) as u8, (i % 256) as u8))),
+            ip: Some(IpAddr::V4(Ipv4Addr::new(
+                10,
+                0,
+                (i / 256) as u8,
+                (i % 256) as u8,
+            ))),
             port: Some(12000 + i as u16 % 40000),
             identity: Some(1000 + i as u32 % 100),
             namespace: "default".into(),
@@ -52,7 +57,10 @@ fn make_flow(i: usize, verdict: Verdict) -> Flow {
 }
 
 fn make_observation(i: usize, verdict: FlowVerdict) -> FlowObservation {
-    let src = make_flow_endpoint([10, 0, (i / 256) as u8, (i % 256) as u8], 12000 + i as u16 % 40000);
+    let src = make_flow_endpoint(
+        [10, 0, (i / 256) as u8, (i % 256) as u8],
+        12000 + i as u16 % 40000,
+    );
     let dst = make_flow_endpoint([10, 96, 0, 1], 80);
     let meta = FlowMetadata::new(
         format!("flow-{i}"),
@@ -75,13 +83,17 @@ fn bench_flow_ring_push(c: &mut Criterion) {
     for capacity in [100usize, 4096, 65536] {
         group.throughput(Throughput::Elements(1));
         let flow = make_flow(0, Verdict::Forwarded);
-        group.bench_with_input(BenchmarkId::new("capacity", capacity), &capacity, |b, &cap| {
-            let mut ring = FlowRing::new(cap);
-            for i in 0..cap {
-                ring.push(make_flow(i, Verdict::Forwarded));
-            }
-            b.iter(|| ring.push(black_box(flow.clone())))
-        });
+        group.bench_with_input(
+            BenchmarkId::new("capacity", capacity),
+            &capacity,
+            |b, &cap| {
+                let mut ring = FlowRing::new(cap);
+                for i in 0..cap {
+                    ring.push(make_flow(i, Verdict::Forwarded));
+                }
+                b.iter(|| ring.push(black_box(flow.clone())))
+            },
+        );
     }
 
     group.finish();
@@ -96,7 +108,14 @@ fn bench_flow_ring_last_n(c: &mut Criterion) {
 
     let mut ring = FlowRing::new(65536);
     for i in 0..65536 {
-        ring.push(make_flow(i, if i % 10 == 0 { Verdict::Dropped } else { Verdict::Forwarded }));
+        ring.push(make_flow(
+            i,
+            if i % 10 == 0 {
+                Verdict::Dropped
+            } else {
+                Verdict::Forwarded
+            },
+        ));
     }
 
     for n in [10usize, 100, 1000] {
@@ -120,19 +139,32 @@ fn bench_flow_filter_scan(c: &mut Criterion) {
 
     let mut ring = FlowRing::new(4096);
     for i in 0..4096 {
-        ring.push(make_flow(i, if i % 5 == 0 { Verdict::Dropped } else { Verdict::Forwarded }));
+        ring.push(make_flow(
+            i,
+            if i % 5 == 0 {
+                Verdict::Dropped
+            } else {
+                Verdict::Forwarded
+            },
+        ));
     }
 
     group.bench_function("verdict_only", |b| {
-        let filter = VerdictFilter { verdicts: vec![Verdict::Dropped] };
+        let filter = VerdictFilter {
+            verdicts: vec![Verdict::Dropped],
+        };
         b.iter(|| black_box(ring.iter().filter(|f| filter.matches(f)).count()))
     });
 
     group.bench_function("verdict_and_direction", |b| {
         let filter = AndFilter {
             filters: vec![
-                Box::new(VerdictFilter { verdicts: vec![Verdict::Dropped] }),
-                Box::new(DirectionFilter { direction: TrafficDirection::Ingress }),
+                Box::new(VerdictFilter {
+                    verdicts: vec![Verdict::Dropped],
+                }),
+                Box::new(DirectionFilter {
+                    direction: TrafficDirection::Ingress,
+                }),
             ],
         };
         b.iter(|| black_box(ring.iter().filter(|f| filter.matches(f)).count()))
@@ -179,7 +211,9 @@ fn bench_flow_json_serialize(c: &mut Criterion) {
     let mut group = c.benchmark_group("hubble_flow_json_serialize");
 
     for count in [1usize, 100, 1000] {
-        let flows: Vec<Flow> = (0..count).map(|i| make_flow(i, Verdict::Forwarded)).collect();
+        let flows: Vec<Flow> = (0..count)
+            .map(|i| make_flow(i, Verdict::Forwarded))
+            .collect();
         group.throughput(Throughput::Elements(count as u64));
         group.bench_with_input(BenchmarkId::new("flows", count), &count, |b, _| {
             b.iter(|| black_box(serde_json::to_string(black_box(&flows)).unwrap()))
