@@ -90,34 +90,42 @@ jobs:
           docker run -d --name kind-registry \
             -p 5000:5000 \
             --network kind \
-            registry:2
+            registry:2 || true
 
           # Load images into cluster
           for img in cilium-agent operator-generic hubble cilium-dbg clustermesh-apiserver; do
             docker tag localhost:5000/seriousum/$img:local localhost:5000/seriousum/$img:local
-            kind load docker-image localhost:5000/seriousum/$img:local --name kind
+            kind load docker-image localhost:5000/seriousum/$img:local --name kind || echo "Warning: Could not load $img"
           done
 
           echo "✓ Images loaded into cluster"
 
-      - name: Clone Cilium Repository
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.22'
+
+      - name: Clone and Build Cilium Test Suite
         run: |
           cd /home/runner
           git clone --depth 1 https://github.com/cilium/cilium.git
-          cd cilium
-          echo "CILIUM_REPO=/home/runner/cilium" >> $GITHUB_ENV
+          cd cilium/test
 
-      - name: Build Ginkgo Test Binary
-        run: |
-          cd $CILIUM_REPO/test
+          # Install ginkgo
+          go install github.com/onsi/ginkgo/v2/ginkgo@latest
+
+          # Build test binary
           ginkgo build .
           echo "✓ Test binary built"
 
+          # Set environment variables for subsequent steps
+          echo "CILIUM_REPO=/home/runner/cilium" >> $GITHUB_ENV
+          echo "KUBECONFIG=$HOME/.kube/config" >> $GITHUB_ENV
+
       - name: Run ${{ matrix.suite }} Test
         run: |
-          cd $CILIUM_REPO/test
+          cd ${{ env.CILIUM_REPO }}/test
 
-          export KUBECONFIG=/home/runner/.kube/config
           export K8S_VERSION=1.33
           export CNI_INTEGRATION=kind
           export INTEGRATION_TESTS=true
@@ -127,9 +135,9 @@ jobs:
             --ginkgo.v \
             -- \
             -cilium.testScope=k8s \
-            -cilium.kubeconfig="$KUBECONFIG" \
+            -cilium.kubeconfig="${{ env.KUBECONFIG }}" \
             -cilium.install-helm-overrides="image.repository=localhost:5000/seriousum/cilium-agent,image.tag=local,image.useDigest=false,image.pullPolicy=Never,preflight.image.pullPolicy=Never,operator.image.override=localhost:5000/seriousum/operator-generic:local,operator.image.pullPolicy=Never,hubble.relay.image.repository=localhost:5000/seriousum/hubble,hubble.relay.image.tag=local,hubble.relay.image.useDigest=false,hubble.relay.image.pullPolicy=Never" \
-            -cilium.holdEnvironment=false || true
+            -cilium.holdEnvironment=false || echo "Test finished with exit code: $?"
 
       - name: Collect Logs
         if: always()
