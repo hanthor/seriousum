@@ -211,19 +211,19 @@ impl MapWriter {
     fn open_svc_map(
         &self,
     ) -> anyhow::Result<aya::maps::HashMap<aya::maps::MapData, Lb4Key, Lb4Service>> {
-        let map_data = aya::maps::MapData::from_pin(&self.svc_path())
+        let map_data = aya::maps::MapData::from_pin(self.svc_path())
             .map_err(|e| anyhow::anyhow!("open {}: {e}", self.svc_path().display()))?;
         aya::maps::HashMap::try_from(aya::maps::Map::HashMap(map_data))
-            .map_err(|e| anyhow::anyhow!("cast {}: {e}", SVC_MAP_NAME))
+            .map_err(|e| anyhow::anyhow!("cast {SVC_MAP_NAME}: {e}"))
     }
 
     fn open_backend_map(
         &self,
     ) -> anyhow::Result<aya::maps::HashMap<aya::maps::MapData, u32, Lb4Backend>> {
-        let map_data = aya::maps::MapData::from_pin(&self.backend_path())
+        let map_data = aya::maps::MapData::from_pin(self.backend_path())
             .map_err(|e| anyhow::anyhow!("open {}: {e}", self.backend_path().display()))?;
         aya::maps::HashMap::try_from(aya::maps::Map::HashMap(map_data))
-            .map_err(|e| anyhow::anyhow!("cast {}: {e}", BACKEND_MAP_NAME))
+            .map_err(|e| anyhow::anyhow!("cast {BACKEND_MAP_NAME}: {e}"))
     }
 
     /// Writes the master entry (slot 0) and all backend slot entries for one frontend.
@@ -245,7 +245,7 @@ impl MapWriter {
             rev_nat_index: (svc_id as u16).to_be(),
             ..Default::default()
         };
-        svc_map.insert(&master_key, &master_val, 0)?;
+        svc_map.insert(master_key, master_val, 0)?;
 
         // Backend slot entries: slots 1..=N
         for (i, &backend_id) in backend_ids.iter().enumerate() {
@@ -256,7 +256,7 @@ impl MapWriter {
                 rev_nat_index: (svc_id as u16).to_be(),
                 ..Default::default()
             };
-            svc_map.insert(&slot_key, &slot_val, 0)?;
+            svc_map.insert(slot_key, slot_val, 0)?;
         }
 
         Ok(())
@@ -281,7 +281,7 @@ impl MapWriter {
     /// Writes a backend entry.
     fn write_backend(&self, backend_id: u32, backend: &Lb4Backend) -> anyhow::Result<()> {
         let mut backend_map = self.open_backend_map()?;
-        backend_map.insert(&backend_id, backend, 0)?;
+        backend_map.insert(backend_id, backend, 0)?;
         Ok(())
     }
 
@@ -295,7 +295,7 @@ impl MapWriter {
     fn open_revnat_map(
         &self,
     ) -> anyhow::Result<aya::maps::HashMap<aya::maps::MapData, RevNat4Key, RevNat4Value>> {
-        let map_data = aya::maps::MapData::from_pin(&self.revnat_path())
+        let map_data = aya::maps::MapData::from_pin(self.revnat_path())
             .map_err(|e| anyhow::anyhow!("open {}: {e}", self.revnat_path().display()))?;
         aya::maps::HashMap::try_from(aya::maps::Map::HashMap(map_data))
             .map_err(|e| anyhow::anyhow!("cast cilium_lb4_reverse_nat: {e}"))
@@ -539,13 +539,11 @@ impl LbReconciler {
             let still_exists = new_states.iter().any(|(p, pr, _)| p == port && pr == proto);
             if still_exists {
                 for &old_id in &old_state.backend_ids {
-                    if !backend_id_list.contains(&old_id) {
-                        if inner.dec_backend_ref(old_id) {
-                            if let Err(e) = self.writer.delete_backend(old_id) {
-                                warn!(backend_id = old_id, "delete stale backend: {e}");
-                            }
-                            inner.backend_ids.retain(|_, v| *v != old_id);
+                    if !backend_id_list.contains(&old_id) && inner.dec_backend_ref(old_id) {
+                        if let Err(e) = self.writer.delete_backend(old_id) {
+                            warn!(backend_id = old_id, "delete stale backend: {e}");
                         }
+                        inner.backend_ids.retain(|_, v| *v != old_id);
                     }
                 }
             }

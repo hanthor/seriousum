@@ -361,7 +361,7 @@ impl CompatState {
 
         self.service_backends.insert(key.clone(), backends.clone());
         if let Some(service) = self.services.get_mut(&key) {
-            service.backends = backends.clone();
+            service.backends.clone_from(&backends);
         }
 
         // Reconcile into eBPF LB maps (IPv4 only — eBPF lb4 maps don't handle IPv6).
@@ -461,7 +461,7 @@ impl CompatState {
 
         self.service_backends.insert(key.clone(), backends.clone());
         if let Some(service) = self.services.get_mut(&key) {
-            service.backends = backends.clone();
+            service.backends.clone_from(&backends);
         }
 
         // Reconcile into eBPF LB maps (IPv4 only — eBPF lb4 maps don't handle IPv6).
@@ -539,22 +539,22 @@ impl CompatState {
         self.service_backends.remove(service_key);
 
         // Reconcile to clear the service if backends are now empty
-        if let Some(service) = self.services.get(service_key) {
-            if let Some(IpAddr::V4(vip)) = service.cluster_ip {
-                let frontends: Vec<(u16, u8)> = service
-                    .ports
-                    .iter()
-                    .map(|p| (p.port, protocol_to_u8(&p.protocol)))
-                    .collect();
-                reconcile_service(
-                    &self.backend_syncer,
-                    service_key,
-                    Some(vip),
-                    frontends,
-                    vec![],
-                    self.pending_reconciles.clone(),
-                );
-            }
+        if let Some(service) = self.services.get(service_key)
+            && let Some(IpAddr::V4(vip)) = service.cluster_ip
+        {
+            let frontends: Vec<(u16, u8)> = service
+                .ports
+                .iter()
+                .map(|p| (p.port, protocol_to_u8(&p.protocol)))
+                .collect();
+            reconcile_service(
+                &self.backend_syncer,
+                service_key,
+                Some(vip),
+                frontends,
+                vec![],
+                self.pending_reconciles.clone(),
+            );
         }
     }
 
@@ -563,22 +563,22 @@ impl CompatState {
         self.service_backends.remove(service_key);
 
         // Reconcile to clear the service if backends are now empty
-        if let Some(service) = self.services.get(service_key) {
-            if let Some(IpAddr::V4(vip)) = service.cluster_ip {
-                let frontends: Vec<(u16, u8)> = service
-                    .ports
-                    .iter()
-                    .map(|p| (p.port, protocol_to_u8(&p.protocol)))
-                    .collect();
-                reconcile_service(
-                    &self.backend_syncer,
-                    service_key,
-                    Some(vip),
-                    frontends,
-                    vec![],
-                    self.pending_reconciles.clone(),
-                );
-            }
+        if let Some(service) = self.services.get(service_key)
+            && let Some(IpAddr::V4(vip)) = service.cluster_ip
+        {
+            let frontends: Vec<(u16, u8)> = service
+                .ports
+                .iter()
+                .map(|p| (p.port, protocol_to_u8(&p.protocol)))
+                .collect();
+            reconcile_service(
+                &self.backend_syncer,
+                service_key,
+                Some(vip),
+                frontends,
+                vec![],
+                self.pending_reconciles.clone(),
+            );
         }
     }
 
