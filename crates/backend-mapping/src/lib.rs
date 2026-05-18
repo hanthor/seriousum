@@ -21,11 +21,11 @@
 
 use std::collections::HashMap;
 use std::net::Ipv4Addr;
-use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU32, Ordering};
+use std::path::PathBuf;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU32, Ordering};
 use tokio::sync::Mutex;
-use tracing::{debug, error, info, warn};
+use tracing::{debug, info, warn};
 
 // ─── eBPF map constants ───────────────────────────────────────────────────────
 
@@ -55,6 +55,7 @@ pub struct Lb4Key {
 }
 
 // Safety: Lb4Key is #[repr(C)], Copy, contains only primitive types.
+#[allow(unsafe_code)]
 unsafe impl aya::Pod for Lb4Key {}
 
 impl Lb4Key {
@@ -91,6 +92,7 @@ pub struct Lb4Service {
 }
 
 // Safety: Lb4Service is #[repr(C)], Copy, contains only primitive types.
+#[allow(unsafe_code)]
 unsafe impl aya::Pod for Lb4Service {}
 
 // ─── Struct layout matching Cilium's lb4_backend (v3, 12 bytes) ───────────────
@@ -117,6 +119,7 @@ pub struct Lb4Backend {
 }
 
 // Safety: Lb4Backend is #[repr(C)], Copy, contains only primitive types.
+#[allow(unsafe_code)]
 unsafe impl aya::Pod for Lb4Backend {}
 
 impl Lb4Backend {
@@ -132,6 +135,30 @@ impl Lb4Backend {
         }
     }
 }
+
+// ─── Reverse NAT map (cilium_lb4_reverse_nat) ─────────────────────────────────
+
+/// Key for `cilium_lb4_reverse_nat` — maps ServiceID back to frontend VIP+port.
+/// Size: 2 bytes
+#[repr(C)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct RevNat4Key {
+    pub key: u16, // ServiceID in network byte order
+}
+#[allow(unsafe_code)]
+unsafe impl aya::Pod for RevNat4Key {}
+
+/// Value for `cilium_lb4_reverse_nat` — frontend VIP + port for return traffic rewriting.
+/// Size: 8 bytes
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default)]
+pub struct RevNat4Value {
+    pub address: [u8; 4], // frontend VIP in network byte order
+    pub port: u16,        // frontend port in network byte order
+    pub pad: [u8; 2],
+}
+#[allow(unsafe_code)]
+unsafe impl aya::Pod for RevNat4Value {}
 
 // ─── Backend identity (for ID allocation) ─────────────────────────────────────
 
@@ -164,7 +191,9 @@ struct MapWriter {
 
 impl MapWriter {
     fn new(bpf_globals: impl Into<PathBuf>) -> Self {
-        Self { bpf_globals: bpf_globals.into() }
+        Self {
+            bpf_globals: bpf_globals.into(),
+        }
     }
 
     fn svc_path(&self) -> PathBuf {
@@ -175,18 +204,26 @@ impl MapWriter {
         self.bpf_globals.join(BACKEND_MAP_NAME)
     }
 
-    fn open_svc_map(&self) -> anyhow::Result<aya::maps::HashMap<aya::maps::MapData, Lb4Key, Lb4Service>> {
-        let map_data = aya::maps::MapData::from_pin(&self.svc_path())
-            .map_err(|e| anyhow::anyhow!("open {}: {e}", self.svc_path().display()))?;
-        aya::maps::HashMap::try_from(aya::maps::Map::HashMap(map_data))
-            .map_err(|e| anyhow::anyhow!("cast {}: {e}", SVC_MAP_NAME))
+    fn revnat_path(&self) -> PathBuf {
+        self.bpf_globals.join("cilium_lb4_reverse_nat")
     }
 
-    fn open_backend_map(&self) -> anyhow::Result<aya::maps::HashMap<aya::maps::MapData, u32, Lb4Backend>> {
-        let map_data = aya::maps::MapData::from_pin(&self.backend_path())
+    fn open_svc_map(
+        &self,
+    ) -> anyhow::Result<aya::maps::HashMap<aya::maps::MapData, Lb4Key, Lb4Service>> {
+        let map_data = aya::maps::MapData::from_pin(self.svc_path())
+            .map_err(|e| anyhow::anyhow!("open {}: {e}", self.svc_path().display()))?;
+        aya::maps::HashMap::try_from(aya::maps::Map::HashMap(map_data))
+            .map_err(|e| anyhow::anyhow!("cast {SVC_MAP_NAME}: {e}"))
+    }
+
+    fn open_backend_map(
+        &self,
+    ) -> anyhow::Result<aya::maps::HashMap<aya::maps::MapData, u32, Lb4Backend>> {
+        let map_data = aya::maps::MapData::from_pin(self.backend_path())
             .map_err(|e| anyhow::anyhow!("open {}: {e}", self.backend_path().display()))?;
         aya::maps::HashMap::try_from(aya::maps::Map::HashMap(map_data))
-            .map_err(|e| anyhow::anyhow!("cast {}: {e}", BACKEND_MAP_NAME))
+            .map_err(|e| anyhow::anyhow!("cast {BACKEND_MAP_NAME}: {e}"))
     }
 
     /// Writes the master entry (slot 0) and all backend slot entries for one frontend.
@@ -208,7 +245,7 @@ impl MapWriter {
             rev_nat_index: (svc_id as u16).to_be(),
             ..Default::default()
         };
-        svc_map.insert(&master_key, &master_val, 0)?;
+        svc_map.insert(master_key, master_val, 0)?;
 
         // Backend slot entries: slots 1..=N
         for (i, &backend_id) in backend_ids.iter().enumerate() {
@@ -219,7 +256,7 @@ impl MapWriter {
                 rev_nat_index: (svc_id as u16).to_be(),
                 ..Default::default()
             };
-            svc_map.insert(&slot_key, &slot_val, 0)?;
+            svc_map.insert(slot_key, slot_val, 0)?;
         }
 
         Ok(())
@@ -244,7 +281,7 @@ impl MapWriter {
     /// Writes a backend entry.
     fn write_backend(&self, backend_id: u32, backend: &Lb4Backend) -> anyhow::Result<()> {
         let mut backend_map = self.open_backend_map()?;
-        backend_map.insert(&backend_id, backend, 0)?;
+        backend_map.insert(backend_id, backend, 0)?;
         Ok(())
     }
 
@@ -252,6 +289,38 @@ impl MapWriter {
     fn delete_backend(&self, backend_id: u32) -> anyhow::Result<()> {
         let mut backend_map = self.open_backend_map()?;
         let _ = backend_map.remove(&backend_id);
+        Ok(())
+    }
+
+    fn open_revnat_map(
+        &self,
+    ) -> anyhow::Result<aya::maps::HashMap<aya::maps::MapData, RevNat4Key, RevNat4Value>> {
+        let map_data = aya::maps::MapData::from_pin(self.revnat_path())
+            .map_err(|e| anyhow::anyhow!("open {}: {e}", self.revnat_path().display()))?;
+        aya::maps::HashMap::try_from(aya::maps::Map::HashMap(map_data))
+            .map_err(|e| anyhow::anyhow!("cast cilium_lb4_reverse_nat: {e}"))
+    }
+
+    fn write_revnat(&self, svc_id: u32, vip: Ipv4Addr, port: u16) -> anyhow::Result<()> {
+        let mut revnat_map = self.open_revnat_map()?;
+        let key = RevNat4Key {
+            key: svc_id.to_be() as u16,
+        };
+        let value = RevNat4Value {
+            address: vip.octets(),
+            port: port.to_be(),
+            pad: [0; 2],
+        };
+        revnat_map.insert(key, value, 0)?;
+        Ok(())
+    }
+
+    fn delete_revnat(&self, svc_id: u32) -> anyhow::Result<()> {
+        let mut revnat_map = self.open_revnat_map()?;
+        let key = RevNat4Key {
+            key: svc_id.to_be() as u16,
+        };
+        let _ = revnat_map.remove(&key);
         Ok(())
     }
 }
@@ -278,7 +347,11 @@ impl Inner {
         id
     }
 
-    fn get_or_alloc_backend_id(&mut self, identity: &BackendIdentity, next_id: &AtomicU32) -> (u32, bool) {
+    fn get_or_alloc_backend_id(
+        &mut self,
+        identity: &BackendIdentity,
+        next_id: &AtomicU32,
+    ) -> (u32, bool) {
         if let Some(&id) = self.backend_ids.get(identity) {
             (id, false)
         } else {
@@ -339,7 +412,10 @@ impl LbReconciler {
         let bpf_globals: PathBuf = bpf_globals.into();
         info!(path = %bpf_globals.display(), "LbReconciler initialized");
         Self {
-            inner: Arc::new(Mutex::new(Inner { next_svc_id: 1, ..Default::default() })),
+            inner: Arc::new(Mutex::new(Inner {
+                next_svc_id: 1,
+                ..Default::default()
+            })),
             writer: Arc::new(MapWriter::new(bpf_globals)),
             next_backend_id: Arc::new(AtomicU32::new(1)),
         }
@@ -370,7 +446,11 @@ impl LbReconciler {
         let mut backend_id_list: Vec<u32> = Vec::with_capacity(backends.len());
 
         for b in backends {
-            let identity = BackendIdentity { ip: b.ip, port: b.port, proto: b.proto };
+            let identity = BackendIdentity {
+                ip: b.ip,
+                port: b.port,
+                proto: b.proto,
+            };
             let (id, is_new) = inner.get_or_alloc_backend_id(&identity, &self.next_backend_id);
             backend_id_list.push(id);
 
@@ -397,10 +477,16 @@ impl LbReconciler {
                 .map(|(_, _, s)| s.svc_id)
                 .unwrap_or_else(|| inner.alloc_svc_id());
 
-            let state = FrontendState { svc_id, backend_ids: backend_id_list.clone() };
+            let state = FrontendState {
+                svc_id,
+                backend_ids: backend_id_list.clone(),
+            };
 
             // Write to map.
-            match self.writer.write_frontend(vip, fe.port, fe.proto, svc_id, &backend_id_list) {
+            match self
+                .writer
+                .write_frontend(vip, fe.port, fe.proto, svc_id, &backend_id_list)
+            {
                 Ok(()) => {
                     info!(
                         service = service_key,
@@ -410,6 +496,11 @@ impl LbReconciler {
                         svc_id,
                         "frontend reconciled"
                     );
+
+                    // Write reverse NAT entry for return traffic rewriting.
+                    if let Err(e) = self.writer.write_revnat(svc_id, vip, fe.port) {
+                        warn!(service = service_key, port = fe.port, "write revnat: {e}");
+                    }
                 }
                 Err(e) => warn!(service = service_key, port = fe.port, "write frontend: {e}"),
             }
@@ -448,30 +539,46 @@ impl LbReconciler {
             let still_exists = new_states.iter().any(|(p, pr, _)| p == port && pr == proto);
             if still_exists {
                 for &old_id in &old_state.backend_ids {
-                    if !backend_id_list.contains(&old_id) {
-                        if inner.dec_backend_ref(old_id) {
-                            if let Err(e) = self.writer.delete_backend(old_id) {
-                                warn!(backend_id = old_id, "delete stale backend: {e}");
-                            }
-                            inner.backend_ids.retain(|_, v| *v != old_id);
+                    if !backend_id_list.contains(&old_id) && inner.dec_backend_ref(old_id) {
+                        if let Err(e) = self.writer.delete_backend(old_id) {
+                            warn!(backend_id = old_id, "delete stale backend: {e}");
                         }
+                        inner.backend_ids.retain(|_, v| *v != old_id);
                     }
                 }
             }
         }
 
-        inner.service_state.insert(service_key.to_string(), new_states);
+        inner
+            .service_state
+            .insert(service_key.to_string(), new_states);
         Ok(())
     }
 
     /// Removes all eBPF map entries for a service (e.g. when it is deleted from K8s).
     pub async fn delete_service(&self, service_key: &str, vip: Ipv4Addr) {
         let mut inner = self.inner.lock().await;
-        let Some(states) = inner.service_state.remove(service_key) else { return };
+        let Some(states) = inner.service_state.remove(service_key) else {
+            return;
+        };
 
         for (port, proto, state) in states {
-            if let Err(e) = self.writer.delete_frontend(vip, port, proto, state.backend_ids.len()) {
-                warn!(service = service_key, port, "delete frontend on svc delete: {e}");
+            if let Err(e) = self
+                .writer
+                .delete_frontend(vip, port, proto, state.backend_ids.len())
+            {
+                warn!(
+                    service = service_key,
+                    port, "delete frontend on svc delete: {e}"
+                );
+            }
+            // Delete reverse NAT entry.
+            if let Err(e) = self.writer.delete_revnat(state.svc_id) {
+                warn!(
+                    service = service_key,
+                    svc_id = state.svc_id,
+                    "delete revnat on svc delete: {e}"
+                );
             }
             for id in state.backend_ids {
                 if inner.dec_backend_ref(id) {
@@ -486,7 +593,9 @@ impl LbReconciler {
 
     /// Returns true if the eBPF maps are accessible (eBPF programs loaded).
     pub fn maps_available(&self) -> bool {
-        self.writer.svc_path().exists() && self.writer.backend_path().exists()
+        self.writer.svc_path().exists()
+            && self.writer.backend_path().exists()
+            && self.writer.revnat_path().exists()
     }
 }
 
@@ -511,11 +620,19 @@ mod tests {
     }
 
     fn tcp_backend(ip: [u8; 4], port: u16) -> BackendInfo {
-        BackendInfo { ip: Ipv4Addr::from(ip), port, proto: 6 }
+        BackendInfo {
+            ip: Ipv4Addr::from(ip),
+            port,
+            proto: 6,
+        }
     }
 
     fn tcp_frontend(port: u16) -> FrontendPort {
-        FrontendPort { port, proto: 6, target_port: port }
+        FrontendPort {
+            port,
+            proto: 6,
+            target_port: port,
+        }
     }
 
     #[tokio::test]
@@ -525,8 +642,12 @@ mod tests {
         let b = vec![tcp_backend([10, 0, 0, 1], 53)];
         let fe = vec![tcp_frontend(53)];
 
-        r.reconcile("kube-system/kube-dns", vip, &fe, &b).await.unwrap();
-        r.reconcile("kube-system/kube-dns", vip, &fe, &b).await.unwrap();
+        r.reconcile("kube-system/kube-dns", vip, &fe, &b)
+            .await
+            .unwrap();
+        r.reconcile("kube-system/kube-dns", vip, &fe, &b)
+            .await
+            .unwrap();
 
         let inner = r.inner.lock().await;
         // Same backend should map to the same ID on second reconcile.
@@ -540,7 +661,9 @@ mod tests {
         let b = vec![tcp_backend([10, 0, 0, 1], 53)];
         let fe = vec![tcp_frontend(53), tcp_frontend(9153)];
 
-        r.reconcile("kube-system/kube-dns", vip, &fe, &b).await.unwrap();
+        r.reconcile("kube-system/kube-dns", vip, &fe, &b)
+            .await
+            .unwrap();
 
         let inner = r.inner.lock().await;
         let states = inner.service_state.get("kube-system/kube-dns").unwrap();
@@ -581,7 +704,9 @@ mod tests {
         let b = vec![tcp_backend([10, 0, 0, 1], 53)];
         let fe = vec![tcp_frontend(53)];
 
-        r.reconcile("kube-system/kube-dns", vip, &fe, &b).await.unwrap();
+        r.reconcile("kube-system/kube-dns", vip, &fe, &b)
+            .await
+            .unwrap();
         r.delete_service("kube-system/kube-dns", vip).await;
 
         let inner = r.inner.lock().await;
@@ -595,10 +720,16 @@ mod tests {
         let b = vec![tcp_backend([10, 0, 0, 1], 53)];
         let fe = vec![tcp_frontend(53)];
 
-        r.reconcile("kube-system/kube-dns", vip, &fe, &b).await.unwrap();
+        r.reconcile("kube-system/kube-dns", vip, &fe, &b)
+            .await
+            .unwrap();
         let backend_id = {
             let inner = r.inner.lock().await;
-            inner.backend_ids[&BackendIdentity { ip: b[0].ip, port: 53, proto: 6 }]
+            inner.backend_ids[&BackendIdentity {
+                ip: b[0].ip,
+                port: 53,
+                proto: 6,
+            }]
         };
 
         r.delete_service("kube-system/kube-dns", vip).await;
@@ -623,7 +754,14 @@ mod tests {
         // Deleting svc1 should NOT delete the backend (still used by svc2).
         r.delete_service("ns/svc1", vip1).await;
         let inner = r.inner.lock().await;
-        let id = inner.backend_ids.get(&BackendIdentity { ip: b[0].ip, port: 8080, proto: 6 });
-        assert!(id.is_some(), "backend should still exist after first delete");
+        let id = inner.backend_ids.get(&BackendIdentity {
+            ip: b[0].ip,
+            port: 8080,
+            proto: 6,
+        });
+        assert!(
+            id.is_some(),
+            "backend should still exist after first delete"
+        );
     }
 }

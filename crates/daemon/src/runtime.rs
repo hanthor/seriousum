@@ -4,6 +4,7 @@ use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::Arc;
+use std::sync::Mutex;
 use std::sync::atomic::{AtomicU32, Ordering};
 
 use ipnet::Ipv4Net;
@@ -18,10 +19,10 @@ use tokio::signal;
 use tokio::signal::unix::{SignalKind, signal as unix_signal};
 use tokio::sync::RwLock;
 use tokio_util::sync::CancellationToken;
-use tracing::{error, info, warn};
+use tracing::{debug, error, info, warn};
 
 use crate::health::{SharedHealth, new_health, serve, set_ready, set_stopping};
-use crate::loadbalancer::{reconcile_service, BackendSyncer};
+use crate::loadbalancer::{BackendSyncer, PendingReconcile, reconcile_service};
 use crate::{DaemonConfig, DaemonPhase, DaemonStatus};
 
 const CILIUM_SOCK_FILE: &str = "cilium.sock";
@@ -82,7 +83,7 @@ struct CompatBackend {
     port_name: Option<String>,
 }
 
-#[derive(Debug, Default)]
+#[derive(Debug)]
 struct CompatState {
     node_name: String,
     next_endpoint_id: i64,
@@ -91,6 +92,7 @@ struct CompatState {
     services: HashMap<String, CompatService>,
     service_backends: HashMap<String, Vec<CompatBackend>>,
     backend_syncer: BackendSyncer,
+    pending_reconciles: Arc<Mutex<Vec<PendingReconcile>>>,
 }
 
 impl CompatState {
@@ -103,6 +105,7 @@ impl CompatState {
             services: HashMap::new(),
             service_backends: HashMap::new(),
             backend_syncer: BackendSyncer::default_path(),
+            pending_reconciles: Arc::new(Mutex::new(Vec::new())),
         }
     }
 
@@ -138,21 +141,37 @@ impl CompatState {
             .unwrap_or("default");
         let key = format!("{namespace}/{name}");
         let Some(spec) = pod.spec.as_ref() else {
+            debug!(pod = %name, namespace, "pod has no spec");
             self.endpoints.remove(&key);
             return;
         };
-        if spec.host_network.unwrap_or(false) || spec.node_name.as_deref() != Some(local_node_name)
-        {
+        let pod_node = spec.node_name.as_deref();
+        if spec.host_network.unwrap_or(false) {
+            debug!(pod = %name, namespace, "pod uses host network");
+            self.endpoints.remove(&key);
+            return;
+        }
+        if pod_node != Some(local_node_name) {
+            debug!(pod = %name, namespace, pod_node, local_node_name, "pod on different node");
             self.endpoints.remove(&key);
             return;
         }
 
-        let pod_ip = pod
+        let pod_ip_str = pod
             .status
             .as_ref()
-            .and_then(|status| status.pod_ip.as_deref())
-            .and_then(|ip| ip.parse::<Ipv4Addr>().ok());
+            .and_then(|status| status.pod_ip.as_deref());
+        let pod_ip = pod_ip_str
+            .and_then(|ip| ip.parse::<IpAddr>().ok())
+            .and_then(|ip| {
+                if let IpAddr::V4(v4) = ip {
+                    Some(v4)
+                } else {
+                    None
+                }
+            });
         let Some(pod_ip) = pod_ip else {
+            debug!(pod = %name, namespace, pod_ip = ?pod_ip_str, "no valid pod IP");
             self.endpoints.remove(&key);
             return;
         };
@@ -169,6 +188,7 @@ impl CompatState {
             .get(&key)
             .map(|endpoint| endpoint.id)
             .unwrap_or_else(|| self.allocate_endpoint_id());
+        info!(pod = %name, namespace, pod_ip = %pod_ip, endpoint_id = id, "upserted endpoint");
         self.endpoints.insert(
             key,
             CompatEndpoint {
@@ -218,7 +238,7 @@ impl CompatState {
             .get(&key)
             .map(|service| service.id)
             .unwrap_or_else(|| self.allocate_service_id());
-        let ports = spec
+        let ports: Vec<CompatServicePort> = spec
             .ports
             .as_deref()
             .unwrap_or(&[])
@@ -237,19 +257,48 @@ impl CompatState {
         let backends = self.service_backends.get(&key).cloned().unwrap_or_default();
 
         self.services.insert(
-            key,
+            key.clone(),
             CompatService {
                 id,
                 namespace: namespace.to_string(),
                 name: name.to_string(),
                 cluster_ip: Some(cluster_ip),
-                ports,
-                backends,
+                ports: ports.clone(),
+                backends: backends.clone(),
                 service_type: spec
                     .type_
                     .clone()
                     .unwrap_or_else(|| "ClusterIP".to_string()),
             },
+        );
+
+        // Trigger eBPF reconciliation (idempotent — handles the case where nothing changed).
+        let cluster_ip_v4 = if let IpAddr::V4(v4) = cluster_ip {
+            Some(v4)
+        } else {
+            None
+        };
+        let frontends: Vec<(u16, u8)> = ports
+            .iter()
+            .map(|p| (p.port, protocol_to_u8(&p.protocol)))
+            .collect();
+        let be_tuples: Vec<(Ipv4Addr, u16, u8)> = backends
+            .iter()
+            .filter_map(|b| {
+                if let IpAddr::V4(v4) = b.ip {
+                    Some((v4, b.port, protocol_to_u8(&b.protocol)))
+                } else {
+                    None
+                }
+            })
+            .collect();
+        reconcile_service(
+            &self.backend_syncer,
+            &key,
+            cluster_ip_v4,
+            frontends,
+            be_tuples,
+            self.pending_reconciles.clone(),
         );
     }
 
@@ -312,22 +361,49 @@ impl CompatState {
 
         self.service_backends.insert(key.clone(), backends.clone());
         if let Some(service) = self.services.get_mut(&key) {
-            service.backends = backends.clone();
+            service.backends.clone_from(&backends);
         }
 
         // Reconcile into eBPF LB maps (IPv4 only — eBPF lb4 maps don't handle IPv6).
-        let cluster_ip = self.services.get(&key).and_then(|s| s.cluster_ip)
-            .and_then(|ip| if let IpAddr::V4(v4) = ip { Some(v4) } else { None });
+        let cluster_ip = self
+            .services
+            .get(&key)
+            .and_then(|s| s.cluster_ip)
+            .and_then(|ip| {
+                if let IpAddr::V4(v4) = ip {
+                    Some(v4)
+                } else {
+                    None
+                }
+            });
         let frontends: Vec<(u16, u8)> = self
             .services
             .get(&key)
-            .map(|s| s.ports.iter().map(|p| (p.port, protocol_to_u8(&p.protocol))).collect())
+            .map(|s| {
+                s.ports
+                    .iter()
+                    .map(|p| (p.port, protocol_to_u8(&p.protocol)))
+                    .collect()
+            })
             .unwrap_or_default();
         let be_tuples: Vec<(Ipv4Addr, u16, u8)> = backends
             .iter()
-            .filter_map(|b| if let IpAddr::V4(v4) = b.ip { Some((v4, b.port, protocol_to_u8(&b.protocol))) } else { None })
+            .filter_map(|b| {
+                if let IpAddr::V4(v4) = b.ip {
+                    Some((v4, b.port, protocol_to_u8(&b.protocol)))
+                } else {
+                    None
+                }
+            })
             .collect();
-        reconcile_service(&self.backend_syncer, &key, cluster_ip, frontends, be_tuples);
+        reconcile_service(
+            &self.backend_syncer,
+            &key,
+            cluster_ip,
+            frontends,
+            be_tuples,
+            self.pending_reconciles.clone(),
+        );
     }
 
     fn upsert_endpoints(&mut self, endpoints: &K8sEndpoints) {
@@ -385,22 +461,125 @@ impl CompatState {
 
         self.service_backends.insert(key.clone(), backends.clone());
         if let Some(service) = self.services.get_mut(&key) {
-            service.backends = backends.clone();
+            service.backends.clone_from(&backends);
         }
 
         // Reconcile into eBPF LB maps (IPv4 only — eBPF lb4 maps don't handle IPv6).
-        let cluster_ip = self.services.get(&key).and_then(|s| s.cluster_ip)
-            .and_then(|ip| if let IpAddr::V4(v4) = ip { Some(v4) } else { None });
+        let cluster_ip = self
+            .services
+            .get(&key)
+            .and_then(|s| s.cluster_ip)
+            .and_then(|ip| {
+                if let IpAddr::V4(v4) = ip {
+                    Some(v4)
+                } else {
+                    None
+                }
+            });
         let frontends: Vec<(u16, u8)> = self
             .services
             .get(&key)
-            .map(|s| s.ports.iter().map(|p| (p.port, protocol_to_u8(&p.protocol))).collect())
+            .map(|s| {
+                s.ports
+                    .iter()
+                    .map(|p| (p.port, protocol_to_u8(&p.protocol)))
+                    .collect()
+            })
             .unwrap_or_default();
         let be_tuples: Vec<(Ipv4Addr, u16, u8)> = backends
             .iter()
-            .filter_map(|b| if let IpAddr::V4(v4) = b.ip { Some((v4, b.port, protocol_to_u8(&b.protocol))) } else { None })
+            .filter_map(|b| {
+                if let IpAddr::V4(v4) = b.ip {
+                    Some((v4, b.port, protocol_to_u8(&b.protocol)))
+                } else {
+                    None
+                }
+            })
             .collect();
-        reconcile_service(&self.backend_syncer, &key, cluster_ip, frontends, be_tuples);
+        reconcile_service(
+            &self.backend_syncer,
+            &key,
+            cluster_ip,
+            frontends,
+            be_tuples,
+            self.pending_reconciles.clone(),
+        );
+    }
+
+    fn delete_service(&mut self, service_key: &str) {
+        // Extract cluster IP and frontends before removing service
+        let cluster_ip = self
+            .services
+            .get(service_key)
+            .and_then(|s| s.cluster_ip)
+            .and_then(|ip| {
+                if let IpAddr::V4(v4) = ip {
+                    Some(v4)
+                } else {
+                    None
+                }
+            });
+
+        // Remove from in-memory state
+        self.services.remove(service_key);
+        self.service_backends.remove(service_key);
+
+        // Trigger eBPF reconciliation for cleanup
+        if let Some(vip) = cluster_ip {
+            let reconciler = self.backend_syncer.clone();
+            let service_key = service_key.to_string();
+            tokio::spawn(async move {
+                reconciler.delete_service(&service_key, vip).await;
+            });
+        }
+    }
+
+    fn delete_endpoint_slice(&mut self, service_key: &str) {
+        // Remove from in-memory state
+        self.service_backends.remove(service_key);
+
+        // Reconcile to clear the service if backends are now empty
+        if let Some(service) = self.services.get(service_key)
+            && let Some(IpAddr::V4(vip)) = service.cluster_ip
+        {
+            let frontends: Vec<(u16, u8)> = service
+                .ports
+                .iter()
+                .map(|p| (p.port, protocol_to_u8(&p.protocol)))
+                .collect();
+            reconcile_service(
+                &self.backend_syncer,
+                service_key,
+                Some(vip),
+                frontends,
+                vec![],
+                self.pending_reconciles.clone(),
+            );
+        }
+    }
+
+    fn delete_endpoints(&mut self, service_key: &str) {
+        // Remove from in-memory state
+        self.service_backends.remove(service_key);
+
+        // Reconcile to clear the service if backends are now empty
+        if let Some(service) = self.services.get(service_key)
+            && let Some(IpAddr::V4(vip)) = service.cluster_ip
+        {
+            let frontends: Vec<(u16, u8)> = service
+                .ports
+                .iter()
+                .map(|p| (p.port, protocol_to_u8(&p.protocol)))
+                .collect();
+            reconcile_service(
+                &self.backend_syncer,
+                service_key,
+                Some(vip),
+                frontends,
+                vec![],
+                self.pending_reconciles.clone(),
+            );
+        }
     }
 
     fn allocate_endpoint_id(&mut self) -> i64 {
@@ -413,6 +592,37 @@ impl CompatState {
         let id = self.next_service_id;
         self.next_service_id = self.next_service_id.saturating_add(1);
         id
+    }
+
+    /// Drains and reconciles all pending services that were queued while eBPF maps were unavailable.
+    fn drain_pending_reconciles(&mut self) {
+        let pending = self
+            .pending_reconciles
+            .lock()
+            .ok()
+            .and_then(|mut guard| {
+                if guard.is_empty() {
+                    None
+                } else {
+                    Some(guard.drain(..).collect::<Vec<_>>())
+                }
+            })
+            .unwrap_or_default();
+
+        for pending in pending {
+            reconcile_service(
+                &self.backend_syncer,
+                &pending.service_key,
+                pending.cluster_ip,
+                pending.frontends,
+                pending.backends,
+                self.pending_reconciles.clone(),
+            );
+            info!(
+                service = pending.service_key,
+                "reconciled pending service after datapath init"
+            );
+        }
     }
 }
 
@@ -640,15 +850,22 @@ impl DaemonRuntime {
                                             status.write().await.endpoint_count = endpoint_count;
                                             // Create CiliumEndpoint CR so integration tests can verify
                                             // endpoint identity via `kubectl get cep`.
-                                            if let Some((ns, name, Some(ip), id)) = ep_info {
+                                            if let Some((ns, name, Some(ip), id)) = &ep_info {
                                                 let w = Arc::clone(&watcher_for_events);
+                                                let ns = ns.clone();
+                                                let name = name.clone();
+                                                let ip_str = ip.to_string();
+                                                let endpoint_id = *id;
+                                                debug!(pod = %name, endpoint_id, "spawning CiliumEndpoint creation");
                                                 tokio::spawn(async move {
                                                     if let Err(e) = w.upsert_cilium_endpoint(
-                                                        &ns, &name, &ip.to_string(), id,
+                                                        &ns, &name, &ip_str, endpoint_id,
                                                     ).await {
                                                         warn!(pod = %name, error = %e, "failed to upsert CiliumEndpoint");
                                                     }
                                                 });
+                                            } else {
+                                                debug!("pod not in endpoints or missing IP after upsert");
                                             }
                                         }
                                         Ok(cilium_k8s::K8sEvent::NodeAdded(node) | cilium_k8s::K8sEvent::NodeUpdated(node)) => {
@@ -657,11 +874,20 @@ impl DaemonRuntime {
                                         Ok(cilium_k8s::K8sEvent::ServiceAdded(service) | cilium_k8s::K8sEvent::ServiceUpdated(service)) => {
                                             compat_state.write().await.upsert_service(&service);
                                         }
+                                        Ok(cilium_k8s::K8sEvent::ServiceDeleted(service_key)) => {
+                                            compat_state.write().await.delete_service(&service_key);
+                                        }
                                         Ok(cilium_k8s::K8sEvent::EndpointsAdded(endpoints) | cilium_k8s::K8sEvent::EndpointsUpdated(endpoints)) => {
                                             compat_state.write().await.upsert_endpoints(&endpoints);
                                         }
+                                        Ok(cilium_k8s::K8sEvent::EndpointsDeleted(service_key)) => {
+                                            compat_state.write().await.delete_endpoints(&service_key);
+                                        }
                                         Ok(cilium_k8s::K8sEvent::EndpointSliceAdded(endpoint_slice) | cilium_k8s::K8sEvent::EndpointSliceUpdated(endpoint_slice)) => {
                                             compat_state.write().await.upsert_endpoint_slice(&endpoint_slice);
+                                        }
+                                        Ok(cilium_k8s::K8sEvent::EndpointSliceDeleted(service_key)) => {
+                                            compat_state.write().await.delete_endpoint_slice(&service_key);
                                         }
                                         Ok(_) => {}
                                         Err(tokio::sync::broadcast::error::RecvError::Lagged(skipped)) => {
@@ -732,6 +958,9 @@ impl DaemonRuntime {
 
         if let Err(error) = initialise_datapath(&self.config) {
             warn!(error = %error, "datapath initialisation did not complete");
+        } else {
+            // Drain any pending reconciliations that were queued while eBPF maps were unavailable
+            self.compat_state.write().await.drain_pending_reconciles();
         }
 
         {
@@ -1267,7 +1496,10 @@ fn service_json_for_port(
     port: Option<&CompatServicePort>,
     service_id: i64,
 ) -> serde_json::Value {
-    let ip_str = service.cluster_ip.map(|ip| ip.to_string()).unwrap_or_default();
+    let ip_str = service
+        .cluster_ip
+        .map(|ip| ip.to_string())
+        .unwrap_or_default();
     let frontend = port
         .map(|port| {
             json!({
@@ -1375,7 +1607,11 @@ fn compat_target_port(target_port: Option<&IntOrString>) -> Option<CompatTargetP
 }
 
 fn protocol_name(protocol: &str) -> &'static str {
-    if protocol.eq_ignore_ascii_case("UDP") { "UDP" } else { "TCP" }
+    if protocol.eq_ignore_ascii_case("UDP") {
+        "UDP"
+    } else {
+        "TCP"
+    }
 }
 
 fn sync_remote_node_route(node: &Node, local_node_name: &str) {
@@ -1597,7 +1833,9 @@ mod tests {
         let (code, body) =
             compat_response("GET", "/v1/endpoint", &default_addressing, &compat_state);
         assert_eq!(code, 200);
-        assert_eq!(body, "[]");
+        // Expect synthetic host endpoint (id 65535 = 0xFFFF)
+        assert!(body.contains("\"id\":65535"));
+        assert!(body.contains("\"reserved:host\""));
 
         let (code, body) =
             compat_response("PUT", "/v1/endpoint/42", &default_addressing, &compat_state);
@@ -1619,8 +1857,8 @@ mod tests {
         assert_eq!(code, 404);
     }
 
-    #[test]
-    fn test_compat_state_tracks_local_pods_and_services() {
+    #[tokio::test]
+    async fn test_compat_state_tracks_local_pods_and_services() {
         let mut compat_state = CompatState::new("kind-control-plane".to_string());
         let pod = Pod {
             metadata: k8s_openapi::apimachinery::pkg::apis::meta::v1::ObjectMeta {
@@ -1704,13 +1942,13 @@ mod tests {
 
         let services = services_response(&compat_state);
         assert!(services.contains("\"10.96.0.10\""));
-        assert!(services.contains("\"udp\""));
+        assert!(services.contains("\"UDP\""));
         assert!(services.contains("\"10.244.0.53\""));
         assert!(services.contains("\"state\":\"active\""));
     }
 
-    #[test]
-    fn test_compat_state_tracks_service_backends_from_endpoints() {
+    #[tokio::test]
+    async fn test_compat_state_tracks_service_backends_from_endpoints() {
         let mut compat_state = CompatState::new("kind-control-plane".to_string());
         let service = Service {
             metadata: k8s_openapi::apimachinery::pkg::apis::meta::v1::ObjectMeta {

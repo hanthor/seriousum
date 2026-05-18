@@ -69,7 +69,10 @@ pub fn list_services() -> Result<Vec<Service>> {
                 id: ServiceId(id),
                 frontend: format!(
                     "{}/{}",
-                    join_host_port(&realized.frontend_address.ip, realized.frontend_address.port),
+                    join_host_port(
+                        &realized.frontend_address.ip,
+                        realized.frontend_address.port
+                    ),
                     realized.frontend_address.protocol
                 ),
                 service_type: realized.flags.service_type,
@@ -112,7 +115,10 @@ pub fn list_lb_json_raw() -> Result<String> {
         let realized = service.status.realized;
         let key = format!(
             "{}/{}",
-            join_host_port(&realized.frontend_address.ip, realized.frontend_address.port),
+            join_host_port(
+                &realized.frontend_address.ip,
+                realized.frontend_address.port
+            ),
             realized.frontend_address.protocol.to_ascii_uppercase()
         );
         let backends = if realized.backend_addresses.is_empty() {

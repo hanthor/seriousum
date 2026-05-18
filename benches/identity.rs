@@ -7,11 +7,11 @@
 
 use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
 use ipnet::IpNet;
+use seriousum_core::NumericIdentity;
 use seriousum_identity::{
     allocation::{LabelSet, LocalIdentityCache},
     ipcache::IPCache,
 };
-use seriousum_core::NumericIdentity;
 use std::collections::BTreeMap;
 use std::hint::black_box;
 use std::net::{IpAddr, Ipv4Addr};
@@ -81,7 +81,10 @@ fn bench_ipcache_upsert(c: &mut Criterion) {
             i += 1;
             let ip = Ipv4Addr::from(i.wrapping_add(0x0a000000));
             let prefix = IpNet::new(IpAddr::V4(ip), 32).unwrap();
-            cache.upsert(black_box(prefix), black_box(NumericIdentity::from(i % 65535 + 1)));
+            cache.upsert(
+                black_box(prefix),
+                black_box(NumericIdentity::from(i % 65535 + 1)),
+            );
         })
     });
 }
