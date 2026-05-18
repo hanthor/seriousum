@@ -21,11 +21,11 @@
 
 use std::collections::HashMap;
 use std::net::Ipv4Addr;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::Arc;
 use tokio::sync::Mutex;
-use tracing::{debug, error, info, warn};
+use tracing::{debug, info, warn};
 
 // ─── eBPF map constants ───────────────────────────────────────────────────────
 
@@ -55,6 +55,7 @@ pub struct Lb4Key {
 }
 
 // Safety: Lb4Key is #[repr(C)], Copy, contains only primitive types.
+#[allow(unsafe_code)]
 unsafe impl aya::Pod for Lb4Key {}
 
 impl Lb4Key {
@@ -91,6 +92,7 @@ pub struct Lb4Service {
 }
 
 // Safety: Lb4Service is #[repr(C)], Copy, contains only primitive types.
+#[allow(unsafe_code)]
 unsafe impl aya::Pod for Lb4Service {}
 
 // ─── Struct layout matching Cilium's lb4_backend (v3, 12 bytes) ───────────────
@@ -117,6 +119,7 @@ pub struct Lb4Backend {
 }
 
 // Safety: Lb4Backend is #[repr(C)], Copy, contains only primitive types.
+#[allow(unsafe_code)]
 unsafe impl aya::Pod for Lb4Backend {}
 
 impl Lb4Backend {
@@ -142,6 +145,7 @@ impl Lb4Backend {
 pub struct RevNat4Key {
     pub key: u16,  // ServiceID in network byte order
 }
+#[allow(unsafe_code)]
 unsafe impl aya::Pod for RevNat4Key {}
 
 /// Value for `cilium_lb4_reverse_nat` — frontend VIP + port for return traffic rewriting.
@@ -153,6 +157,7 @@ pub struct RevNat4Value {
     pub port: u16,          // frontend port in network byte order
     pub pad: [u8; 2],
 }
+#[allow(unsafe_code)]
 unsafe impl aya::Pod for RevNat4Value {}
 
 // ─── Backend identity (for ID allocation) ─────────────────────────────────────
