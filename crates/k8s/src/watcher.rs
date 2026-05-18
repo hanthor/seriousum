@@ -141,14 +141,20 @@ impl K8sWatcher {
             }
         })) {
             Ok(v) => v,
-            Err(e) => { warn!("CRD body build failed: {e}"); return; }
+            Err(e) => {
+                warn!("CRD body build failed: {e}");
+                return;
+            }
         };
 
-        match crd_api.patch(
-            "ciliumendpoints.cilium.io",
-            &PatchParams::apply("seriousum-agent").force(),
-            &Patch::Apply(crd_body),
-        ).await {
+        match crd_api
+            .patch(
+                "ciliumendpoints.cilium.io",
+                &PatchParams::apply("seriousum-agent").force(),
+                &Patch::Apply(crd_body),
+            )
+            .await
+        {
             Ok(_) => info!("CiliumEndpoint CRD ensured"),
             Err(e) => warn!("CiliumEndpoint CRD ensure failed: {e}"),
         }
@@ -440,7 +446,12 @@ impl K8sWatcher {
         use kube::api::{DynamicObject, Patch, PatchParams};
         use kube::core::ApiResource;
 
-        info!(pod = pod_name, namespace, ip = pod_ip, "creating CiliumEndpoint");
+        info!(
+            pod = pod_name,
+            namespace,
+            ip = pod_ip,
+            "creating CiliumEndpoint"
+        );
 
         let ar = ApiResource {
             group: "cilium.io".to_string(),
@@ -474,11 +485,14 @@ impl K8sWatcher {
         // Retry up to 10 times with 1-second backoff in case the CRD hasn't propagated yet.
         let mut last_err = None;
         for attempt in 0..10u32 {
-            match api.patch(
-                pod_name,
-                &PatchParams::apply("seriousum-agent").force(),
-                &Patch::Apply(body.clone()),
-            ).await {
+            match api
+                .patch(
+                    pod_name,
+                    &PatchParams::apply("seriousum-agent").force(),
+                    &Patch::Apply(body.clone()),
+                )
+                .await
+            {
                 Ok(_) => {
                     info!(pod = pod_name, namespace, "CiliumEndpoint created");
                     return Ok(());
