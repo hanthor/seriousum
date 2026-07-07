@@ -299,7 +299,7 @@ PY
 info "Building Seriousum release binaries..."
 cd "$REPO_ROOT"
 cargo build --release --locked -q
-SERIOUSUM_BIN_KB=$(( $(stat -c%s target/release/seriousum-daemon) / 1024 ))
+SERIOUSUM_BIN_KB=$(( $(stat -c%s target/release/cilium-daemon) / 1024 ))
 CILIUM_BIN_KB="$(extract_upstream_binary_size_kb)"
 success "Binary sizes: seriousum-agent=${SERIOUSUM_BIN_KB} KB upstream-cilium-agent=${CILIUM_BIN_KB} KB"
 
